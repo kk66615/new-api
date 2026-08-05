@@ -38,9 +38,11 @@ jobs:
       - name: Compute tag
         id: meta
         run: |
-          BASE=$(cat VERSION 2>/dev/null || echo "unknown")
+          BASE=$(tr -d ' \n\r\t' < VERSION 2>/dev/null || true)
+          if [ -z "$BASE" ]; then BASE="v1.0.0-rc.23"; fi
           echo "tag=${BASE}-patched" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "解析出的版本: ${BASE}-patched"
 
       - name: Build and push (linux/arm64)
         uses: docker/build-push-action@v6
