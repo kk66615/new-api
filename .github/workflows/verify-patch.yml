@@ -1,0 +1,58 @@
+name: Verify Patch Build
+
+on:
+  push:
+    branches:
+      - 'patch/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Go version from go.mod
+        id: goversion
+        run: echo "version=$(grep '^go ' go.mod | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.goversion.outputs.version }}
+          cache: true
+
+      - name: Create placeholder web assets
+        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+
+      - name: go vet (patched packages)
+        run: go vet ./service/... ./controller/... ./relay/...
+
+      - name: Build binary
+        run: |
+          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=patch-verify'" -o /tmp/new-api
+          ls -lh /tmp/new-api
+
+      - name: Run tests for touched areas
+        run: go test ./service/... ./relay/common/... ./controller/... 2>&1 | tail -40
+
+  crossbuild-arm64:
+    name: Cross-compile linux/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: goversion
+        run: echo "version=$(grep '^go ' go.mod | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.goversion.outputs.version }}
+          cache: true
+      - run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - name: Build for ARM64 (target server arch)
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          go build -ldflags "-s -w" -o /tmp/new-api-arm64
+          file /tmp/new-api-arm64 || ls -lh /tmp/new-api-arm64
