@@ -21,7 +21,19 @@ import * as React from 'react'
 const MOBILE_BREAKPOINT = 768
 
 export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
+  // Resolve the real viewport width during the very first render.
+  //
+  // The previous implementation initialised the state to `undefined` and only
+  // filled it in from an effect, so the first render always reported "desktop"
+  // even on phones. Consumers that branch on this value (SidebarProvider's
+  // toggleSidebar, Sidebar's mobile Sheet vs. fixed rail) therefore mounted the
+  // desktop variant first and swapped afterwards, which made early taps on the
+  // sidebar toggle/menu items go to the desktop code path and appear to do
+  // nothing. Seeding the state lazily removes that first-render mismatch.
+  const [isMobile, setIsMobile] = React.useState<boolean>(
+    () =>
+      typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT
+  )
 
   React.useEffect(() => {
     const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
@@ -33,5 +45,5 @@ export function useIsMobile() {
     return () => mql.removeEventListener('change', onChange)
   }, [])
 
-  return !!isMobile
+  return isMobile
 }
