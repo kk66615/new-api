@@ -19,6 +19,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history + tags so the upstream release tag can be derived
+          # when VERSION is empty (upstream keeps it empty outside releases).
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -39,7 +43,11 @@ jobs:
         id: meta
         run: |
           BASE=$(tr -d ' \n\r\t' < VERSION 2>/dev/null || true)
-          if [ -z "$BASE" ]; then BASE="v1.0.0-rc.23"; fi
+          # VERSION is empty on non-release commits, so fall back to the newest
+          # upstream tag reachable from HEAD. That keeps the image tag tracking
+          # the merged upstream release without editing this file every time.
+          if [ -z "$BASE" ]; then BASE=$(git describe --tags --abbrev=0 2>/dev/null || true); fi
+          if [ -z "$BASE" ]; then BASE="v1.0.0"; fi
           echo "tag=${BASE}-patched" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "解析出的版本: ${BASE}-patched"
