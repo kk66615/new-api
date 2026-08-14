@@ -16,25 +16,57 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestResolveIncomingBillingExprRequestInput(t *testing.T) {
+func newBillingExprRequestContext(t *testing.T, body []byte) *gin.Context {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	ctx.Request.Header.Set("Content-Type", "application/json")
-
-	body := []byte(`{"service_tier":"fast"}`)
 	ctx.Request.Body = io.NopCloser(bytes.NewReader(body))
 	ctx.Set(common.KeyRequestBody, body)
+	return ctx
+}
+
+func TestResolveIncomingBillingExprRequestInput(t *testing.T) {
+	body := []byte(`{"service_tier":"fast"}`)
+	ctx := newBillingExprRequestContext(t, body)
 
 	info := &relaycommon.RelayInfo{
 		RequestHeaders: map[string]string{"Content-Type": "application/json"},
 	}
 
-	input, err := ResolveIncomingBillingExprRequestInput(ctx, info)
+	input, err := ResolveIncomingBillingExprRequestInput(ctx, info, `p * (param("service_tier") == "priority" ? 2 : 1)`)
 	require.NoError(t, err)
 	require.Equal(t, body, input.Body)
 	require.Equal(t, "application/json", input.Headers["Content-Type"])
+}
+
+// TestResolveIncomingBillingExprRequestInputSkipsBodyWithoutParam pins down why
+// the exprStr argument exists. The returned Body is retained on
+// info.BillingRequestInput until settlement, and for a disk-backed body
+// storage.Bytes() ReadFulls the whole payload into a fresh heap buffer, so
+// expressions that never call param() must not pay for that copy.
+func TestResolveIncomingBillingExprRequestInputSkipsBodyWithoutParam(t *testing.T) {
+	body := []byte(`{"service_tier":"fast"}`)
+
+	for name, exprStr := range map[string]string{
+		"tiered":       `len <= 200000 ? tier("standard", p * 1.25 + c * 10) : tier("long_context", p * 2.5 + c * 15)`,
+		"header only":  `p * (header("x-fast") == "1" ? 2 : 1)`,
+		"empty":        ``,
+		"uncompilable": `p * (`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{
+				RequestHeaders: map[string]string{"Content-Type": "application/json"},
+			}
+			input, err := ResolveIncomingBillingExprRequestInput(newBillingExprRequestContext(t, body), info, exprStr)
+			require.NoError(t, err)
+			require.Empty(t, input.Body)
+			// Headers stay unconditional: they are cheap and header() needs them.
+			require.Equal(t, "application/json", input.Headers["Content-Type"])
+		})
+	}
 }
 
 func TestBuildBillingExprRequestInputFromRequest(t *testing.T) {

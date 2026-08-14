@@ -10,7 +10,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo) (billingexpr.RequestInput, error) {
+// ResolveIncomingBillingExprRequestInput builds the request input for exprStr.
+// The returned Body is retained on info.BillingRequestInput until post-response
+// settlement, so it is only materialized when exprStr actually calls param():
+// for a disk-backed body, Bytes() ReadFulls the whole payload into a fresh heap
+// buffer that then stays pinned for the entire (possibly minutes-long) upstream
+// response. header() reads info.RequestHeaders and needs no body.
+func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo, exprStr string) (billingexpr.RequestInput, error) {
 	if info != nil && info.BillingRequestInput != nil {
 		input := cloneRequestInput(*info.BillingRequestInput)
 		merged := cloneStringMap(info.RequestHeaders)
@@ -24,6 +30,10 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 	input := billingexpr.RequestInput{}
 	if info != nil {
 		input.Headers = cloneStringMap(info.RequestHeaders)
+	}
+
+	if !billingexpr.UsedVars(exprStr)["param"] {
+		return input, nil
 	}
 
 	bodyBytes, err := readIncomingBillingExprBody(c)
