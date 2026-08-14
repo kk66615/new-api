@@ -34,7 +34,12 @@ jobs:
           ls -lh /tmp/new-api
 
       - name: Run tests for touched areas
-        run: go test ./service/... ./relay/common/... ./controller/... 2>&1 | tail -40
+        # `| tail` swallows the exit status, so a failing test used to pass the
+        # job silently. Keep the truncated output but propagate the real result.
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./service/... ./relay/... ./controller/... ./pkg/billingexpr/... 2>&1 | tail -40
 
   crossbuild-arm64:
     name: Cross-compile linux/arm64
