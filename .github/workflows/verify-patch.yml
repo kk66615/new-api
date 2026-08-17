@@ -3,7 +3,11 @@ name: Verify Patch Build
 on:
   push:
     branches:
+      # patch/** are the branches that ship: build-image.yml also fires on them
+      # and publishes to GHCR. verify/** exists for candidate patches that must
+      # be compiled and tested without producing an image.
       - 'patch/**'
+      - 'verify/**'
   workflow_dispatch:
 
 jobs:
@@ -26,7 +30,7 @@ jobs:
         run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
 
       - name: go vet (patched packages)
-        run: go vet ./service/... ./controller/... ./relay/...
+        run: go vet ./service/... ./controller/... ./relay/... ./relaykit/... ./setting/...
 
       - name: Build binary
         run: |
@@ -39,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test ./service/... ./relay/... ./controller/... ./pkg/billingexpr/... 2>&1 | tail -40
+          go test ./service/... ./relay/... ./controller/... ./pkg/billingexpr/... ./relaykit/... ./setting/... 2>&1 | tail -40
 
   crossbuild-arm64:
     name: Cross-compile linux/arm64
