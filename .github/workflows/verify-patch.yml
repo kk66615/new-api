@@ -30,7 +30,14 @@ jobs:
         run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
 
       - name: go vet (patched packages)
-        run: go vet ./service/... ./controller/... ./relay/... ./relaykit/... ./setting/...
+        run: go vet ./service/... ./controller/... ./relay/... ./setting/...
+
+      # relaykit is a separate Go module (relaykit/go.mod, pulled in via a
+      # replace directive), so ./relaykit/... is not a valid pattern from the
+      # main module and has to be vetted/tested from inside its own directory.
+      - name: go vet (relaykit submodule)
+        working-directory: relaykit
+        run: go vet ./...
 
       - name: Build binary
         run: |
@@ -43,7 +50,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test ./service/... ./relay/... ./controller/... ./pkg/billingexpr/... ./relaykit/... ./setting/... 2>&1 | tail -40
+          go test ./service/... ./relay/... ./controller/... ./pkg/billingexpr/... ./setting/... 2>&1 | tail -40
+
+      - name: Run relaykit submodule tests
+        working-directory: relaykit
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tail -60
 
   crossbuild-arm64:
     name: Cross-compile linux/arm64
