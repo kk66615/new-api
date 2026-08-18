@@ -84,5 +84,10 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # Bun 的 node:test 兼容层有跨文件的全局状态：多个测试文件在同一进程里并发时，
+      # 前一个文件的异步用例尚未结束，后一个文件的顶层 describe() 会被误判为嵌套在
+      # test() 内部并抛出 NotImplementedError（oven-sh/bun#5090）。该文件的用例因此
+      # 一个都不会注册——CI 只显示几条报错，实际是整份文件被静默跳过。
+      # 在迁移到 vitest 之前，逐文件各起一个进程来规避串扰。
       - name: Test
-        run: bun test
+        run: bash scripts/run-tests-per-file.sh

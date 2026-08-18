@@ -815,8 +815,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Reject reason (admin only) */}
-        {props.isAdmin && other?.reject_reason && (
+        {/* Reject reason —— 对普通用户同样可见。后端 formatUserLogs 只剥离
+            admin_info / audit_info，reject_reason 本就随接口返回给用户；内容是上游
+            的标准枚举（gemini_block_reason / claude_stop_reason /
+            openai_finish_reason），不含提示词原文或渠道信息。让客户自己看得到空输出
+            是被内容审核拦截，而不是来问为什么没返回。 */}
+        {other?.reject_reason && (
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
             label={t('Reject Reason')}
