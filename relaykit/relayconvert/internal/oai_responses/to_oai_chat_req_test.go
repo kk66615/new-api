@@ -459,7 +459,7 @@ func TestResponsesRequestToChatCompletionsRequestPreservesPenalties(t *testing.T
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+			got, err := ResponsesRequestToChatCompletionsRequest(nil, &dto.OpenAIResponsesRequest{
 				Model:            "gpt-test",
 				Input:            mustRawMessage(t, "hello"),
 				FrequencyPenalty: tt.frequencyRaw,
@@ -474,7 +474,7 @@ func TestResponsesRequestToChatCompletionsRequestPreservesPenalties(t *testing.T
 }
 
 func TestResponsesRequestToChatCompletionsRequestRejectsMalformedPenalty(t *testing.T) {
-	_, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+	_, err := ResponsesRequestToChatCompletionsRequest(nil, &dto.OpenAIResponsesRequest{
 		Model:            "gpt-test",
 		Input:            mustRawMessage(t, "hello"),
 		FrequencyPenalty: json.RawMessage(`"not-a-number"`),
