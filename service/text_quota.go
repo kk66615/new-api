@@ -262,6 +262,21 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 				TotalTokens:      relayInfo.GetEstimatePromptTokens(),
 			}
 		}
+	} else if relayInfo.IsStream && usage.CompletionTokens == 0 &&
+		!relayInfo.StreamStatus.IsNormalEnd() {
+		// Upstream did return a usage object (so PromptTokens is a real,
+		// upstream-reported number rather than a local estimate), but the stream
+		// ended abnormally — client_gone / timeout / etc. — before a single
+		// completion token was produced. The user received nothing, so do not
+		// charge for the prompt either.
+		//
+		// SendResponseCount is deliberately NOT part of this condition: it is
+		// never incremented by the native Claude adaptor (always 0 there), so
+		// relying on it would be meaningless for type=14 channels. The
+		// upstream-reported CompletionTokens == 0 is a stronger and channel-
+		// agnostic signal — a normally-answering Claude stream reports a
+		// non-zero CompletionTokens and therefore never enters this branch.
+		usage = &dto.Usage{}
 	}
 
 	summary.PromptTokens = usage.PromptTokens
