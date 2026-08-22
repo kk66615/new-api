@@ -12,7 +12,7 @@ env:
 
 jobs:
   build:
-    name: Build and push arm64 image
+    name: Build and push multi-arch image
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,6 +24,7 @@ jobs:
           # when VERSION is empty (upstream keeps it empty outside releases).
           fetch-depth: 0
 
+      # amd64 是 runner 原生架构，只需为 arm64 装模拟层。
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -52,11 +53,11 @@ jobs:
           echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "解析出的版本: ${BASE}-patched"
 
-      - name: Build and push (linux/arm64)
+      - name: Build and push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
           tags: |
