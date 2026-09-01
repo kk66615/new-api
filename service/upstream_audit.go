@@ -28,9 +28,37 @@ func canonicalGrokRuntimeModel(m string) string {
 	}
 }
 
+// snapshotAliasMatch accepts the vendor alias↔snapshot pattern: one name
+// extends the other by "-<date>" (gpt-5 vs gpt-5-2025-08-07, x vs x-0731) or
+// by "-latest". Deliberately NOT a general prefix match — an arbitrary suffix
+// (deepseek-v4 vs deepseek-v4-flash) is a different model and must still flag.
+func snapshotAliasMatch(a, b string) bool {
+	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if !strings.HasPrefix(b, a+"-") {
+		return false
+	}
+	suffix := b[len(a)+1:]
+	if suffix == "latest" {
+		return true
+	}
+	digits := strings.ReplaceAll(suffix, "-", "")
+	if len(digits) < 4 || len(digits) > 8 {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // UpstreamModelsMatchForAudit reports whether the upstream-declared model is
 // consistent with the model we sent. Case-insensitive; known vendor runtime
-// aliases are canonicalized before comparing.
+// aliases and alias↔snapshot date suffixes are canonicalized before comparing.
 func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 	sentModel = strings.TrimSpace(sentModel)
 	responseModel = strings.TrimSpace(responseModel)
@@ -41,6 +69,9 @@ func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 		return true
 	}
 	if g := canonicalGrokRuntimeModel(sentModel); g != "" && g == canonicalGrokRuntimeModel(responseModel) {
+		return true
+	}
+	if snapshotAliasMatch(sentModel, responseModel) {
 		return true
 	}
 	return false
