@@ -11,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+
+	"github.com/gin-gonic/gin"
 )
 
 // ── upstream response model auditing ─────────────────────────────────────────
@@ -228,51 +230,41 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string)
 
 // ── per-channel source flip tracking ─────────────────────────────────────────
 // A channel whose inferred source flips (az → gpt_relay → az ...) is a strong
-// adulteration / backend-swap signal. Every known→known flip is recorded as
-// evidence (kind=provider_switch); the same directional pair on the same
-// channel is written at most once per 5 minutes to survive round-robin
-// backends without flooding the table. State is in-memory: after a restart
-// the first request re-seeds silently (no false alarm).
+// adulteration / backend-swap signal. EVERY known→known flip is recorded as
+// evidence (kind=provider_switch) — no rate limiting, per user decision
+// 2026-09-02: evidence completeness beats table size. Push-side dedup in the
+// watchdog keeps notifications sane. State is in-memory: after a restart the
+// first request re-seeds silently (no false alarm).
 
 type channelSrcState struct {
-	mu     sync.Mutex
-	last   string
-	pairAt map[string]time.Time
+	mu   sync.Mutex
+	last string
 }
 
 var srcTracker sync.Map // channelId(int) -> *channelSrcState
 
-func trackSourceFlip(channelId int, src string) (from string, flipped bool, record bool) {
+func trackSourceFlip(channelId int, src string) (from string, flipped bool) {
 	if channelId == 0 || src == "" || src == "unknown" {
-		return "", false, false
+		return "", false
 	}
-	v, _ := srcTracker.LoadOrStore(channelId, &channelSrcState{pairAt: make(map[string]time.Time)})
+	v, _ := srcTracker.LoadOrStore(channelId, &channelSrcState{})
 	st := v.(*channelSrcState)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	prev := st.last
 	st.last = src
 	if prev == "" || prev == src {
-		return "", false, false
+		return "", false
 	}
-	pair := prev + "->" + src
-	now := time.Now()
-	if t, ok := st.pairAt[pair]; ok && now.Sub(t) < 5*time.Minute {
-		return prev, true, false // flip observed but rate-limited for evidence
-	}
-	st.pairAt[pair] = now
-	// prune stale pairs
-	for k, t := range st.pairAt {
-		if now.Sub(t) > 30*time.Minute {
-			delete(st.pairAt, k)
-		}
-	}
-	return prev, true, true
+	return prev, true
 }
 
 // appendUpstreamResponseAudit adds the ursp block to other.admin_info and
-// persists forensic evidence asynchronously on model mismatch or source flip.
-func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map[string]interface{}) {
+// persists forensic evidence asynchronously. EVERY observed response is
+// persisted (kind=normal for clean ones — user decision 2026-09-02, full
+// retention for evidence completeness; normal rows are pruned after
+// model.NormalEvidenceRetentionDays, anomalies are kept forever).
+func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, adminInfo map[string]interface{}) {
 	if relayInfo == nil || adminInfo == nil {
 		return
 	}
@@ -310,21 +302,26 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 	}
 	adminInfo["ursp"] = ursp
 
-	from, flipped, recordFlip := trackSourceFlip(channelId, src)
+	from, flipped := trackSourceFlip(channelId, src)
 	if flipped {
 		ursp["src_flip"] = from + "->" + src
 	}
 
-	if !mismatch && !recordFlip {
-		return
-	}
-
-	kind, note := "model_mismatch", ""
-	if recordFlip && !mismatch {
+	kind, note := "normal", ""
+	switch {
+	case flipped && !mismatch:
 		kind = "provider_switch"
 		note = from + " -> " + src
-	} else if recordFlip {
+	case mismatch && flipped:
+		kind = "model_mismatch"
 		note = "provider also flipped: " + from + " -> " + src
+	case mismatch:
+		kind = "model_mismatch"
+	}
+
+	requestId := ""
+	if ctx != nil {
+		requestId = ctx.GetString(common.RequestIdKey)
 	}
 
 	// evidence snapshot — copy everything needed before leaving the request scope
@@ -333,6 +330,7 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 		Kind:              kind,
 		Note:              note,
 		Source:            src,
+		RequestId:         requestId,
 		ChannelId:         channelId,
 		UserId:            relayInfo.UserId,
 		TokenId:           relayInfo.TokenId,
@@ -355,7 +353,7 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 		}()
 		if err := model.InsertUpstreamEvidence(ev); err != nil {
 			common.SysError("upstream evidence persist failed: " + err.Error())
-		} else {
+		} else if kind != "normal" { // normal rows are high-volume — no per-row logging
 			common.SysLog("[upstream-audit] " + kind + " recorded: sent=" + ev.SentModel +
 				" got=" + ev.ResponseModel + " src=" + src + " " + note)
 		}

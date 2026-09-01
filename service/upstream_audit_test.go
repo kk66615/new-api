@@ -76,30 +76,30 @@ func TestInferUpstreamSource(t *testing.T) {
 func TestTrackSourceFlip(t *testing.T) {
 	ch := 987654 // avoid clashing with other tests
 	// first observation seeds silently
-	if _, flipped, _ := trackSourceFlip(ch, "azure"); flipped {
+	if _, flipped := trackSourceFlip(ch, "azure"); flipped {
 		t.Error("first observation must not flip")
 	}
 	// same source: no flip
-	if _, flipped, _ := trackSourceFlip(ch, "azure"); flipped {
+	if _, flipped := trackSourceFlip(ch, "azure"); flipped {
 		t.Error("same source must not flip")
 	}
-	// flip azure -> gpt_relay: recorded
-	from, flipped, record := trackSourceFlip(ch, "gpt_relay")
-	if !flipped || !record || from != "azure" {
-		t.Errorf("expected recorded flip from azure, got from=%q flipped=%v record=%v", from, flipped, record)
+	// flip azure -> gpt_relay
+	from, flipped := trackSourceFlip(ch, "gpt_relay")
+	if !flipped || from != "azure" {
+		t.Errorf("expected flip from azure, got from=%q flipped=%v", from, flipped)
 	}
-	// flip back gpt_relay -> azure: different pair, also recorded
-	from, flipped, record = trackSourceFlip(ch, "azure")
-	if !flipped || !record || from != "gpt_relay" {
-		t.Errorf("expected recorded flip back, got from=%q flipped=%v record=%v", from, flipped, record)
+	// flip back gpt_relay -> azure
+	from, flipped = trackSourceFlip(ch, "azure")
+	if !flipped || from != "gpt_relay" {
+		t.Errorf("expected flip back, got from=%q flipped=%v", from, flipped)
 	}
-	// repeat azure -> gpt_relay within 5min: flip observed but rate-limited
-	_, flipped, record = trackSourceFlip(ch, "gpt_relay")
-	if !flipped || record {
-		t.Errorf("expected rate-limited repeat flip, got flipped=%v record=%v", flipped, record)
+	// repeat flip azure -> gpt_relay: no rate limiting — every flip reported
+	from, flipped = trackSourceFlip(ch, "gpt_relay")
+	if !flipped || from != "azure" {
+		t.Errorf("expected repeat flip reported, got from=%q flipped=%v", from, flipped)
 	}
 	// unknown never participates
-	if _, flipped, _ := trackSourceFlip(ch, "unknown"); flipped {
+	if _, flipped := trackSourceFlip(ch, "unknown"); flipped {
 		t.Error("unknown must not flip")
 	}
 }

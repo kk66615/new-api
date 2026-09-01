@@ -55,6 +55,8 @@ const logTypeRowTint: Record<number, string> = {
 // Warning tint for logs where a quota conversion saturated (admin-only marker).
 // Takes precedence over the per-type tint since it flags a billing anomaly.
 const quotaSaturationRowTint = 'bg-amber-50/60 dark:bg-amber-950/25'
+// upstream response anomaly (model mismatch / source flip) — yellow highlight, admin only
+const urspAnomalyRowTint = 'bg-yellow-100/80 dark:bg-yellow-900/35'
 
 function getColumnVisibilityStorageKey(
   logCategory: LogCategory,
@@ -217,6 +219,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           )
           if (other?.admin_info?.quota_saturation) {
             tintClass = quotaSaturationRowTint
+          }
+          // upstream anomaly wins: model mismatch or source flip → yellow row
+          const ursp = other?.admin_info?.ursp
+          if (ursp && (ursp.mismatch || ursp.src_flip)) {
+            tintClass = urspAnomalyRowTint
           }
         }
 
