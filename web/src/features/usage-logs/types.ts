@@ -134,6 +134,16 @@ export interface LogOtherData {
     admin_role?: number
     auth_method?: 'session' | 'access_token' | string
     // Quota saturation marker: set when a quota conversion clamped at the
+    // Upstream response model audit: what the upstream response declared vs
+    // what we sent. Admin-only (nested under admin_info).
+    ursp?: {
+      model?: string
+      sent?: string
+      id?: string
+      sf?: string
+      created?: number
+      mismatch?: boolean
+    }
     // int32 bound (overflow/underflow) or hit a NaN fallback while computing
     // this request's charge. Admin-only (nested under admin_info).
     quota_saturation?: {

@@ -813,6 +813,45 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
+        {/* Upstream response model audit (admin only) */}
+        {props.isAdmin && other?.admin_info?.ursp && (
+          <DetailSection
+            icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
+            label={t('Upstream Response Model')}
+            variant={other.admin_info.ursp.mismatch ? 'danger' : 'default'}
+          >
+            {other.admin_info.ursp.mismatch && (
+              <p className='mb-1 text-xs wrap-break-word'>
+                {t('Upstream declared a different model than the one sent')}
+              </p>
+            )}
+            <DetailRow
+              label={t('Sent Model')}
+              value={other.admin_info.ursp.sent || '-'}
+              mono
+            />
+            <DetailRow
+              label={t('Declared Model')}
+              value={other.admin_info.ursp.model || '-'}
+              mono
+            />
+            {other.admin_info.ursp.id && (
+              <DetailRow
+                label={t('Upstream Response ID')}
+                value={other.admin_info.ursp.id}
+                mono
+              />
+            )}
+            {other.admin_info.ursp.sf && (
+              <DetailRow
+                label={t('System Fingerprint')}
+                value={other.admin_info.ursp.sf}
+                mono
+              />
+            )}
+          </DetailSection>
+        )}
+
         {/* Reject reason —— 对普通用户同样可见。后端 formatUserLogs 只剥离
             admin_info / audit_info，reject_reason 本就随接口返回给用户；内容是上游
             的标准枚举（gemini_block_reason / claude_stop_reason /
