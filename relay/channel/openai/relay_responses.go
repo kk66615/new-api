@@ -34,6 +34,10 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	// upstream response forensics — capture the upstream's own model declaration
+	info.ObserveUpstreamResponse(responsesResponse.Model, responsesResponse.ID, int64(responsesResponse.CreatedAt), "")
+	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
@@ -85,6 +89,8 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	imageCounter := &relaycommon.ImageGenerationCallCounter{}
 	imageCommitted := false
 
+	// forensics: headers-only update (the terminal event supplies the excerpt)
+	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
@@ -98,6 +104,10 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		switch streamResponse.Type {
 		case "response.completed", "response.done":
 			if streamResponse.Response != nil {
+				// upstream response forensics — terminal event carries the
+				// upstream's own model/id declaration
+				info.ObserveUpstreamResponse(streamResponse.Response.Model, streamResponse.Response.ID, int64(streamResponse.Response.CreatedAt), "")
+				info.SetUpstreamResponseForensics(data, nil)
 				if streamResponse.Response.Usage != nil {
 					if streamResponse.Response.Usage.InputTokens != 0 {
 						usage.PromptTokens = streamResponse.Response.Usage.InputTokens

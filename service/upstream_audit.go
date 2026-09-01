@@ -1,19 +1,24 @@
 package service
 
 import (
+	"encoding/json"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 )
 
 // ── upstream response model auditing ─────────────────────────────────────────
 // Compares the model we sent upstream with the model the upstream response
-// declared. Pure observation: never touches the forwarding or billing path.
-// Design mirrors sub2api's upstream_response_model.go (tri-state mismatch,
-// vendor alias canonicalization).
+// declared, infers the real upstream source from response fingerprints, and
+// tracks per-channel source flips. Pure observation: never touches the
+// forwarding or billing path. Design mirrors sub2api's tri-state mismatch and
+// the watchdog identifyGateway header fingerprints.
 
 // canonicalGrokRuntimeModel maps xAI public aliases onto the runtime build id
 // the API reports, so alias↔build echoes don't count as mismatches.
@@ -77,8 +82,196 @@ func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 	return false
 }
 
-// appendUpstreamResponseAudit adds the ursp block to other.admin_info and, on
-// mismatch, persists the full forensic evidence asynchronously.
+// ── upstream source inference ────────────────────────────────────────────────
+// Labels are short stable tokens; the frontend maps them to display names.
+// Evidence priority: channel protocol type (cryptographically binding, e.g.
+// AWS SigV4) > official vendor headers > relay software headers > response id
+// shape + model family (weak). Anything else → "unknown".
+
+var (
+	uuidIdRe    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	numericIdRe = regexp.MustCompile(`^\d{10,}$`)
+)
+
+func headerKeysLower(headersJSON string) map[string]string {
+	if headersJSON == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(headersJSON), &m); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+func hasHeaderPrefix(h map[string]string, prefixes ...string) bool {
+	for k := range h {
+		for _, p := range prefixes {
+			if strings.HasPrefix(k, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// InferUpstreamSource returns a source label for the upstream that actually
+// produced this response. Weak-evidence inference: relays CAN forge all of
+// this, so treat it as a screening signal, not proof.
+func InferUpstreamSource(channelType int, headersJSON, respId, respModel string) string {
+	h := headerKeysLower(headersJSON)
+	id := strings.TrimSpace(respId)
+	modelLower := strings.ToLower(respModel)
+
+	// 1. channel protocol type — the wire protocol itself pins the backend family
+	switch channelType {
+	case constant.ChannelTypeAws:
+		return "aws"
+	case constant.ChannelTypeVertexAi:
+		return "vertex"
+	case constant.ChannelTypeAzure:
+		return "azure"
+	}
+
+	// 2. official vendor headers (strongest response-side evidence)
+	if h != nil {
+		if _, ok := h["x-amzn-requestid"]; ok {
+			return "aws"
+		}
+		if hasHeaderPrefix(h, "x-amz-bedrock") {
+			return "aws"
+		}
+		if _, ok := h["apim-request-id"]; ok {
+			return "azure"
+		}
+		if hasHeaderPrefix(h, "x-ms-region", "x-ms-deployment") {
+			return "azure"
+		}
+		// Claude Max/Pro subscription relays pass through unified rate-limit headers
+		if hasHeaderPrefix(h, "anthropic-ratelimit-unified") {
+			return "ccmax"
+		}
+		if _, ok := h["anthropic-organization-id"]; ok {
+			return "anthropic"
+		}
+		if hasHeaderPrefix(h, "anthropic-ratelimit-") {
+			return "anthropic"
+		}
+		if _, ok := h["openai-organization"]; ok {
+			return "openai"
+		}
+		if _, ok := h["openai-processing-ms"]; ok {
+			return "openai"
+		}
+		if _, ok := h["openai-version"]; ok {
+			return "openai"
+		}
+		if hasHeaderPrefix(h, "msh-") { // Moonshot (Kimi) request headers
+			return "kimi"
+		}
+		if hasHeaderPrefix(h, "x-goog-", "x-google-") {
+			if channelType == constant.ChannelTypeGemini {
+				return "aistudio"
+			}
+			return "google"
+		}
+		// relay software fingerprints
+		if _, ok := h["x-new-api-version"]; ok {
+			return "newapi_relay"
+		}
+		if _, ok := h["x-oneapi-request-id"]; ok {
+			return "newapi_relay"
+		}
+		if hasHeaderPrefix(h, "x-or-", "x-openrouter") {
+			return "openrouter"
+		}
+		if hasHeaderPrefix(h, "cf-aig-") {
+			return "cf_gateway"
+		}
+	}
+
+	// 3. response id shape + model family (weak)
+	switch {
+	case strings.HasPrefix(id, "msg_bdrk_"):
+		return "aws"
+	case strings.HasPrefix(id, "msg_"):
+		return "claude_relay" // anthropic wire shape without official headers
+	case strings.HasPrefix(id, "gen-"):
+		return "openrouter"
+	case strings.HasPrefix(id, "chatcmpl-"):
+		switch {
+		case strings.Contains(modelLower, "deepseek"):
+			return "deepseek"
+		case strings.Contains(modelLower, "glm"):
+			return "glm"
+		case strings.Contains(modelLower, "kimi") || strings.Contains(modelLower, "moonshot"):
+			return "kimi"
+		default:
+			return "gpt_relay" // OpenAI wire shape without official headers
+		}
+	case uuidIdRe.MatchString(id):
+		if strings.Contains(modelLower, "deepseek") {
+			return "deepseek"
+		}
+		return "unknown"
+	case numericIdRe.MatchString(id):
+		return "glm" // Zhipu-style timestamp ids
+	case channelType == constant.ChannelTypeGemini && id != "":
+		return "aistudio"
+	}
+	return "unknown"
+}
+
+// ── per-channel source flip tracking ─────────────────────────────────────────
+// A channel whose inferred source flips (az → gpt_relay → az ...) is a strong
+// adulteration / backend-swap signal. Every known→known flip is recorded as
+// evidence (kind=provider_switch); the same directional pair on the same
+// channel is written at most once per 5 minutes to survive round-robin
+// backends without flooding the table. State is in-memory: after a restart
+// the first request re-seeds silently (no false alarm).
+
+type channelSrcState struct {
+	mu     sync.Mutex
+	last   string
+	pairAt map[string]time.Time
+}
+
+var srcTracker sync.Map // channelId(int) -> *channelSrcState
+
+func trackSourceFlip(channelId int, src string) (from string, flipped bool, record bool) {
+	if channelId == 0 || src == "" || src == "unknown" {
+		return "", false, false
+	}
+	v, _ := srcTracker.LoadOrStore(channelId, &channelSrcState{pairAt: make(map[string]time.Time)})
+	st := v.(*channelSrcState)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	prev := st.last
+	st.last = src
+	if prev == "" || prev == src {
+		return "", false, false
+	}
+	pair := prev + "->" + src
+	now := time.Now()
+	if t, ok := st.pairAt[pair]; ok && now.Sub(t) < 5*time.Minute {
+		return prev, true, false // flip observed but rate-limited for evidence
+	}
+	st.pairAt[pair] = now
+	// prune stale pairs
+	for k, t := range st.pairAt {
+		if now.Sub(t) > 30*time.Minute {
+			delete(st.pairAt, k)
+		}
+	}
+	return prev, true, true
+}
+
+// appendUpstreamResponseAudit adds the ursp block to other.admin_info and
+// persists forensic evidence asynchronously on model mismatch or source flip.
 func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map[string]interface{}) {
 	if relayInfo == nil || adminInfo == nil {
 		return
@@ -93,10 +286,18 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 	}
 	mismatch := !UpstreamModelsMatchForAudit(sentModel, respModel)
 
+	channelId, channelType := 0, 0
+	if relayInfo.ChannelMeta != nil {
+		channelId = relayInfo.ChannelMeta.ChannelId
+		channelType = relayInfo.ChannelMeta.ChannelType
+	}
+	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel)
+
 	ursp := map[string]interface{}{
 		"model":    respModel,
 		"sent":     sentModel,
 		"mismatch": mismatch,
+		"src":      src,
 	}
 	if relayInfo.UpstreamResponseId != "" {
 		ursp["id"] = relayInfo.UpstreamResponseId
@@ -109,13 +310,30 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 	}
 	adminInfo["ursp"] = ursp
 
-	if !mismatch {
+	from, flipped, recordFlip := trackSourceFlip(channelId, src)
+	if flipped {
+		ursp["src_flip"] = from + "->" + src
+	}
+
+	if !mismatch && !recordFlip {
 		return
+	}
+
+	kind, note := "model_mismatch", ""
+	if recordFlip && !mismatch {
+		kind = "provider_switch"
+		note = from + " -> " + src
+	} else if recordFlip {
+		note = "provider also flipped: " + from + " -> " + src
 	}
 
 	// evidence snapshot — copy everything needed before leaving the request scope
 	ev := &model.UpstreamEvidence{
 		CreatedAt:         common.GetTimestamp(),
+		Kind:              kind,
+		Note:              note,
+		Source:            src,
+		ChannelId:         channelId,
 		UserId:            relayInfo.UserId,
 		TokenId:           relayInfo.TokenId,
 		RequestModel:      relayInfo.OriginModelName,
@@ -129,9 +347,6 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 		ResponseExcerpt:   relayInfo.UpstreamResponseExcerpt,
 		ResponseHeaders:   relayInfo.UpstreamResponseHeaders,
 	}
-	if relayInfo.ChannelMeta != nil {
-		ev.ChannelId = relayInfo.ChannelMeta.ChannelId
-	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -141,8 +356,8 @@ func appendUpstreamResponseAudit(relayInfo *relaycommon.RelayInfo, adminInfo map
 		if err := model.InsertUpstreamEvidence(ev); err != nil {
 			common.SysError("upstream evidence persist failed: " + err.Error())
 		} else {
-			common.SysLog("[upstream-audit] model mismatch recorded: sent=" + ev.SentModel +
-				" got=" + ev.ResponseModel)
+			common.SysLog("[upstream-audit] " + kind + " recorded: sent=" + ev.SentModel +
+				" got=" + ev.ResponseModel + " src=" + src + " " + note)
 		}
 	}()
 }

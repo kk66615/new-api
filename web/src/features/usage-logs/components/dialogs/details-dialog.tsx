@@ -216,6 +216,35 @@ function quotaSaturationKindLabel(
   return t('Invalid (NaN)')
 }
 
+// Inferred upstream source labels (weak-evidence fingerprints; see
+// service/upstream_audit.go InferUpstreamSource for the ruleset).
+const UPSTREAM_SOURCE_LABELS: Record<string, string> = {
+  azure: 'Azure OpenAI',
+  aws: 'AWS Bedrock',
+  vertex: 'Vertex AI',
+  aistudio: 'AI Studio',
+  google: 'Google (Vertex/AIStudio)',
+  anthropic: 'Anthropic 官方',
+  ccmax: 'Claude Max 订阅 (ccmax)',
+  claude_relay: 'Claude 反代',
+  openai: 'OpenAI 官方',
+  gpt_relay: 'GPT 反代',
+  deepseek: 'DeepSeek 官方形态',
+  glm: 'GLM 官方形态',
+  kimi: 'Kimi 官方',
+  newapi_relay: 'NewAPI 中转',
+  openrouter: 'OpenRouter',
+  cf_gateway: 'Cloudflare AI Gateway',
+}
+
+function upstreamSourceLabel(
+  src: string | undefined,
+  t: (key: string) => string
+): string {
+  if (!src || src === 'unknown') return t('Unknown Source')
+  return UPSTREAM_SOURCE_LABELS[src] || src
+}
+
 function BillingBreakdown(props: {
   log: UsageLog
   other: LogOtherData
@@ -839,6 +868,17 @@ export function DetailsDialog(props: DetailsDialogProps) {
               <DetailRow
                 label={t('Upstream Response ID')}
                 value={other.admin_info.ursp.id}
+                mono
+              />
+            )}
+            <DetailRow
+              label={t('Upstream Source')}
+              value={upstreamSourceLabel(other.admin_info.ursp.src, t)}
+            />
+            {other.admin_info.ursp.src_flip && (
+              <DetailRow
+                label={t('Source Flip')}
+                value={other.admin_info.ursp.src_flip}
                 mono
               />
             )}

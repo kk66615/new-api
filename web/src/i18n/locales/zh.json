@@ -5322,6 +5322,9 @@
     "Sent Model": "发出模型",
     "Declared Model": "上游声明模型",
     "Upstream Response ID": "上游响应 ID",
-    "System Fingerprint": "系统指纹"
+    "System Fingerprint": "系统指纹",
+    "Upstream Source": "来源渠道",
+    "Source Flip": "来源切换",
+    "Unknown Source": "未知"
   }
 }

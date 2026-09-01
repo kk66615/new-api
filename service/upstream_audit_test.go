@@ -38,3 +38,68 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		}
 	}
 }
+
+func TestInferUpstreamSource(t *testing.T) {
+	cases := []struct {
+		name        string
+		channelType int
+		headers     string
+		id, model   string
+		want        string
+	}{
+		{"aws by channel type", 33, "", "chatcmpl-x", "claude-x", "aws"},
+		{"vertex by channel type", 41, "", "", "gemini-x", "vertex"},
+		{"azure by channel type", 3, "", "chatcmpl-x", "gpt-4", "azure"},
+		{"azure by apim header", 1, `{"Apim-Request-Id":"x"}`, "chatcmpl-x", "gpt-4", "azure"},
+		{"aws by amzn header", 1, `{"X-Amzn-Requestid":"x"}`, "msg_x", "claude-x", "aws"},
+		{"openai official", 1, `{"Openai-Organization":"org-x"}`, "chatcmpl-x", "gpt-5", "openai"},
+		{"ccmax unified ratelimit", 1, `{"Anthropic-Ratelimit-Unified-Status":"ok"}`, "msg_01x", "claude-x", "ccmax"},
+		{"anthropic official", 1, `{"Anthropic-Ratelimit-Requests-Limit":"50"}`, "msg_01x", "claude-x", "anthropic"},
+		{"kimi msh header", 1, `{"Msh-Request-Id":"x"}`, "chatcmpl-x", "kimi-k3", "kimi"},
+		{"newapi relay", 1, `{"X-New-Api-Version":"1"}`, "chatcmpl-x", "gpt-5", "newapi_relay"},
+		{"bedrock id shape", 1, "", "msg_bdrk_abc", "claude-x", "aws"},
+		{"claude relay shape", 1, "", "msg_01abc", "claude-x", "claude_relay"},
+		{"gpt relay shape", 1, "", "chatcmpl-abc", "gpt-5", "gpt_relay"},
+		{"deepseek uuid", 1, "", "c53e7f1e-873b-41ee-bc8b-810a0d033691", "deepseek-v4-flash", "deepseek"},
+		{"deepseek chatcmpl relay", 1, "", "chatcmpl-abc", "deepseek-v4-pro", "deepseek"},
+		{"glm numeric id", 1, "", "20260901123456789", "glm-5", "glm"},
+		{"unknown", 1, "", "weird-123", "mystery", "unknown"},
+		{"empty everything", 1, "", "", "", "unknown"},
+	}
+	for _, c := range cases {
+		if got := InferUpstreamSource(c.channelType, c.headers, c.id, c.model); got != c.want {
+			t.Errorf("%s: InferUpstreamSource = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTrackSourceFlip(t *testing.T) {
+	ch := 987654 // avoid clashing with other tests
+	// first observation seeds silently
+	if _, flipped, _ := trackSourceFlip(ch, "azure"); flipped {
+		t.Error("first observation must not flip")
+	}
+	// same source: no flip
+	if _, flipped, _ := trackSourceFlip(ch, "azure"); flipped {
+		t.Error("same source must not flip")
+	}
+	// flip azure -> gpt_relay: recorded
+	from, flipped, record := trackSourceFlip(ch, "gpt_relay")
+	if !flipped || !record || from != "azure" {
+		t.Errorf("expected recorded flip from azure, got from=%q flipped=%v record=%v", from, flipped, record)
+	}
+	// flip back gpt_relay -> azure: different pair, also recorded
+	from, flipped, record = trackSourceFlip(ch, "azure")
+	if !flipped || !record || from != "gpt_relay" {
+		t.Errorf("expected recorded flip back, got from=%q flipped=%v record=%v", from, flipped, record)
+	}
+	// repeat azure -> gpt_relay within 5min: flip observed but rate-limited
+	_, flipped, record = trackSourceFlip(ch, "gpt_relay")
+	if !flipped || record {
+		t.Errorf("expected rate-limited repeat flip, got flipped=%v record=%v", flipped, record)
+	}
+	// unknown never participates
+	if _, flipped, _ := trackSourceFlip(ch, "unknown"); flipped {
+		t.Error("unknown must not flip")
+	}
+}
