@@ -171,6 +171,8 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
+	// forensic material: last frame + response headers (persisted only on model mismatch)
+	info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
@@ -252,6 +254,17 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
+
+	// upstream response forensics — capture the upstream's own model declaration
+	var respCreated int64
+	switch v := simpleResponse.Created.(type) {
+	case float64:
+		respCreated = int64(v)
+	case int64:
+		respCreated = v
+	}
+	info.ObserveUpstreamResponse(simpleResponse.Model, simpleResponse.Id, respCreated, "")
+	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
 
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {

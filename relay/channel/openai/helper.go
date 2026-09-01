@@ -146,6 +146,10 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 	*systemFingerprint = lastStreamResponse.GetSystemFingerprint()
 	*model = lastStreamResponse.Model
 
+	// upstream response forensics — the last SSE frame carries the upstream's
+	// own model declaration (parsed before any client-facing rewrite)
+	info.ObserveUpstreamResponse(lastStreamResponse.Model, lastStreamResponse.Id, lastStreamResponse.Created, lastStreamResponse.GetSystemFingerprint())
+
 	if service.ValidUsage(lastStreamResponse.Usage) {
 		*containStreamUsage = true
 		*usage = lastStreamResponse.Usage

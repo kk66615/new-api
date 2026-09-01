@@ -465,6 +465,10 @@ type GeminiChatResponse struct {
 	PromptFeedback   *GeminiChatPromptFeedback `json:"promptFeedback,omitempty"`
 	UsageMetadata    GeminiUsageMetadata       `json:"usageMetadata"`
 	HasUsageMetadata bool                      `json:"-"`
+	// ModelVersion / ResponseId: upstream-declared identity, used for model
+	// integrity auditing. Remember: aux in UnmarshalJSON must mirror these.
+	ModelVersion string `json:"modelVersion,omitempty"`
+	ResponseId   string `json:"responseId,omitempty"`
 }
 
 // UnmarshalJSON records whether Gemini returned usageMetadata while preserving
@@ -478,12 +482,16 @@ func (r *GeminiChatResponse) UnmarshalJSON(data []byte) error {
 		Candidates     []GeminiChatCandidate     `json:"candidates"`
 		PromptFeedback *GeminiChatPromptFeedback `json:"promptFeedback,omitempty"`
 		UsageMetadata  *GeminiUsageMetadata      `json:"usageMetadata"`
+		ModelVersion   string                    `json:"modelVersion,omitempty"`
+		ResponseId     string                    `json:"responseId,omitempty"`
 	}
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
 		return err
 	}
 	r.Candidates = aux.Candidates
 	r.PromptFeedback = aux.PromptFeedback
+	r.ModelVersion = aux.ModelVersion
+	r.ResponseId = aux.ResponseId
 	r.HasUsageMetadata = aux.UsageMetadata != nil
 	if aux.UsageMetadata != nil {
 		r.UsageMetadata = *aux.UsageMetadata

@@ -99,6 +99,13 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil {
 		maybeMarkClaudeRefusal(c, *claudeResponse.Delta.StopReason)
 	}
+	// upstream response forensics — message_start declares the upstream's own
+	// model; observe BEFORE the RelayFormatClaude branch overwrites
+	// info.UpstreamModelName with it (the sent-model snapshot must be taken first)
+	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
+		info.ObserveUpstreamResponse(claudeResponse.Message.Model, "", 0, "")
+		info.SetUpstreamResponseForensics(data, nil)
+	}
 	if info.RelayFormat == types.RelayFormatClaude {
 		FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)
 
@@ -200,6 +207,8 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
+	// forensics: headers-only update (the message_start frame supplies the excerpt)
+	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		err = HandleStreamResponseData(c, info, claudeInfo, data)
 		if err != nil {
@@ -224,6 +233,13 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
+	// upstream response forensics (non-stream: top-level model/id)
+	info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
+	if httpResp != nil {
+		info.SetUpstreamResponseForensics(string(data), httpResp.Header)
+	} else {
+		info.SetUpstreamResponseForensics(string(data), nil)
+	}
 	if claudeInfo.Usage == nil {
 		claudeInfo.Usage = &dto.Usage{}
 	}

@@ -117,6 +117,19 @@ type RelayInfo struct {
 	SendResponseCount      int
 	ReceivedResponseCount  int
 	FinalPreConsumedQuota  int // 最终预消耗的配额
+	// ── upstream response forensics（上游响应模型审计，纯旁路观测，不影响转发）──
+	// UpstreamResponseModel: model name declared by the upstream response body,
+	// captured BEFORE any protocol conversion or client-facing rewrite.
+	// UpstreamSentModel: snapshot of the model name we actually sent upstream,
+	// taken at observation time (claude relay overwrites UpstreamModelName with
+	// the response model afterwards, so the snapshot must happen first).
+	UpstreamResponseModel     string
+	UpstreamResponseId        string
+	UpstreamResponseCreated   int64
+	UpstreamSystemFingerprint string
+	UpstreamSentModel         string
+	UpstreamResponseExcerpt   string // raw body (non-stream) / last+first frame (stream); only persisted on mismatch
+	UpstreamResponseHeaders   string // JSON-serialized upstream response headers; only persisted on mismatch
 	// ForcePreConsume 为 true 时禁用 BillingSession 的信任额度旁路，
 	// 强制预扣全额。用于异步任务（视频/音乐生成等），因为请求返回后任务仍在运行，
 	// 必须在提交前锁定全额。
@@ -744,6 +757,64 @@ func (info *RelayInfo) GetUpstreamModelName() string {
 		return ""
 	}
 	return info.UpstreamModelName
+}
+
+// ObserveUpstreamResponse records the model identity the upstream response
+// declared. Call it at the point the response is parsed, BEFORE any code path
+// that rewrites info.UpstreamModelName (e.g. claude message_start handling).
+// First observation wins for the sent-model snapshot; the response fields are
+// updated on every call so streaming paths naturally keep the last declaration.
+// Empty model is a no-op (tri-state semantics: absent stays absent).
+func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created int64, systemFingerprint string) {
+	if info == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	if len(model) > 200 {
+		model = model[:200]
+	}
+	if info.UpstreamSentModel == "" {
+		info.UpstreamSentModel = info.UpstreamModelName
+	}
+	info.UpstreamResponseModel = model
+	if responseId != "" {
+		info.UpstreamResponseId = responseId
+	}
+	if created != 0 {
+		info.UpstreamResponseCreated = created
+	}
+	if systemFingerprint != "" {
+		info.UpstreamSystemFingerprint = systemFingerprint
+	}
+}
+
+// SetUpstreamResponseForensics stores the raw evidence material (capped).
+// It is held in memory for every request but only persisted on mismatch.
+func (info *RelayInfo) SetUpstreamResponseForensics(excerpt string, headers map[string][]string) {
+	if info == nil {
+		return
+	}
+	const excerptCap = 64 * 1024
+	if len(excerpt) > excerptCap {
+		excerpt = excerpt[:excerptCap]
+	}
+	if excerpt != "" { // empty excerpt = headers-only update, keep existing excerpt
+		info.UpstreamResponseExcerpt = excerpt
+	}
+	if headers != nil {
+		flat := make(map[string]string, len(headers))
+		for k, v := range headers {
+			if len(v) > 0 {
+				flat[k] = v[0]
+			}
+		}
+		if b, err := json.Marshal(flat); err == nil && len(b) <= 8*1024 {
+			info.UpstreamResponseHeaders = string(b)
+		}
+	}
 }
 
 func (info *RelayInfo) HasChannelMeta() bool { return info != nil && info.ChannelMeta != nil }
