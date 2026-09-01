@@ -204,7 +204,8 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string)
 		return "claude_relay" // anthropic wire shape without official headers
 	case strings.HasPrefix(id, "gen-"):
 		return "openrouter"
-	case strings.HasPrefix(id, "chatcmpl-"):
+	case strings.HasPrefix(id, "chatcmpl-"), strings.HasPrefix(id, "resp_"):
+		// OpenAI chat / Responses API wire shape without official headers
 		switch {
 		case strings.Contains(modelLower, "deepseek"):
 			return "deepseek"
@@ -213,7 +214,7 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string)
 		case strings.Contains(modelLower, "kimi") || strings.Contains(modelLower, "moonshot"):
 			return "kimi"
 		default:
-			return "gpt_relay" // OpenAI wire shape without official headers
+			return "gpt_relay"
 		}
 	case uuidIdRe.MatchString(id):
 		if strings.Contains(modelLower, "deepseek") {

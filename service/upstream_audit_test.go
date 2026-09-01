@@ -60,6 +60,8 @@ func TestInferUpstreamSource(t *testing.T) {
 		{"bedrock id shape", 1, "", "msg_bdrk_abc", "claude-x", "aws"},
 		{"claude relay shape", 1, "", "msg_01abc", "claude-x", "claude_relay"},
 		{"gpt relay shape", 1, "", "chatcmpl-abc", "gpt-5", "gpt_relay"},
+		{"responses api relay shape", 1, "", "resp_0e7981fdbb93b145", "gpt-5.5", "gpt_relay"},
+		{"responses api openai official", 1, `{"Openai-Processing-Ms":"123"}`, "resp_0e7981", "gpt-5.5", "openai"},
 		{"deepseek uuid", 1, "", "c53e7f1e-873b-41ee-bc8b-810a0d033691", "deepseek-v4-flash", "deepseek"},
 		{"deepseek chatcmpl relay", 1, "", "chatcmpl-abc", "deepseek-v4-pro", "deepseek"},
 		{"glm numeric id", 1, "", "20260901123456789", "glm-5", "glm"},
