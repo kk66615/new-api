@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func stopReasonClaude2OpenAI(reason string) string {
@@ -103,7 +104,15 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	// model; observe BEFORE the RelayFormatClaude branch overwrites
 	// info.UpstreamModelName with it (the sent-model snapshot must be taken first)
 	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
-		info.ObserveUpstreamResponse(claudeResponse.Message.Model, "", 0, "")
+		// ClaudeMediaMessage carries no Id/Usage fields, so read them off the raw
+		// frame — message.id is the strongest provider fingerprint we have.
+		msgId := gjson.Get(data, "message.id").String()
+		info.ObserveUpstreamResponse(claudeResponse.Message.Model, msgId, 0, "")
+		info.ObserveUpstreamUsage(
+			int(gjson.Get(data, "message.usage.input_tokens").Int()),
+			int(gjson.Get(data, "message.usage.cache_creation_input_tokens").Int()),
+			int(gjson.Get(data, "message.usage.cache_read_input_tokens").Int()),
+		)
 		info.SetUpstreamResponseForensics(data, nil)
 	}
 	if info.RelayFormat == types.RelayFormatClaude {
@@ -235,6 +244,9 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
 	// upstream response forensics (non-stream: top-level model/id)
 	info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
+	if claudeResponse.Usage != nil {
+		info.ObserveUpstreamUsage(claudeResponse.Usage.InputTokens, claudeResponse.Usage.CacheCreationInputTokens, claudeResponse.Usage.CacheReadInputTokens)
+	}
 	if httpResp != nil {
 		info.SetUpstreamResponseForensics(string(data), httpResp.Header)
 	} else {

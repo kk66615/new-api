@@ -80,9 +80,63 @@ func TestInferUpstreamSource(t *testing.T) {
 		{"empty everything", 1, "", "", "", "unknown"},
 	}
 	for _, c := range cases {
-		if got := InferUpstreamSource(c.channelType, c.headers, c.id, c.model); got != c.want {
+		if got := InferUpstreamSource(c.channelType, c.headers, c.id, c.model, false); got != c.want {
 			t.Errorf("%s: InferUpstreamSource = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// ccmax hint: anthropic shape + injection evidence (2026-09-04 #119/#127 ccgateapi real traffic)
+func TestInferUpstreamSourceCcmaxHint(t *testing.T) {
+	cases := []struct {
+		name        string
+		channelType int
+		headers     string
+		id, model   string
+		want        string
+	}{
+		{"ccmax via injection hint", 1, "", "msg_011CefvT", "claude-fable-5-1", "ccmax"},
+		{"hint ignored for non-anthropic shape", 1, "", "chatcmpl-abc", "gpt-5", "gpt_relay"},
+		{"hint never overrides official header", 1, `{"Anthropic-Organization-Id":"org"}`, "msg_01x", "claude-x", "anthropic"},
+		{"hint never overrides bedrock id shape", 1, "", "msg_bdrk_abc", "claude-x", "aws"},
+	}
+	for _, c := range cases {
+		if got := InferUpstreamSource(c.channelType, c.headers, c.id, c.model, true); got != c.want {
+			t.Errorf("%s: InferUpstreamSource(ccmaxHint) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestInjectionDetected(t *testing.T) {
+	cases := []struct {
+		est, injected int
+		want          bool
+	}{
+		{2, 3550, true},      // real ccgateapi sample: 2-token request, 3550 cached preamble
+		{9, 3175, true},      // real sample
+		{100, 1500, false},   // below absolute floor
+		{30000, 6000, false}, // 20% tokenizer drift on a huge prompt must not trip
+		{30000, 20000, true}, // genuinely large injection on a large prompt
+		{0, 5000, false},     // no estimate → cannot judge
+	}
+	for _, c := range cases {
+		if got := injectionDetected(c.est, c.injected); got != c.want {
+			t.Errorf("injectionDetected(%d,%d) = %v, want %v", c.est, c.injected, got, c.want)
+		}
+	}
+}
+
+func TestSourceFlipFamily(t *testing.T) {
+	ch := 987655
+	trackSourceFlip(ch, "claude_relay")
+	if _, flipped := trackSourceFlip(ch, "ccmax"); flipped {
+		t.Error("claude_relay -> ccmax is the same relay, must not count as a flip")
+	}
+	if _, flipped := trackSourceFlip(ch, "claude_relay"); flipped {
+		t.Error("ccmax -> claude_relay must not count as a flip either")
+	}
+	if from, flipped := trackSourceFlip(ch, "gpt_relay"); !flipped || from != "claude_relay" {
+		t.Errorf("claude_relay -> gpt_relay must flip, got from=%q flipped=%v", from, flipped)
 	}
 }
 

@@ -130,6 +130,12 @@ type RelayInfo struct {
 	UpstreamSentModel         string
 	UpstreamResponseExcerpt   string // raw body (non-stream) / last+first frame (stream); only persisted on mismatch
 	UpstreamResponseHeaders   string // JSON-serialized upstream response headers; only persisted on mismatch
+	// Upstream-reported input usage (Anthropic semantics). Compared against our own
+	// pre-request estimate to detect relay-side prompt injection (Claude Max / ccmax
+	// relays must inject the Claude Code OAuth system prompt).
+	UpstreamInputTokens         int
+	UpstreamCacheCreationTokens int
+	UpstreamCacheReadTokens     int
 	// ForcePreConsume 为 true 时禁用 BillingSession 的信任额度旁路，
 	// 强制预扣全额。用于异步任务（视频/音乐生成等），因为请求返回后任务仍在运行，
 	// 必须在提交前锁定全额。
@@ -788,6 +794,24 @@ func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created
 	}
 	if systemFingerprint != "" {
 		info.UpstreamSystemFingerprint = systemFingerprint
+	}
+}
+
+// ObserveUpstreamUsage records the upstream's own input-side token accounting.
+// Zero values are ignored so a later, fuller declaration (message_delta) never
+// erases an earlier one.
+func (info *RelayInfo) ObserveUpstreamUsage(inputTokens, cacheCreation, cacheRead int) {
+	if info == nil {
+		return
+	}
+	if inputTokens > 0 {
+		info.UpstreamInputTokens = inputTokens
+	}
+	if cacheCreation > 0 {
+		info.UpstreamCacheCreationTokens = cacheCreation
+	}
+	if cacheRead > 0 {
+		info.UpstreamCacheReadTokens = cacheRead
 	}
 }
 

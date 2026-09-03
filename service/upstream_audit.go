@@ -162,8 +162,10 @@ func hasHeaderPrefix(h map[string]string, prefixes ...string) bool {
 
 // InferUpstreamSource returns a source label for the upstream that actually
 // produced this response. Weak-evidence inference: relays CAN forge all of
-// this, so treat it as a screening signal, not proof.
-func InferUpstreamSource(channelType int, headersJSON, respId, respModel string) string {
+// this, so treat it as a screening signal, not proof. ccmaxHint marks a
+// channel with prompt-injection evidence (see injectionDetected) and only
+// upgrades an Anthropic-shaped response from claude_relay to ccmax.
+func InferUpstreamSource(channelType int, headersJSON, respId, respModel string, ccmaxHint bool) string {
 	h := headerKeysLower(headersJSON)
 	id := strings.TrimSpace(respId)
 	modelLower := strings.ToLower(respModel)
@@ -240,6 +242,9 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string)
 	case strings.HasPrefix(id, "msg_bdrk_"):
 		return "aws"
 	case strings.HasPrefix(id, "msg_"):
+		if ccmaxHint {
+			return "ccmax" // anthropic wire shape + injected-prompt evidence = Max subscription relay
+		}
 		return "claude_relay" // anthropic wire shape without official headers
 	case strings.HasPrefix(id, "gen-"):
 		return "openrouter"
@@ -283,6 +288,17 @@ type channelSrcState struct {
 
 var srcTracker sync.Map // channelId(int) -> *channelSrcState
 
+// srcFamily collapses labels that describe the same backend so request-shape
+// dependent relabeling never reads as a backend switch: ccmax is only a
+// finer-grained claude_relay (same relay, injection just wasn't visible on a
+// request that carried its own large cached prompt).
+func srcFamily(s string) string {
+	if s == "ccmax" {
+		return "claude_relay"
+	}
+	return s
+}
+
 func trackSourceFlip(channelId int, src string) (from string, flipped bool) {
 	if channelId == 0 || src == "" || src == "unknown" {
 		return "", false
@@ -293,10 +309,39 @@ func trackSourceFlip(channelId int, src string) (from string, flipped bool) {
 	defer st.mu.Unlock()
 	prev := st.last
 	st.last = src
-	if prev == "" || prev == src {
+	if prev == "" || srcFamily(prev) == srcFamily(src) {
 		return "", false
 	}
 	return prev, true
+}
+
+// ── ccmax (Claude Max subscription relay) detection ──────────────────────────
+// Such relays strip every Anthropic header, but they MUST inject the Claude Code
+// OAuth system prompt (~3-4k tokens) to be accepted upstream. The upstream then
+// reports far more input (incl. cache) than we estimated for the client's own
+// request. A channel that shows this evidence once is remembered in-memory so
+// requests whose own big cached prompts hide the injection still get the ccmax
+// label (restart re-seeds on the next visible injection — no false alarms).
+var ccmaxChannels sync.Map // channelId(int) -> true
+
+const (
+	injectionMinAbs   = 2000 // tokens: above the Claude Code preamble noise floor
+	injectionMinRatio = 0.5  // and >50% of our estimate, so tokenizer drift on huge prompts never trips it
+)
+
+// injectedTokens is how many input tokens the upstream saw beyond our own
+// pre-request estimate; 0 when nothing can be inferred.
+func injectedTokens(relayInfo *relaycommon.RelayInfo) int {
+	est := relayInfo.GetEstimatePromptTokens()
+	total := relayInfo.UpstreamInputTokens + relayInfo.UpstreamCacheCreationTokens + relayInfo.UpstreamCacheReadTokens
+	if est <= 0 || total <= est {
+		return 0
+	}
+	return total - est
+}
+
+func injectionDetected(est, injected int) bool {
+	return est > 0 && injected >= injectionMinAbs && float64(injected) >= injectionMinRatio*float64(est)
 }
 
 // appendUpstreamResponseAudit adds the ursp block to other.admin_info and
@@ -323,13 +368,29 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		channelId = relayInfo.ChannelMeta.ChannelId
 		channelType = relayInfo.ChannelMeta.ChannelType
 	}
-	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel)
+	// ccmax evidence: sticky per-channel memory, refreshed whenever injection is visible
+	anthropicShape := strings.HasPrefix(relayInfo.UpstreamResponseId, "msg_")
+	inj := injectedTokens(relayInfo)
+	ccmaxHint := false
+	if channelId != 0 {
+		_, ccmaxHint = ccmaxChannels.Load(channelId)
+	}
+	if anthropicShape && injectionDetected(relayInfo.GetEstimatePromptTokens(), inj) {
+		ccmaxHint = true
+		if channelId != 0 {
+			ccmaxChannels.Store(channelId, true)
+		}
+	}
+	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
 
 	ursp := map[string]interface{}{
 		"model":    respModel,
 		"sent":     sentModel,
 		"mismatch": mismatch,
 		"src":      src,
+	}
+	if inj > 0 {
+		ursp["inj"] = inj // upstream input beyond our estimate (relay-injected prompt tokens)
 	}
 	if relayInfo.UpstreamResponseId != "" {
 		ursp["id"] = relayInfo.UpstreamResponseId

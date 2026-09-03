@@ -5325,6 +5325,7 @@
     "System Fingerprint": "系统指纹",
     "Upstream Source": "来源渠道",
     "Source Flip": "来源切换",
-    "Unknown Source": "未知"
+    "Unknown Source": "未知",
+    "Injected Prompt Tokens": "疑似注入 token"
   }
 }

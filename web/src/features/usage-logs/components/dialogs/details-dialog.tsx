@@ -882,6 +882,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 mono
               />
             )}
+            {!!other.admin_info.ursp.inj && (
+              <DetailRow
+                label={t('Injected Prompt Tokens')}
+                value={String(other.admin_info.ursp.inj)}
+                mono
+              />
+            )}
             {other.admin_info.ursp.sf && (
               <DetailRow
                 label={t('System Fingerprint')}
