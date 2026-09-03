@@ -63,12 +63,23 @@ func snapshotAliasMatch(a, b string) bool {
 	return true
 }
 
+// stripVendorPrefix drops an OpenRouter-style "vendor/" prefix
+// (deepseek/deepseek-v4-flash → deepseek-v4-flash) so a relay that echoes the
+// namespaced id is not flagged. Only the last path segment is kept.
+func stripVendorPrefix(m string) string {
+	if i := strings.LastIndex(m, "/"); i >= 0 && i < len(m)-1 {
+		return m[i+1:]
+	}
+	return m
+}
+
 // UpstreamModelsMatchForAudit reports whether the upstream-declared model is
-// consistent with the model we sent. Case-insensitive; known vendor runtime
-// aliases and alias↔snapshot date suffixes are canonicalized before comparing.
+// consistent with the model we sent. Case-insensitive; vendor/ prefixes, known
+// vendor runtime aliases and alias↔snapshot date suffixes are canonicalized
+// before comparing.
 func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
-	sentModel = strings.TrimSpace(sentModel)
-	responseModel = strings.TrimSpace(responseModel)
+	sentModel = stripVendorPrefix(strings.TrimSpace(sentModel))
+	responseModel = stripVendorPrefix(strings.TrimSpace(responseModel))
 	if sentModel == "" || responseModel == "" {
 		return true // nothing to compare — never flag on missing data
 	}

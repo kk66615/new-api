@@ -24,7 +24,13 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		// grok runtime build ids
 		{"grok-4.5", "grok-4.5-build", true},
 		{"grok-4.6-latest", "grok-4.6-build", true},
-		// REAL mismatches must still flag
+		// OpenRouter-style vendor/ prefix echoes
+		{"deepseek-v4-flash", "deepseek/deepseek-v4-flash", true},
+		{"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6", true},
+		{"gpt-5", "openai/gpt-5-2025-08-07", true},
+		// REAL mismatches must still flag (2026-09-03 #114 real case: 5.5 swapped for 5.6-luna)
+		{"gpt-5.5", "gpt-5-6-luna", false},
+		{"gpt-5.5", "openai/gpt-5-6-luna", false},
 		{"claude-opus-4-7", "deepseek-v4-pro", false},
 		{"gpt-5", "gpt-5-mini", false},                    // non-date suffix
 		{"deepseek-v4", "deepseek-v4-flash", false},       // different model, prefix relation
