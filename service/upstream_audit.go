@@ -92,7 +92,35 @@ func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 	if snapshotAliasMatch(sentModel, responseModel) {
 		return true
 	}
+	if latestFamilyMatch(sentModel, responseModel) {
+		return true
+	}
 	return false
+}
+
+// latestFamilyMatch accepts a vendor "-latest" rolling alias resolving to a
+// concrete version of the SAME family (gemini-pro-latest → gemini-3.1-pro-preview):
+// every non-version token of the alias (minus "latest") must appear in the
+// response id. gemini-flash-latest → gemini-3.1-pro-preview still flags
+// ("flash" missing), so tier swaps are not masked.
+func latestFamilyMatch(sentModel, responseModel string) bool {
+	sent := strings.ToLower(sentModel)
+	if !strings.HasSuffix(sent, "-latest") {
+		return false
+	}
+	respTokens := map[string]bool{}
+	for _, t := range strings.Split(strings.ToLower(responseModel), "-") {
+		respTokens[t] = true
+	}
+	for _, t := range strings.Split(strings.TrimSuffix(sent, "-latest"), "-") {
+		if t == "" {
+			continue
+		}
+		if !respTokens[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // ── upstream source inference ────────────────────────────────────────────────

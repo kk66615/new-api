@@ -19,8 +19,13 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		{"gpt-5-2025-08-07", "gpt-5", true}, // reversed
 		// DeepSeek date build
 		{"deepseek-v4-flash", "deepseek-v4-flash-0731", true},
-		// -latest alias
+		// -latest alias (suffix form)
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", true},
+		// -latest rolling alias resolving to a concrete same-family version (2026-09-03 #57 real traffic)
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", true},
+		{"gemini-flash-latest", "gemini-3.7-flash", true},
+		{"gemini-flash-latest", "gemini-3.1-pro-preview", false}, // tier swap must still flag
+		{"gemini-pro-latest", "gemini-2.5-flash-lite", false},    // tier swap must still flag
 		// grok runtime build ids
 		{"grok-4.5", "grok-4.5-build", true},
 		{"grok-4.6-latest", "grok-4.6-build", true},
