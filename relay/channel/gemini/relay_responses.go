@@ -31,6 +31,9 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 	if err := common.Unmarshal(responseBody, &geminiResponse); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	// upstream response forensics (responses-api-on-gemini path)
+	info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
+	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
 		usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
