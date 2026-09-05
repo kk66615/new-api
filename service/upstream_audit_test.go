@@ -37,11 +37,11 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		{"gpt-5.5", "gpt-5-6-luna", false},
 		{"gpt-5.5", "openai/gpt-5-6-luna", false},
 		{"claude-opus-4-7", "deepseek-v4-pro", false},
-		{"gpt-5", "gpt-5-mini", false},                    // non-date suffix
-		{"deepseek-v4", "deepseek-v4-flash", false},       // different model, prefix relation
-		{"gpt-5", "gpt-5-turbo-2024", false},              // mixed suffix
-		{"deepseek-v4-pro", "deepseek-v4-flash", false},   // sibling swap
-		{"gpt-5", "gpt-5-123456789", false},               // digits too long
+		{"gpt-5", "gpt-5-mini", false},                  // non-date suffix
+		{"deepseek-v4", "deepseek-v4-flash", false},     // different model, prefix relation
+		{"gpt-5", "gpt-5-turbo-2024", false},            // mixed suffix
+		{"deepseek-v4-pro", "deepseek-v4-flash", false}, // sibling swap
+		{"gpt-5", "gpt-5-123456789", false},             // digits too long
 	}
 	for _, c := range cases {
 		if got := UpstreamModelsMatchForAudit(c.sent, c.resp); got != c.want {

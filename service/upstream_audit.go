@@ -354,9 +354,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		return
 	}
 	respModel := relayInfo.UpstreamResponseModel
-	if respModel == "" {
-		return // tri-state: upstream never declared a model — record nothing
+	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" {
+		return // nothing observed at all
 	}
+	// respModel may be empty: the upstream sent a terminal event without a model.
+	// Tri-state still applies to the mismatch verdict (never flags), but the
+	// exchange is recorded (ursp.nomodel + evidence) so it stays auditable.
 	sentModel := relayInfo.UpstreamSentModel
 	if sentModel == "" {
 		sentModel = relayInfo.UpstreamModelName
@@ -384,10 +387,14 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
 
 	ursp := map[string]interface{}{
-		"model":    respModel,
 		"sent":     sentModel,
 		"mismatch": mismatch,
 		"src":      src,
+	}
+	if respModel != "" {
+		ursp["model"] = respModel
+	} else {
+		ursp["nomodel"] = true // upstream terminal event carried no model declaration
 	}
 	if relayInfo.UpstreamResponseId != "" {
 		ursp["id"] = relayInfo.UpstreamResponseId

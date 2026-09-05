@@ -776,16 +776,17 @@ func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created
 		return
 	}
 	model = strings.TrimSpace(model)
-	if model == "" {
-		return
-	}
 	if len(model) > 200 {
 		model = model[:200]
 	}
 	if info.UpstreamSentModel == "" {
 		info.UpstreamSentModel = info.UpstreamModelName
 	}
-	info.UpstreamResponseModel = model
+	// a terminal event may omit the model (seen on converted relays); keep the
+	// id/created/fingerprint so the exchange is still recorded (model-less)
+	if model != "" {
+		info.UpstreamResponseModel = model
+	}
 	if responseId != "" {
 		info.UpstreamResponseId = responseId
 	}

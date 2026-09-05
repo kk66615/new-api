@@ -145,6 +145,7 @@ export interface LogOtherData {
       mismatch?: boolean
       src?: string
       src_flip?: string
+      nomodel?: boolean
     }
     // int32 bound (overflow/underflow) or hit a NaN fallback while computing
     // this request's charge. Admin-only (nested under admin_info).

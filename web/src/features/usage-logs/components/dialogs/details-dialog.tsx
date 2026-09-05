@@ -861,7 +861,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
             <DetailRow
               label={t('Declared Model')}
-              value={other.admin_info.ursp.model || '-'}
+              value={other.admin_info.ursp.model || t('Not declared by upstream')}
               mono
             />
             {other.admin_info.ursp.id && (
