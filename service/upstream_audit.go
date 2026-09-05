@@ -389,9 +389,6 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		"mismatch": mismatch,
 		"src":      src,
 	}
-	if inj > 0 {
-		ursp["inj"] = inj // upstream input beyond our estimate (relay-injected prompt tokens)
-	}
 	if relayInfo.UpstreamResponseId != "" {
 		ursp["id"] = relayInfo.UpstreamResponseId
 	}
