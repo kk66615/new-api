@@ -142,6 +142,12 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				imageCommitted = true
 			}
 		case "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+			if streamResponse.Response != nil {
+				// upstream response forensics — non-success terminal events still carry the
+				// upstream's model/id declaration (e.g. max_output_tokens truncation)
+				info.ObserveUpstreamResponse(streamResponse.Response.Model, streamResponse.Response.ID, int64(streamResponse.Response.CreatedAt), "")
+				info.SetUpstreamResponseForensics(data, nil)
+			}
 			if !imageCommitted {
 				imageCounter.Reset()
 				imageCounter.Commit(info)
