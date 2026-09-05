@@ -349,8 +349,8 @@ func injectionDetected(est, injected int) bool {
 // persisted (kind=normal for clean ones — user decision 2026-09-02, full
 // retention for evidence completeness; normal rows are pruned after
 // model.NormalEvidenceRetentionDays, anomalies are kept forever).
-func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, adminInfo map[string]interface{}) {
-	if relayInfo == nil || adminInfo == nil {
+func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
+	if relayInfo == nil || other == nil {
 		return
 	}
 	respModel := relayInfo.UpstreamResponseModel
@@ -361,7 +361,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	// Tri-state still applies to the mismatch verdict (never flags), but the
 	// exchange is recorded (ursp.nomodel + evidence) so it stays auditable.
 	sentModel := relayInfo.UpstreamSentModel
-	if sentModel == "" {
+	if sentModel == "" && relayInfo.ChannelMeta != nil {
 		sentModel = relayInfo.UpstreamModelName
 	}
 	mismatch := !UpstreamModelsMatchForAudit(sentModel, respModel)
@@ -405,12 +405,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if relayInfo.UpstreamResponseCreated != 0 {
 		ursp["created"] = relayInfo.UpstreamResponseCreated
 	}
-	adminInfo["ursp"] = ursp
-
 	from, flipped := trackSourceFlip(channelId, src)
 	if flipped {
 		ursp["src_flip"] = from + "->" + src
 	}
+	// admin-only projection: LogOther strips admin_info for non-admin readers
+	other.SetAdmin("ursp", ursp)
 
 	kind, note := "normal", ""
 	switch {

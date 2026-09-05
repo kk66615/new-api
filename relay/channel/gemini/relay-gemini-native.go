@@ -37,6 +37,7 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	// upstream response forensics (native generateContent path)
 	info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
 	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
 	if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))

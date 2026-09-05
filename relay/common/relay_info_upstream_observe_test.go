@@ -22,3 +22,15 @@ func TestObserveUpstreamResponseKeepsIdWithoutModel(t *testing.T) {
 		t.Fatalf("second observation wrong: %q %q", info.UpstreamResponseModel, info.UpstreamResponseId)
 	}
 }
+
+// Handlers are exercised by upstream tests with a bare RelayInfo (nil
+// ChannelMeta); the forensics hooks must never dereference it.
+func TestObserveUpstreamResponseNilChannelMeta(t *testing.T) {
+	info := &RelayInfo{}
+	info.ObserveUpstreamResponse("gpt-5.6-sol", "resp_0", 0, "")
+	info.ObserveUpstreamUsage(1, 2, 3)
+	info.SetUpstreamResponseForensics("{}", nil)
+	if info.UpstreamResponseModel != "gpt-5.6-sol" || info.UpstreamResponseId != "resp_0" || info.UpstreamSentModel != "" {
+		t.Fatalf("unexpected state: %q %q %q", info.UpstreamResponseModel, info.UpstreamResponseId, info.UpstreamSentModel)
+	}
+}

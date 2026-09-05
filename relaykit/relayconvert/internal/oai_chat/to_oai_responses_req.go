@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/samber/lo"
 )
 
@@ -372,9 +373,8 @@ func ChatCompletionsRequestToResponsesRequest(info convmeta.Meta, req *dto.Gener
 	textRaw := convertChatResponseFormatToResponsesText(req.ResponseFormat)
 
 	maxOutputTokens := lo.FromPtrOr(req.MaxTokens, uint(0))
-	maxCompletionTokens := lo.FromPtrOr(req.MaxCompletionTokens, uint(0))
-	if maxCompletionTokens > maxOutputTokens {
-		maxOutputTokens = maxCompletionTokens
+	if req.MaxCompletionTokens != nil {
+		maxOutputTokens = *req.MaxCompletionTokens
 	}
 	// OpenAI Responses API rejects max_output_tokens < 16 when explicitly provided.
 	//if maxOutputTokens > 0 && maxOutputTokens < 16 {
@@ -426,11 +426,12 @@ func ChatCompletionsRequestToResponsesRequest(info convmeta.Meta, req *dto.Gener
 		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
 	}
 
-	if req.ReasoningEffort != "" {
-		out.Reasoning = &dto.Reasoning{
-			Effort:  req.ReasoningEffort,
-			Summary: "detailed",
-		}
+	reasoningIntent, err := reasoning.FromOpenAIChat(req)
+	if err != nil {
+		return nil, reasoning.AsClientError(err)
+	}
+	if err := reasoning.ApplyToOpenAIResponses(out, reasoningIntent); err != nil {
+		return nil, reasoning.AsClientError(err)
 	}
 
 	return out, nil
