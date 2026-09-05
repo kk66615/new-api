@@ -114,7 +114,9 @@ func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 		formatUserLogs(logs, 10)
 
 		assert.Equal(t, 11, logs[0].Id)
-		assert.Equal(t, 77, logs[0].ChannelId)
+		// Local policy divergence from upstream: the numeric channel id is also
+		// operator-internal here (see TestFormatUserLogsHidesChannelIdentity).
+		assert.Equal(t, 0, logs[0].ChannelId)
 		assert.Empty(t, logs[0].ChannelName)
 		parsed, err := common.StrToMap(logs[0].Other)
 		require.NoError(t, err)
@@ -241,4 +243,22 @@ func TestLogFormattingPreservesLargeIntegerLexemes(t *testing.T) {
 		FormatAdminLogs(adminLogs)
 		assert.Equal(t, unprivileged, adminLogs[0].Other)
 	})
+}
+
+// TestFormatUserLogsHidesChannelIdentity is the contract for the user log
+// projection: neither the channel id column nor the channel name may reach a
+// non-admin reader, while the admin projection keeps both.
+func TestFormatUserLogsHidesChannelIdentity(t *testing.T) {
+	make := func() []*Log {
+		return []*Log{{ChannelId: 158, ChannelName: "upstream-vendor", Other: common.MapToJsonStr(map[string]interface{}{"model_price": 0.1})}}
+	}
+	user := make()
+	formatUserLogs(user, 0)
+	require.Equal(t, 0, user[0].ChannelId, "channel id must be hidden from users")
+	require.Equal(t, "", user[0].ChannelName, "channel name must be hidden from users")
+
+	admin := make()
+	FormatAdminLogs(admin)
+	require.Equal(t, 158, admin[0].ChannelId)
+	require.Equal(t, "upstream-vendor", admin[0].ChannelName)
 }

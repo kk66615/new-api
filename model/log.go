@@ -115,6 +115,9 @@ func assignDisplayLogIds(logs []*Log, startIdx int) {
 
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
+		// Channel identity (id + name) is operator-internal; the user projection
+		// must not reveal which upstream served the request.
+		logs[i].ChannelId = 0
 		logs[i].ChannelName = ""
 		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
 	}
