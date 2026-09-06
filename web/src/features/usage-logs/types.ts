@@ -144,6 +144,8 @@ export interface LogOtherData {
       mismatch?: boolean
       src?: string
       src_flip?: string
+      backend?: string
+      backend_flip?: string
       nomodel?: boolean
     }
     // Quota saturation marker: set when a quota conversion clamped at the

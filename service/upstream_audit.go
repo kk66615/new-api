@@ -66,9 +66,25 @@ func snapshotAliasMatch(a, b string) bool {
 // stripVendorPrefix drops an OpenRouter-style "vendor/" prefix
 // (deepseek/deepseek-v4-flash → deepseek-v4-flash) so a relay that echoes the
 // namespaced id is not flagged. Only the last path segment is kept.
+// bedrockModelRe matches Bedrock model ids: an optional region/routing prefix
+// (global. / us. / eu. / apac. ...), a vendor segment and the model name, e.g.
+// global.anthropic.claude-sonnet-5, anthropic.claude-haiku-4-5-20251001-v1:0.
+var bedrockModelRe = regexp.MustCompile(`^(?:[a-z]{2,6}\.)?(anthropic|amazon|meta|mistral|cohere|ai21|deepseek|writer|stability|luma|twelvelabs|qwen|openai)\.(.+)$`)
+var bedrockVersionSuffixRe = regexp.MustCompile(`-v\d+(?::\d+)?$`)
+
+func isBedrockModelId(m string) bool {
+	return bedrockModelRe.MatchString(strings.ToLower(strings.TrimSpace(m)))
+}
+
+// stripVendorPrefix canonicalizes vendor namespaces: OpenRouter-style
+// "vendor/model" and Bedrock-style "region.vendor.model-v1:0" both reduce to
+// the bare model name so the mismatch verdict compares like with like.
 func stripVendorPrefix(m string) string {
 	if i := strings.LastIndex(m, "/"); i >= 0 && i < len(m)-1 {
-		return m[i+1:]
+		m = m[i+1:]
+	}
+	if sub := bedrockModelRe.FindStringSubmatch(strings.ToLower(m)); sub != nil {
+		m = bedrockVersionSuffixRe.ReplaceAllString(sub[2], "")
 	}
 	return m
 }
@@ -238,9 +254,20 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string,
 	}
 
 	// 3. response id shape + model family (weak)
+	return inferBackendShape(channelType, id, modelLower, ccmaxHint)
+}
+
+// inferBackendShape classifies a response by wire shape alone (id prefix +
+// model naming), ignoring headers and channel type. It is the "look through
+// the relay" view: a NewAPI relay that returns msg_bdrk_ ids or Bedrock model
+// names is fronting AWS Bedrock, whatever its own headers say.
+func inferBackendShape(channelType int, id, respModel string, ccmaxHint bool) string {
+	modelLower := strings.ToLower(respModel)
 	switch {
-	case strings.HasPrefix(id, "msg_bdrk_"):
+	case strings.HasPrefix(id, "msg_bdrk_"), isBedrockModelId(respModel):
 		return "aws"
+	case strings.HasPrefix(id, "msg_vrtx_"), strings.HasPrefix(id, "req_vrtx_"):
+		return "vertex"
 	case strings.HasPrefix(id, "msg_"):
 		if ccmaxHint {
 			return "ccmax" // anthropic wire shape + injected-prompt evidence = Max subscription relay
@@ -299,11 +326,24 @@ func srcFamily(s string) string {
 	return s
 }
 
+var backendTracker sync.Map // channelId(int) -> *channelSrcState (look-through backend shape)
+
 func trackSourceFlip(channelId int, src string) (from string, flipped bool) {
+	return trackFlip(&srcTracker, channelId, src)
+}
+
+// trackBackendFlip watches the wire-shape backend behind a channel independently
+// of the hop label, so a relay that silently moves from Bedrock to a Claude
+// relay is caught even though its own headers never change.
+func trackBackendFlip(channelId int, backend string) (from string, flipped bool) {
+	return trackFlip(&backendTracker, channelId, backend)
+}
+
+func trackFlip(tracker *sync.Map, channelId int, src string) (from string, flipped bool) {
 	if channelId == 0 || src == "" || src == "unknown" {
 		return "", false
 	}
-	v, _ := srcTracker.LoadOrStore(channelId, &channelSrcState{})
+	v, _ := tracker.LoadOrStore(channelId, &channelSrcState{})
 	st := v.(*channelSrcState)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -385,11 +425,15 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 	}
 	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
+	backend := inferBackendShape(channelType, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
 
 	ursp := map[string]interface{}{
 		"sent":     sentModel,
 		"mismatch": mismatch,
 		"src":      src,
+	}
+	if backend != "unknown" {
+		ursp["backend"] = backend // wire-shape backend behind the hop (aws / vertex / claude_relay / ...)
 	}
 	if respModel != "" {
 		ursp["model"] = respModel
@@ -409,6 +453,21 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if flipped {
 		ursp["src_flip"] = from + "->" + src
 	}
+	bfrom, bflipped := trackBackendFlip(channelId, backend)
+	if bflipped {
+		ursp["backend_flip"] = bfrom + "->" + backend
+	}
+	flipNote := ""
+	if flipped {
+		flipNote = from + " -> " + src
+	}
+	if bflipped {
+		if flipNote != "" {
+			flipNote += "; "
+		}
+		flipNote += "backend: " + bfrom + " -> " + backend
+	}
+	flipped = flipped || bflipped
 	// admin-only projection: LogOther strips admin_info for non-admin readers
 	other.SetAdmin("ursp", ursp)
 
@@ -416,10 +475,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	switch {
 	case flipped && !mismatch:
 		kind = "provider_switch"
-		note = from + " -> " + src
+		note = flipNote
 	case mismatch && flipped:
 		kind = "model_mismatch"
-		note = "provider also flipped: " + from + " -> " + src
+		note = "provider also flipped: " + flipNote
 	case mismatch:
 		kind = "model_mismatch"
 	}

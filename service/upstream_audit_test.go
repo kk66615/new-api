@@ -77,6 +77,8 @@ func TestInferUpstreamSource(t *testing.T) {
 		{"deepseek chatcmpl relay", 1, "", "chatcmpl-abc", "deepseek-v4-pro", "deepseek"},
 		{"glm numeric id", 1, "", "20260901123456789", "glm-5", "glm"},
 		{"unknown", 1, "", "weird-123", "mystery", "unknown"},
+		{"bedrock model naming behind relay", 1, "", "msg_01x", "global.anthropic.claude-sonnet-5", "aws"},
+		{"vertex claude id shape", 1, "", "msg_vrtx_01abc", "claude-x", "vertex"},
 		{"empty everything", 1, "", "", "", "unknown"},
 	}
 	for _, c := range cases {
@@ -168,5 +170,59 @@ func TestTrackSourceFlip(t *testing.T) {
 	// unknown never participates
 	if _, flipped := trackSourceFlip(ch, "unknown"); flipped {
 		t.Error("unknown must not flip")
+	}
+}
+
+// Bedrock model ids carry region/vendor prefixes and a -v1:0 suffix; they must
+// canonicalize to the bare model before the mismatch verdict (2026-09-06 real
+// false positives on channels #77/#100).
+func TestUpstreamModelsMatchBedrockNaming(t *testing.T) {
+	cases := []struct {
+		sent, resp string
+		want       bool
+	}{
+		{"claude-sonnet-5", "global.anthropic.claude-sonnet-5", true},
+		{"claude-opus-4-6", "global.anthropic.claude-opus-4-6-v1", true},
+		{"claude-haiku-4-5-20251001", "anthropic.claude-haiku-4-5-20251001-v1:0", true},
+		{"claude-haiku-4-5", "us.anthropic.claude-haiku-4-5-20251001-v1:0", true}, // date snapshot rule still applies
+		{"openai.gpt-5.4", "gpt-5.4", true},                                       // third-party vendor-dot alias
+		{"claude-opus-4-6", "global.anthropic.claude-opus-4-7", false},            // real swap must still flag
+		{"gpt-5.6-sol", "gpt-5.6-sol", true},                                      // dotted names untouched
+	}
+	for _, c := range cases {
+		if got := UpstreamModelsMatchForAudit(c.sent, c.resp); got != c.want {
+			t.Errorf("Match(%q, %q) = %v, want %v", c.sent, c.resp, got, c.want)
+		}
+	}
+}
+
+func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
+	// hop label says relay, backend shape says Bedrock — both must be reported
+	hdr := `{"X-New-Api-Version":"v1.0.0-rc.20"}`
+	if got := InferUpstreamSource(14, hdr, "msg_bdrk_abc", "global.anthropic.claude-sonnet-5", false); got != "newapi_relay" {
+		t.Fatalf("hop label = %q, want newapi_relay", got)
+	}
+	if got := inferBackendShape(14, "msg_bdrk_abc", "global.anthropic.claude-sonnet-5", false); got != "aws" {
+		t.Fatalf("backend = %q, want aws", got)
+	}
+	if got := inferBackendShape(14, "msg_01abc", "claude-sonnet-5", false); got != "claude_relay" {
+		t.Fatalf("backend = %q, want claude_relay", got)
+	}
+}
+
+func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
+	ch := 987653
+	if _, f := trackBackendFlip(ch, "aws"); f {
+		t.Fatal("seed must not flip")
+	}
+	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
+		t.Fatal("source seed must not flip")
+	}
+	from, f := trackBackendFlip(ch, "claude_relay")
+	if !f || from != "aws" {
+		t.Fatalf("backend aws -> claude_relay must flip, got from=%q flipped=%v", from, f)
+	}
+	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
+		t.Fatal("source unchanged must not flip when only backend moved")
 	}
 }

@@ -506,7 +506,7 @@ export function UsageLogsMobileList<TData>({
         const ursp = parseLogOther(
           ((row.original as Record<string, unknown>).other as string) ?? ''
         )?.admin_info?.ursp
-        if (ursp && (ursp.mismatch || ursp.src_flip)) {
+        if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
           tintClass = 'bg-yellow-100/80 dark:bg-yellow-900/35'
         }
 

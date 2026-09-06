@@ -234,7 +234,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           }
           // upstream anomaly wins: model mismatch or source flip → yellow row
           const ursp = other?.admin_info?.ursp
-          if (ursp && (ursp.mismatch || ursp.src_flip)) {
+          if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
             tintClass = urspAnomalyRowTint
           }
         }

@@ -909,6 +909,19 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 mono
               />
             )}
+            {other.admin_info.ursp.backend && (
+              <DetailRow
+                label={t('Inferred Backend')}
+                value={upstreamSourceLabel(other.admin_info.ursp.backend, t)}
+              />
+            )}
+            {other.admin_info.ursp.backend_flip && (
+              <DetailRow
+                label={t('Backend Flip')}
+                value={other.admin_info.ursp.backend_flip}
+                mono
+              />
+            )}
             {other.admin_info.ursp.sf && (
               <DetailRow
                 label={t('System Fingerprint')}
