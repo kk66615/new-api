@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
@@ -113,6 +114,11 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			maybeMarkClaudeRefusal(c, *claudeResponse.Delta.StopReason)
 		}
 		if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
+			// observe BEFORE overwriting UpstreamModelName: the sent-model
+			// snapshot must be taken while UpstreamModelName still holds the
+			// model we actually addressed upstream. message.id is read off the
+			// raw frame because ClaudeMediaMessage carries no Id field.
+			info.ObserveUpstreamResponse(claudeResponse.Message.Model, gjson.Get(data, "message.id").String(), 0, "")
 			info.UpstreamModelName = claudeResponse.Message.Model
 		}
 		FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)

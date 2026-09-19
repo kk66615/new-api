@@ -137,13 +137,17 @@ func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, res
 	return nil
 }
 
-func processTokenData(relayMode int, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
-	switch relayMode {
+func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
+	switch info.RelayMode {
 	case relayconstant.RelayModeChatCompletions:
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			return err
 		}
+		// upstream response forensics — mid-stream frames declare the upstream's
+		// own model; observed here so a mismatch is caught even when the relay
+		// never reaches the final-frame path (aborted streams included).
+		info.ObserveUpstreamResponse(streamResponse.Model, streamResponse.Id, streamResponse.Created, "")
 		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
 	case relayconstant.RelayModeCompletions:
 		var streamResponse dto.CompletionsStreamResponse

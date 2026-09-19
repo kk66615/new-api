@@ -35,32 +35,44 @@ func canonicalGrokRuntimeModel(m string) string {
 	}
 }
 
-// snapshotAliasMatch accepts the vendor alias↔snapshot pattern: one name
-// extends the other by "-<date>" (gpt-5 vs gpt-5-2025-08-07, x vs x-0731) or
-// by "-latest". Deliberately NOT a general prefix match — an arbitrary suffix
-// (deepseek-v4 vs deepseek-v4-flash) is a different model and must still flag.
-func snapshotAliasMatch(a, b string) bool {
+// snapshotAliasVerdict classifies the vendor alias↔snapshot pattern: one name
+// extends the other by "-<date>" (gpt-5 vs gpt-5-2025-08-07, x vs x-0731) or by
+// "-latest" (claude-sonnet-4-6 vs claude-sonnet-4-6-latest). It returns "" when
+// the pair does not match this pattern. Deliberately NOT a general prefix match
+// — an arbitrary suffix (deepseek-v4 vs deepseek-v4-flash) is a different model
+// and must still flag.
+//
+// The two forms are reported separately so the log can label them honestly: a
+// dated snapshot is the vendor pinning a version, while "-latest" is the vendor
+// appending its own rolling marker to the exact id we sent.
+func snapshotAliasVerdict(a, b string) string {
 	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
 	if len(a) > len(b) {
 		a, b = b, a
 	}
 	if !strings.HasPrefix(b, a+"-") {
-		return false
+		return ""
 	}
 	suffix := b[len(a)+1:]
 	if suffix == "latest" {
-		return true
+		return VerdictRollingAlias
 	}
 	digits := strings.ReplaceAll(suffix, "-", "")
 	if len(digits) < 4 || len(digits) > 8 {
-		return false
+		return ""
 	}
 	for _, r := range digits {
 		if r < '0' || r > '9' {
-			return false
+			return ""
 		}
 	}
-	return true
+	return VerdictSnapshotDate
+}
+
+// snapshotAliasMatch is the boolean view of snapshotAliasVerdict, kept for the
+// existing call sites and tests.
+func snapshotAliasMatch(a, b string) bool {
+	return snapshotAliasVerdict(a, b) != ""
 }
 
 // stripVendorPrefix drops an OpenRouter-style "vendor/" prefix
@@ -89,27 +101,74 @@ func stripVendorPrefix(m string) string {
 	return m
 }
 
+// Mismatch verdict types. Only VerdictMismatch is an anomaly; every other
+// value means "consistent", with the reason retained so the UI can label a
+// benign difference honestly instead of showing a bare boolean.
+const (
+	VerdictExact        = "exact"        // identical after canonicalization
+	VerdictVendorPrefix = "vendor_prefix" // differed only by a vendor/namespace prefix
+	VerdictRuntimeAlias = "runtime_alias" // vendor alias ↔ runtime build id (grok-4.5 ↔ grok-4.5-build)
+	VerdictSnapshotDate = "snapshot_date" // alias ↔ dated snapshot (gpt-5 ↔ gpt-5-2025-08-07)
+	VerdictRollingAlias = "rolling_alias" // "-latest" rolling alias resolving into the same family
+	VerdictNoModel      = "no_model"      // upstream declared no model at all
+	VerdictMismatch     = "mismatch"      // different model — the anomaly we exist to catch
+)
+
+// ClassifyUpstreamModelMismatch returns the verdict for the pair, explaining
+// WHY it is (not) a mismatch. It is the single decision point: both the audit
+// boolean and the log/UI label come from here, so they can never disagree.
+func ClassifyUpstreamModelMismatch(sentModel, responseModel string) string {
+	rawSent := strings.TrimSpace(sentModel)
+	rawResp := strings.TrimSpace(responseModel)
+	if rawSent == "" || rawResp == "" {
+		return VerdictNoModel // never flag on missing data
+	}
+	sent := stripVendorPrefix(rawSent)
+	resp := stripVendorPrefix(rawResp)
+	if strings.EqualFold(sent, resp) {
+		if !strings.EqualFold(rawSent, rawResp) {
+			return VerdictVendorPrefix
+		}
+		return VerdictExact
+	}
+	if g := canonicalGrokRuntimeModel(sent); g != "" && g == canonicalGrokRuntimeModel(resp) {
+		return VerdictRuntimeAlias
+	}
+	if v := snapshotAliasVerdict(sent, resp); v != "" {
+		return v
+	}
+	if latestFamilyMatch(sent, resp) {
+		return VerdictRollingAlias
+	}
+	return VerdictMismatch
+}
+
 // UpstreamModelsMatchForAudit reports whether the upstream-declared model is
 // consistent with the model we sent. Case-insensitive; vendor/ prefixes, known
 // vendor runtime aliases and alias↔snapshot date suffixes are canonicalized
 // before comparing.
 func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
-	sentModel = stripVendorPrefix(strings.TrimSpace(sentModel))
-	responseModel = stripVendorPrefix(strings.TrimSpace(responseModel))
-	if sentModel == "" || responseModel == "" {
-		return true // nothing to compare — never flag on missing data
+	return ClassifyUpstreamModelMismatch(sentModel, responseModel) != VerdictMismatch
+}
+
+// UpstreamModelIsTierDowngrade reports whether the verdict is the specific
+// shape where the upstream served a weaker sibling of the same family
+// (…-flash / …-mini / …-preview against the base id). These pass through
+// VerdictMismatch and are the highest-signal adulteration case, so the log
+// flags them explicitly rather than burying them among generic mismatches.
+func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
+	sent := strings.ToLower(stripVendorPrefix(strings.TrimSpace(sentModel)))
+	if sent == "" {
+		return false
 	}
-	if strings.EqualFold(sentModel, responseModel) {
-		return true
+	resp := strings.ToLower(stripVendorPrefix(strings.TrimSpace(responseModel)))
+	if resp == "" || !strings.HasPrefix(resp, sent+"-") {
+		return false
 	}
-	if g := canonicalGrokRuntimeModel(sentModel); g != "" && g == canonicalGrokRuntimeModel(responseModel) {
-		return true
-	}
-	if snapshotAliasMatch(sentModel, responseModel) {
-		return true
-	}
-	if latestFamilyMatch(sentModel, responseModel) {
-		return true
+	for _, tier := range []string{"flash", "mini", "lite", "nano", "small", "preview", "fast", "turbo", "air"} {
+		if strings.Contains(resp[len(sent)+1:], tier) {
+			return true
+		}
 	}
 	return false
 }
@@ -404,7 +463,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if sentModel == "" && relayInfo.ChannelMeta != nil {
 		sentModel = relayInfo.UpstreamModelName
 	}
-	mismatch := !UpstreamModelsMatchForAudit(sentModel, respModel)
+	// verdict is the single decision point: the boolean below and the label the
+	// UI renders both derive from it, so they can never disagree.
+	verdict := ClassifyUpstreamModelMismatch(sentModel, respModel)
+	mismatch := verdict == VerdictMismatch
+	tierDowngrade := mismatch && UpstreamModelIsTierDowngrade(sentModel, respModel)
 
 	channelId, channelType := 0, 0
 	if relayInfo.ChannelMeta != nil {
@@ -430,7 +493,28 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	ursp := map[string]interface{}{
 		"sent":     sentModel,
 		"mismatch": mismatch,
+		"kind":     verdict, // why it matched/mismatched (exact / snapshot_date / mismatch / ...)
 		"src":      src,
+	}
+	if tierDowngrade {
+		// the highest-signal adulteration shape: upstream served a weaker
+		// sibling of the same family (…-flash / …-mini / …-preview)
+		ursp["tier_downgrade"] = true
+	}
+	// channel identity, carried alongside the inferred src so the UI can show
+	// "which of OUR channels" and "which upstream it actually reached" together.
+	// The channel NAME is already on the log record itself (log.channel_name) —
+	// only the numeric id/type are duplicated here, where the src lives.
+	if channelId != 0 {
+		ursp["ch"] = channelId
+		if channelType != 0 {
+			ursp["ch_type"] = channelType
+		}
+	}
+	// mapping layer: present only when the channel redirected the model, so an
+	// intentional mapping is never confused with an upstream swap
+	if relayInfo.IsModelMapped {
+		ursp["mapped"] = true
 	}
 	if backend != "unknown" {
 		ursp["backend"] = backend // wire-shape backend behind the hop (aws / vertex / claude_relay / ...)

@@ -41,6 +41,10 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	// upstream response forensics — the Responses API declares its own model
+	// here, before any converter rewrites it for the client
+	info.ObserveUpstreamResponse(responsesResp.Model, responsesResp.ID, int64(responsesResp.CreatedAt), "")
+
 	responseValue, usage, err := convertResponsesResponseForClient(c, info, &responsesResp)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -87,6 +91,11 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 			break
 		}
 		accumulator.ProcessEvent(&streamResp)
+		// upstream response forensics — observe every frame that carries a
+		// response object, before the accumulator/converter rewrites it
+		if streamResp.Response != nil {
+			info.ObserveUpstreamResponse(streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt), "")
+		}
 		switch streamResp.Type {
 		case "response.completed", "response.done", "response.incomplete":
 			finalResponse = streamResp.Response
@@ -255,6 +264,12 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			logger.LogError(c, "failed to unmarshal responses stream event: "+err.Error())
 			sr.Error(err)
 			return
+		}
+
+		// upstream response forensics — before the error branch below consumes
+		// the frame and before ConvertStreamResponseChunk rewrites the model
+		if streamResp.Response != nil {
+			info.ObserveUpstreamResponse(streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt), "")
 		}
 
 		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {

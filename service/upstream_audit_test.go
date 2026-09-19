@@ -50,6 +50,73 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 	}
 }
 
+// TestClassifyUpstreamModelMismatch pins the verdict labels. The boolean above
+// is derived from this classifier, so every case here must agree with the
+// corresponding row in TestUpstreamModelsMatchForAudit.
+func TestClassifyUpstreamModelMismatch(t *testing.T) {
+	cases := []struct {
+		sent, resp string
+		want       string
+	}{
+		{"deepseek-v4-pro", "deepseek-v4-pro", VerdictExact},
+		{"GPT-5", "gpt-5", VerdictExact},
+		// tri-state: missing data is its own verdict and never a mismatch
+		{"", "anything", VerdictNoModel},
+		{"gpt-5", "", VerdictNoModel},
+		{"", "", VerdictNoModel},
+		// vendor namespace only
+		{"deepseek-v4-flash", "deepseek/deepseek-v4-flash", VerdictVendorPrefix},
+		{"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6", VerdictVendorPrefix},
+		{"claude-sonnet-5", "global.anthropic.claude-sonnet-5", VerdictVendorPrefix},
+		// vendor runtime alias
+		{"grok-4.5", "grok-4.5-build", VerdictRuntimeAlias},
+		{"grok-4.6-latest", "grok-4.6-build", VerdictRuntimeAlias},
+		// alias ↔ dated snapshot
+		{"gpt-5", "gpt-5-2025-08-07", VerdictSnapshotDate},
+		{"deepseek-v4-flash", "deepseek-v4-flash-0731", VerdictSnapshotDate},
+		// rolling -latest alias
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", VerdictRollingAlias},
+		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", VerdictRollingAlias},
+		// real mismatches
+		{"gpt-5.5", "gpt-5-6-luna", VerdictMismatch},
+		{"claude-opus-4-7", "deepseek-v4-pro", VerdictMismatch},
+		{"gpt-5", "gpt-5-mini", VerdictMismatch},
+		{"deepseek-v4", "deepseek-v4-flash", VerdictMismatch},
+		{"gemini-flash-latest", "gemini-3.1-pro-preview", VerdictMismatch},
+	}
+	for _, c := range cases {
+		if got := ClassifyUpstreamModelMismatch(c.sent, c.resp); got != c.want {
+			t.Errorf("Classify(%q, %q) = %q, want %q", c.sent, c.resp, got, c.want)
+		}
+	}
+}
+
+// TestUpstreamModelIsTierDowngrade covers the highest-signal adulteration shape:
+// upstream serving a weaker sibling of the same family.
+func TestUpstreamModelIsTierDowngrade(t *testing.T) {
+	cases := []struct {
+		sent, resp string
+		want       bool
+	}{
+		{"deepseek-v4", "deepseek-v4-flash", true},
+		{"gpt-5", "gpt-5-mini", true},
+		{"gemini-2.5-pro", "gemini-2.5-pro-preview", true},
+		{"claude-sonnet-5", "claude-sonnet-5-lite", true},
+		{"gpt-5", "openai/gpt-5-nano", true},
+		// not a downgrade
+		{"deepseek-v4-pro", "deepseek-v4-flash", false}, // sibling, not a prefix downgrade
+		{"claude-opus-4-7", "deepseek-v4-pro", false},   // unrelated model
+		{"gpt-5", "gpt-5-2025-08-07", false},            // dated snapshot, not a tier
+		{"", "gpt-5-mini", false},                       // no sent model to compare
+		{"gpt-5", "", false},
+	}
+	for _, c := range cases {
+		if got := UpstreamModelIsTierDowngrade(c.sent, c.resp); got != c.want {
+			t.Errorf("TierDowngrade(%q, %q) = %v, want %v", c.sent, c.resp, got, c.want)
+		}
+	}
+}
+
 func TestInferUpstreamSource(t *testing.T) {
 	cases := []struct {
 		name        string

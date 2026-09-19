@@ -142,11 +142,33 @@ export interface LogOtherData {
       sf?: string
       created?: number
       mismatch?: boolean
+      // Why the pair matched or mismatched. Only 'mismatch' is an anomaly; the
+      // other labels describe a benign canonical difference (vendor prefix,
+      // dated snapshot, rolling -latest alias, runtime alias) or an upstream
+      // that declared no model at all.
+      kind?:
+        | 'exact'
+        | 'vendor_prefix'
+        | 'runtime_alias'
+        | 'snapshot_date'
+        | 'rolling_alias'
+        | 'no_model'
+        | 'mismatch'
+      // Upstream served a weaker sibling of the same family (…-flash/-mini/
+      // -lite/-nano/-preview): the highest-signal adulteration shape
+      tier_downgrade?: boolean
       src?: string
       src_flip?: string
       backend?: string
       backend_flip?: string
       nomodel?: boolean
+      // Channel identity, carried next to the inferred src so the dialog can
+      // show "which of our channels" and "which upstream it reached" together
+      ch?: number
+      ch_type?: number
+      // Set when the channel redirected the model, so an intentional mapping is
+      // not read as an upstream swap
+      mapped?: boolean
     }
     // Quota saturation marker: set when a quota conversion clamped at the
     // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing

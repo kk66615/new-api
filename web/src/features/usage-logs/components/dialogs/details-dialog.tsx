@@ -247,6 +247,28 @@ function upstreamSourceLabel(
   return UPSTREAM_SOURCE_LABELS[src] || src
 }
 
+// Verdict labels explain WHY the sent/declared model pair was judged the way it
+// was. Only 'mismatch' is an anomaly; the rest name a benign canonical
+// difference so a clean-looking log is not mistaken for a silent one.
+const URSP_VERDICT_LABELS: Record<string, string> = {
+  exact: 'Identical',
+  vendor_prefix: 'Vendor namespace prefix only',
+  runtime_alias: 'Vendor runtime alias',
+  snapshot_date: 'Dated snapshot of the same model',
+  rolling_alias: 'Rolling "-latest" alias of the same family',
+  no_model: 'Upstream declared no model',
+  mismatch: 'Different model',
+}
+
+function urspVerdictLabel(
+  kind: string | undefined,
+  t: (key: string) => string
+): string {
+  if (!kind) return '-'
+  const label = URSP_VERDICT_LABELS[kind]
+  return label ? t(label) : kind
+}
+
 function BillingBreakdown(props: {
   log: UsageLog
   other: LogOtherData
@@ -878,7 +900,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
           >
             {other.admin_info.ursp.mismatch && (
               <p className='mb-1 text-xs wrap-break-word'>
-                {t('Upstream declared a different model than the one sent')}
+                {other.admin_info.ursp.tier_downgrade
+                  ? t(
+                      'Upstream served a weaker tier of the same model family than the one sent'
+                    )
+                  : t('Upstream declared a different model than the one sent')}
               </p>
             )}
             <DetailRow
@@ -891,6 +917,29 @@ export function DetailsDialog(props: DetailsDialogProps) {
               value={other.admin_info.ursp.model || t('Not declared by upstream')}
               mono
             />
+            {other.admin_info.ursp.kind && (
+              <DetailRow
+                label={t('Comparison Verdict')}
+                value={urspVerdictLabel(other.admin_info.ursp.kind, t)}
+              />
+            )}
+            {other.admin_info.ursp.mapped && (
+              <DetailRow
+                label={t('Model Mapping')}
+                value={t('Channel redirected the requested model')}
+              />
+            )}
+            {other.admin_info.ursp.ch !== undefined && (
+              <DetailRow
+                label={t('Channel')}
+                value={
+                  props.log.channel_name
+                    ? `${props.log.channel_name} #${other.admin_info.ursp.ch}`
+                    : `#${other.admin_info.ursp.ch}`
+                }
+                mono={!props.log.channel_name}
+              />
+            )}
             {other.admin_info.ursp.id && (
               <DetailRow
                 label={t('Upstream Response ID')}
