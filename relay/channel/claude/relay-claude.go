@@ -93,6 +93,12 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+		// An in-stream error frame is still upstream evidence: observe it before
+		// returning so the failure path carries a ursp block. A stream error
+		// frame has no model/id of its own, so this mostly keeps the raw frame
+		// (and any message_start already observed) for forensics.
+		info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
+		info.SetUpstreamResponseForensics(data, nil)
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	if claudeResponse.StopReason != "" {
@@ -334,6 +340,14 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+		// An upstream error response is still evidence: observe it before
+		// returning so the failure path carries a ursp block.
+		info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
+		if httpResp != nil {
+			info.SetUpstreamResponseForensics(string(data), httpResp.Header)
+		} else {
+			info.SetUpstreamResponseForensics(string(data), nil)
+		}
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	maybeMarkClaudeRefusal(c, claudeResponse.StopReason)

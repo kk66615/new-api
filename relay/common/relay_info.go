@@ -232,10 +232,11 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	info.SendResponseCount = 0
 	info.ClaudeToChatStreamState = nil
 	info.ChatToGeminiStreamState = nil
-	// The sent-model snapshot belongs to the attempt, not the request: a retry
-	// can land on a different channel with a different model mapping, and
-	// ModelMappedHelper re-takes the snapshot right after this runs.
-	info.ResetUpstreamSentModel()
+	// The upstream observation belongs to the attempt, not the request: a retry
+	// can land on a different channel with a different model mapping, and the
+	// failed attempt's observation has already been written to its error log.
+	// The send boundary (relay/channel.doRequest) re-takes the snapshot.
+	info.ResetUpstreamObservation()
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)
@@ -841,13 +842,26 @@ func (info *RelayInfo) SnapshotUpstreamSentModel() {
 	}
 }
 
-// ResetUpstreamSentModel clears the snapshot so the next attempt re-takes it.
-// Called from InitChannelMeta, which runs once per upstream attempt.
-func (info *RelayInfo) ResetUpstreamSentModel() {
+// ResetUpstreamObservation clears everything observed from the previous
+// attempt's upstream response (sent-model snapshot, declared model/id,
+// forensics, usage) so the next attempt starts clean. Called from
+// InitChannelMeta, which runs once per upstream attempt. Without this, a
+// failed attempt's declared model would be attributed to the channel that
+// served the retry whenever that retry's response omits the model.
+func (info *RelayInfo) ResetUpstreamObservation() {
 	if info == nil {
 		return
 	}
 	info.UpstreamSentModel = ""
+	info.UpstreamResponseModel = ""
+	info.UpstreamResponseId = ""
+	info.UpstreamResponseCreated = 0
+	info.UpstreamSystemFingerprint = ""
+	info.UpstreamResponseExcerpt = ""
+	info.UpstreamResponseHeaders = ""
+	info.UpstreamInputTokens = 0
+	info.UpstreamCacheCreationTokens = 0
+	info.UpstreamCacheReadTokens = 0
 }
 
 // ObserveUpstreamResponse records the model identity the upstream response

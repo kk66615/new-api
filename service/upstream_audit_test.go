@@ -1,6 +1,11 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+)
 
 func TestUpstreamModelsMatchForAudit(t *testing.T) {
 	cases := []struct {
@@ -344,5 +349,63 @@ func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
 	}
 	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
 		t.Fatal("source unchanged must not flip when only backend moved")
+	}
+}
+
+// The error-log path calls the exported wrapper on every recorded error,
+// including ones where the request never reached an upstream. It must leave
+// the log untouched in that case and must tolerate a nil relayInfo (the
+// channel-test path passes one).
+func TestAppendUpstreamResponseAuditNoopWithoutObservation(t *testing.T) {
+	other := model.NewLogOther()
+	AppendUpstreamResponseAuditForError(nil, nil, other, "upstream_error")
+	AppendUpstreamResponseAuditForError(nil, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5"}}, other, "upstream_error")
+	if _, ok := other.Snapshot()["admin_info"]; ok {
+		t.Fatal("admin_info written although nothing was observed")
+	}
+}
+
+// An observed error response yields a ursp block that is labelled as failed,
+// still carries the mismatch verdict, and does not feed the flip trackers
+// (an error answered with the relay's own headers must not look like a
+// provider switch).
+func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
+	const ch = 987652 // unused by the other tracker tests (987653-987655)
+	t.Cleanup(func() { srcTracker.Delete(ch); backendTracker.Delete(ch) })
+	seed := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: ch}}
+	seed.ObserveUpstreamResponse("gpt-5.5", "chatcmpl-ok", 1, "")
+	seed.SetUpstreamResponseForensics(`{"id":"chatcmpl-ok"}`, map[string][]string{"Openai-Organization": {"org-x"}})
+	appendUpstreamResponseAudit(nil, seed, model.NewLogOther(), "") // seeds src=openai for the channel
+
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: ch}}
+	info.ObserveUpstreamResponse("gpt-5-6-luna", "chatcmpl-err", 2, "")
+	info.SetUpstreamResponseForensics(`{"error":{"type":"server_error"}}`, map[string][]string{"X-New-Api-Version": {"v1"}})
+	other := model.NewLogOther()
+	AppendUpstreamResponseAuditForError(nil, info, other, "upstream_error")
+
+	admin, _ := other.Snapshot()["admin_info"].(map[string]interface{})
+	ursp, ok := admin["ursp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("ursp missing on error path: %+v", other.Snapshot())
+	}
+	if ursp["err"] != "upstream_error" {
+		t.Fatalf("err label missing: %+v", ursp)
+	}
+	if ursp["mismatch"] != true || ursp["kind"] != VerdictMismatch {
+		t.Fatalf("verdict not applied on error path: %+v", ursp)
+	}
+	if _, flipped := ursp["src_flip"]; flipped {
+		t.Fatalf("error-shaped response fed the source flip tracker: %+v", ursp)
+	}
+	// and the tracker state is untouched: a following clean success must not flip either
+	after := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: ch}}
+	after.ObserveUpstreamResponse("gpt-5.5", "chatcmpl-ok2", 3, "")
+	after.SetUpstreamResponseForensics(`{"id":"chatcmpl-ok2"}`, map[string][]string{"Openai-Organization": {"org-x"}})
+	otherAfter := model.NewLogOther()
+	appendUpstreamResponseAudit(nil, after, otherAfter, "")
+	adminAfter, _ := otherAfter.Snapshot()["admin_info"].(map[string]interface{})
+	urspAfter, _ := adminAfter["ursp"].(map[string]interface{})
+	if _, flipped := urspAfter["src_flip"]; flipped {
+		t.Fatalf("success after error flipped, so the error must have moved the tracker: %+v", urspAfter)
 	}
 }

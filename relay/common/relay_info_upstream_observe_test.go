@@ -78,7 +78,7 @@ func TestAttemptResetClearsSentModelSnapshot(t *testing.T) {
 	if info.UpstreamSentModel == "" {
 		t.Fatal("precondition failed: snapshot not taken")
 	}
-	info.ResetUpstreamSentModel()
+	info.ResetUpstreamObservation()
 	if info.UpstreamSentModel != "" {
 		t.Fatalf("snapshot survived the attempt reset: %q", info.UpstreamSentModel)
 	}
@@ -145,7 +145,7 @@ func TestSnapshotHappensAfterRequestSideRewrites(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: c.preStripped}}
-			info.ResetUpstreamSentModel() // what InitChannelMeta does per attempt
+			info.ResetUpstreamObservation() // what InitChannelMeta does per attempt
 			// ModelMappedHelper no longer snapshots; the suffix handling then
 			// rewrites the name, and only doRequest freezes it.
 			info.UpstreamModelName = c.atSnapshot
@@ -170,5 +170,36 @@ func TestSnapshotMakesHonestEchoCompareClean(t *testing.T) {
 	}
 	if info.UpstreamSentModel == "claude-3-7-sonnet-thinking" {
 		t.Fatal("snapshot kept a pre-strip suffix")
+	}
+}
+
+// A failed attempt observes an upstream error response; its declared model
+// must not be attributed to the channel that serves the retry — especially
+// when the retry's response omits the model (nomodel terminal event).
+func TestAttemptResetClearsPreviousAttemptObservation(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: 1}}
+	info.SnapshotUpstreamSentModel()
+	info.ObserveUpstreamResponse("gpt-5-6-luna", "chatcmpl-first", 1, "fp_a")
+	info.ObserveUpstreamUsage(10, 20, 30)
+	info.SetUpstreamResponseForensics(`{"error":{"type":"server_error"}}`, map[string][]string{"X-A": {"1"}})
+
+	// attempt 2 on another channel
+	info.ChannelMeta = &ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: 2}
+	info.ResetUpstreamObservation()
+
+	if info.UpstreamSentModel != "" || info.UpstreamResponseModel != "" || info.UpstreamResponseId != "" ||
+		info.UpstreamResponseCreated != 0 || info.UpstreamSystemFingerprint != "" ||
+		info.UpstreamResponseExcerpt != "" || info.UpstreamResponseHeaders != "" ||
+		info.UpstreamInputTokens != 0 || info.UpstreamCacheCreationTokens != 0 || info.UpstreamCacheReadTokens != 0 {
+		t.Fatalf("previous attempt's observation leaked into the next attempt: %+v", *info)
+	}
+	// retry's terminal event omits the model: nothing from attempt 1 may fill it
+	info.SnapshotUpstreamSentModel()
+	info.ObserveUpstreamResponse("", "resp_0", 0, "")
+	if info.UpstreamResponseModel != "" {
+		t.Fatalf("model-less retry inherited a model: %q", info.UpstreamResponseModel)
+	}
+	if info.UpstreamResponseId != "resp_0" {
+		t.Fatalf("retry id not recorded: %q", info.UpstreamResponseId)
 	}
 }

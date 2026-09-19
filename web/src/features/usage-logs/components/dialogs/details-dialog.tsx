@@ -924,6 +924,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 value={urspVerdictLabel(other.admin_info.ursp.kind, t)}
               />
             )}
+            {other.admin_info.ursp.err && (
+              <DetailRow
+                label={t('Failed Attempt')}
+                value={`${t('Observed from the upstream error response')} (${other.admin_info.ursp.err})`}
+              />
+            )}
             {other.admin_info.ursp.mapped && (
               <DetailRow
                 label={t('Model Mapping')}

@@ -270,11 +270,9 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
-	}
-
-	// upstream response forensics — capture the upstream's own model declaration
+	// upstream response forensics — capture the upstream's own model declaration.
+	// Runs before the error check on purpose: an error body is still an upstream
+	// response, and the error-log path (controller/relay.go) audits it too.
 	var respCreated int64
 	switch v := simpleResponse.Created.(type) {
 	case float64:
@@ -284,6 +282,10 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 	info.ObserveUpstreamResponse(simpleResponse.Model, simpleResponse.Id, respCreated, "")
 	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+
+	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
 
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {

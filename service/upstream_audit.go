@@ -492,12 +492,34 @@ func injectionDetected(est, injected int) bool {
 	return est > 0 && injected >= injectionMinAbs && float64(injected) >= injectionMinRatio*float64(est)
 }
 
+// AppendUpstreamResponseAuditForError is the entry point for the error-log
+// path (controller/relay.go processChannelError), which builds its own
+// LogOther and writes it through RecordErrorLog. Without it, failed exchanges
+// carried no ursp at all — backwards, since a channel that fails is the one an
+// audit most wants evidence on. errorType labels the record (ursp.err and the
+// evidence note) so a failed attempt is never mistaken for a clean exchange.
+//
+// It is a no-op when nothing was observed, so calling it on a path that has no
+// upstream response (quota rejections, model-not-found before dispatch) is free.
+func AppendUpstreamResponseAuditForError(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther, errorType string) {
+	if errorType == "" {
+		errorType = "unknown"
+	}
+	appendUpstreamResponseAudit(ctx, relayInfo, other, errorType)
+}
+
 // appendUpstreamResponseAudit adds the ursp block to other.admin_info and
 // persists forensic evidence asynchronously. EVERY observed response is
 // persisted (kind=normal for clean ones — user decision 2026-09-02, full
 // retention for evidence completeness; normal rows are pruned after
 // model.NormalEvidenceRetentionDays, anomalies are kept forever).
-func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
+//
+// errorType is empty on the success path. When set, the attempt failed: the
+// record is labelled (ursp.err, evidence note) and the source/backend flip
+// trackers are NOT fed — they are calibrated on success shapes, and a relay
+// that answers errors with its own headers would otherwise flip on every error
+// and flip back on the next success.
+func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther, errorType string) {
 	if relayInfo == nil || other == nil {
 		return
 	}
@@ -581,13 +603,21 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if relayInfo.UpstreamResponseCreated != 0 {
 		ursp["created"] = relayInfo.UpstreamResponseCreated
 	}
-	from, flipped := trackSourceFlip(channelId, src)
-	if flipped {
-		ursp["src_flip"] = from + "->" + src
+	failed := errorType != ""
+	if failed {
+		ursp["err"] = errorType // this attempt failed; the observation is of its error response
 	}
-	bfrom, bflipped := trackBackendFlip(channelId, backend)
-	if bflipped {
-		ursp["backend_flip"] = bfrom + "->" + backend
+	var from, bfrom string
+	var flipped, bflipped bool
+	if !failed {
+		from, flipped = trackSourceFlip(channelId, src)
+		if flipped {
+			ursp["src_flip"] = from + "->" + src
+		}
+		bfrom, bflipped = trackBackendFlip(channelId, backend)
+		if bflipped {
+			ursp["backend_flip"] = bfrom + "->" + backend
+		}
 	}
 	flipNote := ""
 	if flipped {
@@ -613,6 +643,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		note = "provider also flipped: " + flipNote
 	case mismatch:
 		kind = "model_mismatch"
+	}
+	if failed {
+		if note != "" {
+			note += "; "
+		}
+		note += "error: " + errorType
 	}
 
 	requestId := ""

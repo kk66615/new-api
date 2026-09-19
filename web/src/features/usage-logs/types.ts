@@ -170,6 +170,10 @@ export interface LogOtherData {
       // Set when the channel redirected the model, so an intentional mapping is
       // not read as an upstream swap
       mapped?: boolean
+      // Error type of the failed attempt this observation belongs to. Present
+      // only on error-log records: the audited response is the upstream's
+      // error body, not a completed exchange.
+      err?: string
     }
     // Quota saturation marker: set when a quota conversion clamped at the
     // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing

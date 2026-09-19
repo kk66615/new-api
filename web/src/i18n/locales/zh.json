@@ -5553,6 +5553,8 @@
     "Upstream declared no model": "上游未声明模型",
     "Different model": "不同模型",
     "Channel redirected the requested model": "渠道对请求的模型做了重定向",
+    "Failed Attempt": "失败的尝试",
+    "Observed from the upstream error response": "来自上游错误响应的观测",
     "Channel Type": "渠道类型",
     "Upstream Response ID": "上游响应 ID",
     "System Fingerprint": "系统指纹",
