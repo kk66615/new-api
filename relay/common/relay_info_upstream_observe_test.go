@@ -34,3 +34,74 @@ func TestObserveUpstreamResponseNilChannelMeta(t *testing.T) {
 		t.Fatalf("unexpected state: %q %q %q", info.UpstreamResponseModel, info.UpstreamResponseId, info.UpstreamSentModel)
 	}
 }
+
+// The whole point of the sent-model snapshot is that it survives the claude
+// stream handlers overwriting UpstreamModelName with the model the UPSTREAM
+// declared. If the snapshot were taken after that rewrite, every comparison
+// would be model-against-itself and the audit would become a silent no-op.
+func TestSentModelSnapshotSurvivesUpstreamModelNameRewrite(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "claude-sonnet-5"}}
+	info.SnapshotUpstreamSentModel()
+
+	// what the claude stream handler does on message_start
+	info.ObserveUpstreamResponse("claude-sonnet-4-6", "msg_01abc", 0, "")
+	info.UpstreamModelName = "claude-sonnet-4-6"
+
+	if info.UpstreamSentModel != "claude-sonnet-5" {
+		t.Fatalf("snapshot was corrupted by the rewrite: got %q, want %q",
+			info.UpstreamSentModel, "claude-sonnet-5")
+	}
+	if info.UpstreamResponseModel != "claude-sonnet-4-6" {
+		t.Fatalf("declared model wrong: %q", info.UpstreamResponseModel)
+	}
+}
+
+// The snapshot is write-once: a second call must not adopt the upstream's own
+// name, which by then has overwritten UpstreamModelName.
+func TestSentModelSnapshotIsWriteOnce(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "claude-sonnet-5"}}
+	info.SnapshotUpstreamSentModel()
+
+	info.UpstreamModelName = "claude-sonnet-4-6" // response-side rewrite
+	info.SnapshotUpstreamSentModel()             // must be a no-op
+
+	if info.UpstreamSentModel != "claude-sonnet-5" {
+		t.Fatalf("second snapshot overwrote the first: got %q", info.UpstreamSentModel)
+	}
+}
+
+// A retry re-runs InitChannelMeta before ModelMappedHelper, so the snapshot
+// must be cleared per attempt rather than carried over from the previous one.
+func TestAttemptResetClearsSentModelSnapshot(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "claude-sonnet-5"}}
+	info.SnapshotUpstreamSentModel()
+	if info.UpstreamSentModel == "" {
+		t.Fatal("precondition failed: snapshot not taken")
+	}
+	info.ResetUpstreamSentModel()
+	if info.UpstreamSentModel != "" {
+		t.Fatalf("snapshot survived the attempt reset: %q", info.UpstreamSentModel)
+	}
+	// the new attempt can then take a fresh one
+	info.UpstreamModelName = "gpt-5.6-sol"
+	info.SnapshotUpstreamSentModel()
+	if info.UpstreamSentModel != "gpt-5.6-sol" {
+		t.Fatalf("fresh snapshot not taken after reset: %q", info.UpstreamSentModel)
+	}
+}
+
+// ObserveUpstreamResponse must still take the fallback snapshot on paths that
+// never run ModelMappedHelper (tests, task relays).
+func TestObserveTakesFallbackSnapshotWhenNotFinalised(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "gpt-5.6-sol"}}
+	info.ObserveUpstreamResponse("gpt-5.6-sol", "resp_1", 0, "")
+	if info.UpstreamSentModel != "gpt-5.6-sol" {
+		t.Fatalf("fallback snapshot missing: %q", info.UpstreamSentModel)
+	}
+}
+
+// A nil receiver must not panic — handlers are exercised with bare RelayInfos.
+func TestSnapshotUpstreamSentModelNilReceiver(t *testing.T) {
+	var info *RelayInfo
+	info.SnapshotUpstreamSentModel()
+}

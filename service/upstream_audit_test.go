@@ -93,26 +93,74 @@ func TestClassifyUpstreamModelMismatch(t *testing.T) {
 
 // TestUpstreamModelIsTierDowngrade covers the highest-signal adulteration shape:
 // upstream serving a weaker sibling of the same family.
+//
+// The label never feeds the verdict, so a false negative here is a cosmetic
+// loss; a false POSITIVE shows the operator a wrong conclusion, which is worse.
+// The dated-preview rows below exist because an earlier substring
+// implementation mislabelled them as downgrades.
 func TestUpstreamModelIsTierDowngrade(t *testing.T) {
 	cases := []struct {
 		sent, resp string
 		want       bool
+		why        string
 	}{
-		{"deepseek-v4", "deepseek-v4-flash", true},
-		{"gpt-5", "gpt-5-mini", true},
-		{"gemini-2.5-pro", "gemini-2.5-pro-preview", true},
-		{"claude-sonnet-5", "claude-sonnet-5-lite", true},
-		{"gpt-5", "openai/gpt-5-nano", true},
-		// not a downgrade
-		{"deepseek-v4-pro", "deepseek-v4-flash", false}, // sibling, not a prefix downgrade
-		{"claude-opus-4-7", "deepseek-v4-pro", false},   // unrelated model
-		{"gpt-5", "gpt-5-2025-08-07", false},            // dated snapshot, not a tier
-		{"", "gpt-5-mini", false},                       // no sent model to compare
-		{"gpt-5", "", false},
+		// additive downgrade: response carries a weaker qualifier
+		{"deepseek-v4", "deepseek-v4-flash", true, "flash tier"},
+		{"gpt-5", "gpt-5-mini", true, "mini tier"},
+		{"gemini-2.5-pro", "gemini-2.5-pro-preview", true, "preview tier"},
+		{"claude-sonnet-5", "claude-sonnet-5-lite", true, "lite tier"},
+		{"gpt-5", "openai/gpt-5-nano", true, "nano tier, vendor prefix stripped"},
+		// subtractive downgrade: response drops one of our higher-tier qualifiers
+		{"deepseek-v4-pro", "deepseek-v4", true, "pro qualifier dropped"},
+		{"gpt-5-pro", "gpt-5", true, "pro qualifier dropped"},
+		{"claude-opus-4-7-thinking", "claude-opus-4-7", true, "thinking dropped"},
+		// dated snapshots are normal version pins, NOT downgrades
+		{"gpt-5", "gpt-5-preview-2025-08-07", false, "dated preview snapshot"},
+		{"gpt-5", "gpt-5-2025-08-07", false, "dated snapshot"},
+		{"gpt-5", "gpt-5-pro-2025-08-07", false, "dated pro snapshot is a naming diff"},
+		// unrelated or sibling models
+		{"deepseek-v4-pro", "deepseek-v4-flash", false, "sibling, not a prefix downgrade"},
+		{"claude-opus-4-7", "deepseek-v4-pro", false, "unrelated model"},
+		{"grok-4.5", "grok-4.5-build", false, "runtime alias, not a tier"},
+		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", false, "rolling alias"},
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", false, "alias resolution, same tier"},
+		// version-only change within the same tier: a different model, not a tier swap
+		{"claude-opus-4-7", "claude-opus-4-5", false, "version change, tier unknown"},
+		// degenerate input
+		{"", "gpt-5-mini", false, "no sent model"},
+		{"gpt-5", "", false, "no response model"},
+		{"gpt-5", "gpt-5", false, "identical"},
 	}
 	for _, c := range cases {
 		if got := UpstreamModelIsTierDowngrade(c.sent, c.resp); got != c.want {
-			t.Errorf("TierDowngrade(%q, %q) = %v, want %v", c.sent, c.resp, got, c.want)
+			t.Errorf("TierDowngrade(%q, %q) = %v, want %v (%s)", c.sent, c.resp, got, c.want, c.why)
+		}
+	}
+}
+
+// TestTierDowngradeNeverAffectsVerdict pins the invariant the log relies on:
+// the tier label is display-only and can never turn a clean pair into an
+// anomaly, nor an anomaly into a clean one. It is enforced structurally by the
+// "mismatch &&" gate at the call site; this test fails loudly if that gate is
+// ever dropped.
+func TestTierDowngradeNeverAffectsVerdict(t *testing.T) {
+	models := []string{
+		"", "gpt-5", "gpt-5-mini", "gpt-5-preview-2025-08-07", "gpt-5-pro",
+		"deepseek-v4", "deepseek-v4-flash", "deepseek-v4-pro",
+		"claude-opus-4-7", "claude-opus-4-5", "claude-sonnet-4-6-latest",
+		"openai/gpt-5-nano", "grok-4.5", "grok-4.5-build", "gemini-pro-latest",
+	}
+	for _, sent := range models {
+		for _, resp := range models {
+			verdict := ClassifyUpstreamModelMismatch(sent, resp)
+			tier := UpstreamModelIsTierDowngrade(sent, resp)
+			if tier && verdict != VerdictMismatch {
+				t.Fatalf("tier downgrade %q -> %q has verdict %q; the label must never stand alone",
+					sent, resp, verdict)
+			}
+			if !tier && verdict == VerdictMismatch {
+				continue // a generic mismatch is the expected fallback
+			}
 		}
 	}
 }

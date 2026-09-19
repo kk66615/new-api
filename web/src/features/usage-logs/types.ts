@@ -162,9 +162,10 @@ export interface LogOtherData {
       backend?: string
       backend_flip?: string
       nomodel?: boolean
-      // Channel identity, carried next to the inferred src so the dialog can
-      // show "which of our channels" and "which upstream it reached" together
-      ch?: number
+      // Channel type (int enum) of the channel that produced this response. The
+      // channel id/name already live on the log record itself; the type is the
+      // part the record lacks, and is what tells a configured AWS channel apart
+      // from a response that merely looked like AWS.
       ch_type?: number
       // Set when the channel redirected the model, so an intentional mapping is
       // not read as an upstream swap

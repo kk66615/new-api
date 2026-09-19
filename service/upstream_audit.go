@@ -69,12 +69,6 @@ func snapshotAliasVerdict(a, b string) string {
 	return VerdictSnapshotDate
 }
 
-// snapshotAliasMatch is the boolean view of snapshotAliasVerdict, kept for the
-// existing call sites and tests.
-func snapshotAliasMatch(a, b string) bool {
-	return snapshotAliasVerdict(a, b) != ""
-}
-
 // stripVendorPrefix drops an OpenRouter-style "vendor/" prefix
 // (deepseek/deepseek-v4-flash → deepseek-v4-flash) so a relay that echoes the
 // namespaced id is not flagged. Only the last path segment is kept.
@@ -151,22 +145,92 @@ func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 	return ClassifyUpstreamModelMismatch(sentModel, responseModel) != VerdictMismatch
 }
 
-// UpstreamModelIsTierDowngrade reports whether the verdict is the specific
-// shape where the upstream served a weaker sibling of the same family
-// (…-flash / …-mini / …-preview against the base id). These pass through
-// VerdictMismatch and are the highest-signal adulteration case, so the log
-// flags them explicitly rather than burying them among generic mismatches.
+// lowerTierTokens are the qualifier tokens vendors use for a cheaper, weaker
+// sibling of the same family. Compared as whole "-"-separated tokens, never as
+// substrings: "preview" contains "revie"—and more to the point, a dated preview
+// snapshot (gpt-5-preview-2025-08-07) is a normal vendor version pin, not a
+// downgrade, and substring matching would mislabel it.
+var lowerTierTokens = map[string]bool{
+	"flash": true, "mini": true, "lite": true, "nano": true, "small": true,
+	"preview": true, "fast": true, "turbo": true, "air": true, "instant": true,
+}
+
+// higherTierTokens are the mirror-image qualifiers: serving the base id when a
+// bigger tier was requested (gpt-5-pro → gpt-5) is also a downgrade.
+var higherTierTokens = map[string]bool{
+	"pro": true, "max": true, "ultra": true, "opus": true, "plus": true,
+	"thinking": true, "reasoning": true,
+}
+
+// versionToken reports whether a "-"-separated token looks like a version
+// marker rather than a tier qualifier: a run of 4+ digits, with or without
+// internal hyphens already split off (0731, 2025, 08, 07).
+func versionToken(tok string) bool {
+	if len(tok) < 4 {
+		return false
+	}
+	for _, r := range tok {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// UpstreamModelIsTierDowngrade reports whether the upstream served a weaker
+// sibling of the model family we asked for. It is a LABEL ONLY: it never feeds
+// the mismatch verdict (see appendUpstreamResponseAudit, where it is gated on
+// mismatch already being true), so a false positive here can mislabel a log but
+// can never change what is flagged.
+//
+// A suffix carrying a version marker (gpt-5-preview-2025-08-07) is read as a
+// vendor version pin, not a downgrade: the dated form is how vendors freeze a
+// build, and the same tokens appear on full-fat pins too.
+//
+// Known boundary: only the additive form is recognised — the response carries
+// extra qualifier tokens (…-flash / …-mini / …-preview) or drops one of ours
+// (gpt-5-pro → gpt-5). A pure version change within the same tier (4-7 → 4-5)
+// is a different model and stays a plain mismatch, which is correct: we cannot
+// tell "older version served" from "different model served" without a
+// vendor-maintained ranking of every id.
 func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
 	sent := strings.ToLower(stripVendorPrefix(strings.TrimSpace(sentModel)))
-	if sent == "" {
-		return false
-	}
 	resp := strings.ToLower(stripVendorPrefix(strings.TrimSpace(responseModel)))
-	if resp == "" || !strings.HasPrefix(resp, sent+"-") {
+	if sent == "" || resp == "" || sent == resp {
 		return false
 	}
-	for _, tier := range []string{"flash", "mini", "lite", "nano", "small", "preview", "fast", "turbo", "air"} {
-		if strings.Contains(resp[len(sent)+1:], tier) {
+	// An alias/snapshot/namespace relationship is a naming difference, not a
+	// tier swap — never label those as downgrades.
+	if ClassifyUpstreamModelMismatch(sent, resp) != VerdictMismatch {
+		return false
+	}
+	// additive: resp extends sent with a weaker qualifier
+	if strings.HasPrefix(resp, sent+"-") {
+		tokens := strings.Split(resp[len(sent)+1:], "-")
+		if hasVersionToken(tokens) {
+			return false // dated pin, not a tier swap
+		}
+		for _, tok := range tokens {
+			if lowerTierTokens[tok] {
+				return true
+			}
+		}
+		return false
+	}
+	// subtractive: resp is sent with one of sent's higher-tier qualifiers gone
+	if strings.HasPrefix(sent, resp+"-") {
+		for _, tok := range strings.Split(sent[len(resp)+1:], "-") {
+			if higherTierTokens[tok] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasVersionToken(tokens []string) bool {
+	for _, tok := range tokens {
+		if versionToken(tok) {
 			return true
 		}
 	}
@@ -501,15 +565,14 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		// sibling of the same family (…-flash / …-mini / …-preview)
 		ursp["tier_downgrade"] = true
 	}
-	// channel identity, carried alongside the inferred src so the UI can show
-	// "which of OUR channels" and "which upstream it actually reached" together.
-	// The channel NAME is already on the log record itself (log.channel_name) —
-	// only the numeric id/type are duplicated here, where the src lives.
-	if channelId != 0 {
-		ursp["ch"] = channelId
-		if channelType != 0 {
-			ursp["ch_type"] = channelType
-		}
+	// Channel TYPE only. The numeric channel id is deliberately NOT duplicated
+	// here: the log record already carries it (log.channel_id / channel_name),
+	// and both are read from the same relayInfo.ChannelMeta at the same moment,
+	// so a second copy could only ever drift. The type adds information the
+	// record lacks — it is what tells "we configured an AWS channel" apart from
+	// "the wire shape just looked like AWS".
+	if channelType != 0 {
+		ursp["ch_type"] = channelType
 	}
 	// mapping layer: present only when the channel redirected the model, so an
 	// intentional mapping is never confused with an upstream swap

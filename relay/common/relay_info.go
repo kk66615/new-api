@@ -232,6 +232,10 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	info.SendResponseCount = 0
 	info.ClaudeToChatStreamState = nil
 	info.ChatToGeminiStreamState = nil
+	// The sent-model snapshot belongs to the attempt, not the request: a retry
+	// can land on a different channel with a different model mapping, and
+	// ModelMappedHelper re-takes the snapshot right after this runs.
+	info.ResetUpstreamSentModel()
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)
@@ -814,6 +818,34 @@ func (info *RelayInfo) GetUpstreamModelName() string {
 	return info.UpstreamModelName
 }
 
+// SnapshotUpstreamSentModel freezes the model name we are about to address
+// upstream. Call it once the request is finalised (after model mapping has
+// settled UpstreamModelName) — see helper.ModelMappedHelper.
+//
+// The value is deliberately write-once. Response-side code rewrites
+// UpstreamModelName with the model the UPSTREAM declared (the claude stream
+// handlers do this on message_start) so that later consumers name the model the
+// vendor echoed; the audit must still compare against what we SENT. A second
+// snapshot would silently adopt the upstream's own name, making every mismatch
+// compare equal and turning the whole audit into a no-op that nobody notices.
+func (info *RelayInfo) SnapshotUpstreamSentModel() {
+	if info == nil || info.UpstreamSentModel != "" {
+		return
+	}
+	if info.ChannelMeta != nil {
+		info.UpstreamSentModel = info.UpstreamModelName
+	}
+}
+
+// ResetUpstreamSentModel clears the snapshot so the next attempt re-takes it.
+// Called from InitChannelMeta, which runs once per upstream attempt.
+func (info *RelayInfo) ResetUpstreamSentModel() {
+	if info == nil {
+		return
+	}
+	info.UpstreamSentModel = ""
+}
+
 // ObserveUpstreamResponse records the model identity the upstream response
 // declared. Call it at the point the response is parsed, BEFORE any code path
 // that rewrites info.UpstreamModelName (e.g. claude message_start handling).
@@ -828,8 +860,9 @@ func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created
 	if len(model) > 200 {
 		model = model[:200]
 	}
-	// UpstreamModelName is promoted from the embedded *ChannelMeta, which tests
-	// (and pre-routing paths) may leave nil.
+	// Fallback snapshot for paths that never went through ModelMappedHelper
+	// (tests, task relays). UpstreamModelName is promoted from the embedded
+	// *ChannelMeta, which those paths may leave nil.
 	if info.UpstreamSentModel == "" && info.ChannelMeta != nil {
 		info.UpstreamSentModel = info.UpstreamModelName
 	}

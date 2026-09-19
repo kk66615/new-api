@@ -59,6 +59,7 @@ import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Label } from '@/components/ui/label'
 import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
+import { getChannelTypeLabel } from '@/features/channels/lib/channel-utils'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
@@ -929,15 +930,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 value={t('Channel redirected the requested model')}
               />
             )}
-            {other.admin_info.ursp.ch !== undefined && (
+            {other.admin_info.ursp.ch_type !== undefined && (
               <DetailRow
-                label={t('Channel')}
-                value={
-                  props.log.channel_name
-                    ? `${props.log.channel_name} #${other.admin_info.ursp.ch}`
-                    : `#${other.admin_info.ursp.ch}`
-                }
-                mono={!props.log.channel_name}
+                label={t('Channel Type')}
+                value={`${getChannelTypeLabel(other.admin_info.ursp.ch_type)} (${other.admin_info.ursp.ch_type})`}
               />
             )}
             {other.admin_info.ursp.id && (
