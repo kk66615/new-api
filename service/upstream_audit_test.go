@@ -114,10 +114,16 @@ func TestUpstreamModelIsTierDowngrade(t *testing.T) {
 		{"deepseek-v4-pro", "deepseek-v4", true, "pro qualifier dropped"},
 		{"gpt-5-pro", "gpt-5", true, "pro qualifier dropped"},
 		{"claude-opus-4-7-thinking", "claude-opus-4-7", true, "thinking dropped"},
-		// dated snapshots are normal version pins, NOT downgrades
-		{"gpt-5", "gpt-5-preview-2025-08-07", false, "dated preview snapshot"},
-		{"gpt-5", "gpt-5-2025-08-07", false, "dated snapshot"},
-		{"gpt-5", "gpt-5-pro-2025-08-07", false, "dated pro snapshot is a naming diff"},
+		// A tier token decides the grade regardless of any date build number
+		// riding along with it: "-preview" is a preview build, and its date does
+		// not upgrade it. Only a bare date (no tier word) is a same-grade pin.
+		{"gpt-5", "gpt-5-preview-2025-08-07", true, "preview grade, dated"},
+		{"deepseek-v4", "deepseek-v4-flash-0731", true, "flash grade, dated build"},
+		{"gpt-5", "gpt-5-mini-2025-08-07", true, "mini grade, dated"},
+		// bare date with no tier word is a version pin, not a grade change
+		{"gpt-5", "gpt-5-2025-08-07", false, "dated snapshot, same grade"},
+		{"claude-sonnet-5", "claude-sonnet-5-20260101", false, "dated snapshot, same grade"},
+		{"gpt-5", "gpt-5-pro-2025-08-07", false, "no lower-tier word; a naming diff"},
 		// unrelated or sibling models
 		{"deepseek-v4-pro", "deepseek-v4-flash", false, "sibling, not a prefix downgrade"},
 		{"claude-opus-4-7", "deepseek-v4-pro", false, "unrelated model"},
@@ -152,14 +158,13 @@ func TestTierDowngradeNeverAffectsVerdict(t *testing.T) {
 	}
 	for _, sent := range models {
 		for _, resp := range models {
-			verdict := ClassifyUpstreamModelMismatch(sent, resp)
 			tier := UpstreamModelIsTierDowngrade(sent, resp)
-			if tier && verdict != VerdictMismatch {
+			if !tier {
+				continue // only labelled pairs are under test
+			}
+			if verdict := ClassifyUpstreamModelMismatch(sent, resp); verdict != VerdictMismatch {
 				t.Fatalf("tier downgrade %q -> %q has verdict %q; the label must never stand alone",
 					sent, resp, verdict)
-			}
-			if !tier && verdict == VerdictMismatch {
-				continue // a generic mismatch is the expected fallback
 			}
 		}
 	}

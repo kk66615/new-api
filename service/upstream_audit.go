@@ -99,7 +99,7 @@ func stripVendorPrefix(m string) string {
 // value means "consistent", with the reason retained so the UI can label a
 // benign difference honestly instead of showing a bare boolean.
 const (
-	VerdictExact        = "exact"        // identical after canonicalization
+	VerdictExact        = "exact"         // identical after canonicalization
 	VerdictVendorPrefix = "vendor_prefix" // differed only by a vendor/namespace prefix
 	VerdictRuntimeAlias = "runtime_alias" // vendor alias ↔ runtime build id (grok-4.5 ↔ grok-4.5-build)
 	VerdictSnapshotDate = "snapshot_date" // alias ↔ dated snapshot (gpt-5 ↔ gpt-5-2025-08-07)
@@ -162,36 +162,31 @@ var higherTierTokens = map[string]bool{
 	"thinking": true, "reasoning": true,
 }
 
-// versionToken reports whether a "-"-separated token looks like a version
-// marker rather than a tier qualifier: a run of 4+ digits, with or without
-// internal hyphens already split off (0731, 2025, 08, 07).
-func versionToken(tok string) bool {
-	if len(tok) < 4 {
-		return false
-	}
-	for _, r := range tok {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // UpstreamModelIsTierDowngrade reports whether the upstream served a weaker
 // sibling of the model family we asked for. It is a LABEL ONLY: it never feeds
 // the mismatch verdict (see appendUpstreamResponseAudit, where it is gated on
 // mismatch already being true), so a false positive here can mislabel a log but
 // can never change what is flagged.
 //
-// A suffix carrying a version marker (gpt-5-preview-2025-08-07) is read as a
-// vendor version pin, not a downgrade: the dated form is how vendors freeze a
-// build, and the same tokens appear on full-fat pins too.
+// The rule separates two independent things that often appear together:
 //
-// Known boundary: only the additive form is recognised — the response carries
-// extra qualifier tokens (…-flash / …-mini / …-preview) or drops one of ours
-// (gpt-5-pro → gpt-5). A pure version change within the same tier (4-7 → 4-5)
-// is a different model and stays a plain mismatch, which is correct: we cannot
-// tell "older version served" from "different model served" without a
+//   - a TIER token (flash / mini / lite / preview / …) answers "is this the
+//     same grade?" — its presence means the grade changed, whatever else the
+//     id carries. gpt-5 → gpt-5-preview-2025-08-07 is still a preview build;
+//     the date does not upgrade it. deepseek-v4 → deepseek-v4-flash-0731 is
+//     still a flash downgrade.
+//   - a VERSION token (a 4+ digit run) only answers "is this a frozen build?"
+//     It changes nothing on its own, and is only consulted when NO tier token
+//     is present, to say "this is a same-grade dated snapshot, not a swap".
+//
+// So a dated suffix never suppresses a genuine tier downgrade; it only keeps a
+// bare date difference out of the downgrade label.
+//
+// Known boundary: additive (extra qualifier on the response) and subtractive
+// (response lacking one of our higher-tier qualifiers, gpt-5-pro → gpt-5) are
+// both recognised. A pure version change within the same grade (4-7 → 4-5) is a
+// different model and stays a plain mismatch, which is correct — telling
+// "older version served" from "different model served" would need a
 // vendor-maintained ranking of every id.
 func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
 	sent := strings.ToLower(stripVendorPrefix(strings.TrimSpace(sentModel)))
@@ -204,17 +199,16 @@ func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
 	if ClassifyUpstreamModelMismatch(sent, resp) != VerdictMismatch {
 		return false
 	}
-	// additive: resp extends sent with a weaker qualifier
+	// additive: resp extends sent with further qualifier tokens
 	if strings.HasPrefix(resp, sent+"-") {
 		tokens := strings.Split(resp[len(sent)+1:], "-")
-		if hasVersionToken(tokens) {
-			return false // dated pin, not a tier swap
-		}
 		for _, tok := range tokens {
 			if lowerTierTokens[tok] {
-				return true
+				return true // a grade change, date or no date
 			}
 		}
+		// No tier token: a purely dated extension is a same-grade snapshot,
+		// which is not a downgrade.
 		return false
 	}
 	// subtractive: resp is sent with one of sent's higher-tier qualifiers gone
@@ -223,15 +217,6 @@ func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
 			if higherTierTokens[tok] {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func hasVersionToken(tokens []string) bool {
-	for _, tok := range tokens {
-		if versionToken(tok) {
-			return true
 		}
 	}
 	return false

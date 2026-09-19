@@ -65,11 +65,9 @@ func ModelMappedHelper(c *gin.Context, info *relaycommon.RelayInfo, request dto.
 	if request != nil {
 		request.SetModelName(info.UpstreamModelName)
 	}
-	// upstream response forensics — freeze the model we are actually about to
-	// send, at the moment the request is finalised. The audit compares this
-	// against the model the response declares; taking the snapshot here means
-	// the comparison cannot be corrupted by response-side code that later
-	// rewrites UpstreamModelName (the claude stream handlers do exactly that).
-	info.SnapshotUpstreamSentModel()
+	// NOTE: do NOT snapshot the sent model here. Model mapping is not the end of
+	// the request side — ApplyReasoningModelSuffix and every adaptor's
+	// ConvertRequest still rewrite UpstreamModelName afterwards. The snapshot is
+	// taken at the send boundary (relay/channel.doRequest) instead.
 	return nil
 }

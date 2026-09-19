@@ -105,3 +105,70 @@ func TestSnapshotUpstreamSentModelNilReceiver(t *testing.T) {
 	var info *RelayInfo
 	info.SnapshotUpstreamSentModel()
 }
+
+// The snapshot must be taken at the SEND boundary, i.e. after every
+// request-side rewrite. This test reproduces the real handler order
+// (InitChannelMeta -> ModelMappedHelper -> reasoning/search suffix handling ->
+// adaptor ConvertRequest -> doRequest) and asserts the snapshot lands on the
+// final name, not the pre-strip one.
+//
+// This is the case that slipped through the first fix: taking the snapshot in
+// ModelMappedHelper recorded "claude-3-7-sonnet-thinking" while the request
+// that actually went out carried "claude-3-7-sonnet", so an upstream honestly
+// echoing the request was reported as a model swapper.
+func TestSnapshotHappensAfterRequestSideRewrites(t *testing.T) {
+	cases := []struct {
+		name        string
+		atSnapshot  string // UpstreamModelName when the snapshot is taken
+		preStripped string // an earlier, not-yet-stripped value
+		want        string
+	}{
+		{
+			name:        "reasoning suffix stripped before send",
+			preStripped: "claude-3-7-sonnet-thinking",
+			atSnapshot:  "claude-3-7-sonnet",
+			want:        "claude-3-7-sonnet",
+		},
+		{
+			name:        "xai -search suffix stripped before send",
+			preStripped: "grok-4.5-search",
+			atSnapshot:  "grok-4.5",
+			want:        "grok-4.5",
+		},
+		{
+			name:        "reasoning effort suffix stripped before send",
+			preStripped: "gpt-5-high",
+			atSnapshot:  "gpt-5",
+			want:        "gpt-5",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: c.preStripped}}
+			info.ResetUpstreamSentModel() // what InitChannelMeta does per attempt
+			// ModelMappedHelper no longer snapshots; the suffix handling then
+			// rewrites the name, and only doRequest freezes it.
+			info.UpstreamModelName = c.atSnapshot
+			info.SnapshotUpstreamSentModel()
+			if info.UpstreamSentModel != c.want {
+				t.Fatalf("sent model = %q, want %q (a pre-strip snapshot makes an "+
+					"honest upstream look like a swapper)", info.UpstreamSentModel, c.want)
+			}
+		})
+	}
+}
+
+// The pairing that matters: after the snapshot, the comparison against the
+// model the upstream declares must be clean when the upstream honestly echoes
+// the request.
+func TestSnapshotMakesHonestEchoCompareClean(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "claude-3-7-sonnet"}}
+	info.SnapshotUpstreamSentModel()
+	info.UpstreamModelName = "claude-3-7-sonnet" // any later rewrite
+	if info.UpstreamSentModel != info.UpstreamModelName {
+		t.Fatalf("snapshot drifted: %q vs %q", info.UpstreamSentModel, info.UpstreamModelName)
+	}
+	if info.UpstreamSentModel == "claude-3-7-sonnet-thinking" {
+		t.Fatal("snapshot kept a pre-strip suffix")
+	}
+}

@@ -819,15 +819,19 @@ func (info *RelayInfo) GetUpstreamModelName() string {
 }
 
 // SnapshotUpstreamSentModel freezes the model name we are about to address
-// upstream. Call it once the request is finalised (after model mapping has
-// settled UpstreamModelName) — see helper.ModelMappedHelper.
+// upstream. Call it at the SEND boundary — relay/channel.doRequest — which is
+// the last point before the request goes out.
 //
-// The value is deliberately write-once. Response-side code rewrites
-// UpstreamModelName with the model the UPSTREAM declared (the claude stream
-// handlers do this on message_start) so that later consumers name the model the
-// vendor echoed; the audit must still compare against what we SENT. A second
-// snapshot would silently adopt the upstream's own name, making every mismatch
-// compare equal and turning the whole audit into a no-op that nobody notices.
+// The window matters in both directions:
+//   - too early (e.g. in ModelMappedHelper) and it captures a pre-strip name
+//     like "claude-3-7-sonnet-thinking", so an upstream that honestly echoes
+//     the request is recorded as having swapped the model;
+//   - too late (after a response handler has run) and it adopts the model the
+//     UPSTREAM declared, making every comparison compare-equal and turning the
+//     audit into a silent no-op.
+//
+// The value is therefore write-once, and InitChannelMeta clears it per attempt
+// (a retry can land on a different channel with a different model mapping).
 func (info *RelayInfo) SnapshotUpstreamSentModel() {
 	if info == nil || info.UpstreamSentModel != "" {
 		return
