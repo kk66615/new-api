@@ -5541,7 +5541,7 @@
     "Zoom": "缩放",
     "Upstream Response Model": "上游响应模型",
     "Upstream declared a different model than the one sent": "上游声明的模型与发出的模型不一致",
-    "Upstream served a weaker tier of the same model family than the one sent": "上游返回了同族模型中的低档版本（降级供给）",
+    "Upstream served a different tier of the same model family: usually a cheaper, weaker variant (…-flash / …-mini / …-lite), but …-preview can also mean a newer preview build — check the model on the channel before acting": "上游返回了同族模型中的不同档位：通常是更便宜的弱档（…-flash / …-mini / …-lite），但 …-preview 也可能指更新的预览版——处置前请核对该渠道实际配置的模型",
     "Sent Model": "发出模型",
     "Declared Model": "上游声明模型",
     "Comparison Verdict": "比对结论",

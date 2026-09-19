@@ -903,7 +903,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
               <p className='mb-1 text-xs wrap-break-word'>
                 {other.admin_info.ursp.tier_downgrade
                   ? t(
-                      'Upstream served a weaker tier of the same model family than the one sent'
+                      'Upstream served a different tier of the same model family: usually a cheaper, weaker variant (…-flash / …-mini / …-lite), but …-preview can also mean a newer preview build — check the model on the channel before acting'
                     )
                   : t('Upstream declared a different model than the one sent')}
               </p>
