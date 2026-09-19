@@ -108,12 +108,16 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		}
 
 		if claudeResponse.StopReason != "" {
-			maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
+			maybeMarkClaudeRefusal(c, info, claudeResponse.StopReason)
 		}
 		if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil {
-			maybeMarkClaudeRefusal(c, *claudeResponse.Delta.StopReason)
+			maybeMarkClaudeRefusal(c, info, *claudeResponse.Delta.StopReason)
+		}
+		if claudeResponse.Type == "message_stop" {
+			info.StreamStatus.MarkCompleted()
 		}
 		if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
+			info.ObserveResponseModel(claudeResponse.Message.Model)
 			// observe BEFORE overwriting UpstreamModelName: the sent-model
 			// snapshot must be taken while UpstreamModelName still holds the
 			// model we actually addressed upstream. message.id is read off the

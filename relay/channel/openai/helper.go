@@ -144,6 +144,7 @@ func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuil
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			return err
 		}
+		info.ObserveResponseModel(streamResponse.Model)
 		// upstream response forensics — mid-stream frames declare the upstream's
 		// own model; observed here so a mismatch is caught even when the relay
 		// never reaches the final-frame path (aborted streams included).

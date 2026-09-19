@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -46,7 +47,16 @@ type UpstreamEvidence struct {
 
 var evidencePruneOnce sync.Once
 
+var errUpstreamEvidenceNoDB = errors.New("upstream evidence: log database not initialised")
+
 func InsertUpstreamEvidence(e *UpstreamEvidence) error {
+	if LOG_DB == nil {
+		// Never dereference a nil *gorm.DB: unit tests that exercise the relay
+		// handlers without a database would otherwise fault inside gorm, and a
+		// recovered nil-pointer fault in that path has been observed to wedge
+		// the test binary rather than unwind.
+		return errUpstreamEvidenceNoDB
+	}
 	evidencePruneOnce.Do(startEvidencePruner)
 	return LOG_DB.Create(e).Error
 }
@@ -61,6 +71,9 @@ func startEvidencePruner() {
 			}
 		}()
 		prune := func() {
+			if LOG_DB == nil {
+				return
+			}
 			cutoff := time.Now().Add(-time.Duration(NormalEvidenceRetentionDays) * 24 * time.Hour).Unix()
 			res := LOG_DB.Where("kind = ? AND created_at < ?", "normal", cutoff).Delete(&UpstreamEvidence{})
 			if res.Error != nil {

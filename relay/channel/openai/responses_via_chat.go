@@ -35,6 +35,7 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	info.ObserveResponseModel(chatResp.Model)
 	// upstream response forensics — the Chat response declares its own model;
 	// observe before the converter rewrites it into a Responses object
 	var chatCreated int64
@@ -151,6 +152,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			return
 		}
 
+		info.ObserveResponseModel(chunk.Model)
 		// upstream response forensics — every chunk declares the upstream's own
 		// model; observe before ConvertStreamResponseChunk rewrites it
 		var chunkFingerprint string
