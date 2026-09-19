@@ -373,6 +373,10 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 }
 
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
+	// Same send-boundary snapshot as doRequest: this path dials a websocket
+	// instead of issuing an HTTP request, so it never reaches that helper.
+	info.SnapshotUpstreamSentModel()
+
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
