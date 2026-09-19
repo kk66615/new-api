@@ -258,8 +258,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           if (other?.admin_info?.quota_saturation) {
             tintClass = quotaSaturationRowTint
           }
-          // upstream anomaly wins: model mismatch or source flip → yellow row
-          const ursp = other?.admin_info?.ursp
+          // upstream anomaly wins: model mismatch or source flip → yellow row.
+          // root_info is stripped server-side below root, so presence implies root
+          const ursp = other?.root_info?.ursp
           if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
             tintClass = urspAnomalyRowTint
           }

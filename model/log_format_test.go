@@ -262,3 +262,54 @@ func TestFormatUserLogsHidesChannelIdentity(t *testing.T) {
 	require.Equal(t, 158, admin[0].ChannelId)
 	require.Equal(t, "upstream-vendor", admin[0].ChannelName)
 }
+
+// The upstream response audit (ursp) is for the super administrator only:
+// admins must not see it either. It is written under root_info by
+// service.appendUpstreamResponseAudit; this pins the projection contract.
+func TestUpstreamResponseAuditIsRootOnly(t *testing.T) {
+	other := common.MapToJsonStr(map[string]any{
+		"model_price": 1.25,
+		"admin_info": map[string]any{
+			"use_channel": []string{"101"},
+		},
+		"root_info": map[string]any{
+			"ursp": map[string]any{
+				"sent":     "gpt-5.5",
+				"model":    "gpt-5-6-luna",
+				"mismatch": true,
+				"kind":     "mismatch",
+			},
+		},
+	})
+
+	t.Run("user", func(t *testing.T) {
+		logs := []*Log{{Other: other}}
+		formatUserLogs(logs, 0)
+		parsed, err := common.StrToMap(logs[0].Other)
+		require.NoError(t, err)
+		assert.NotContains(t, parsed, "root_info")
+		assert.NotContains(t, logs[0].Other, "gpt-5-6-luna")
+	})
+
+	t.Run("admin", func(t *testing.T) {
+		logs := []*Log{{Other: other}}
+		FormatAdminLogs(logs)
+		parsed, err := common.StrToMap(logs[0].Other)
+		require.NoError(t, err)
+		assert.Contains(t, parsed, "admin_info")
+		assert.NotContains(t, parsed, "root_info")
+		assert.NotContains(t, logs[0].Other, "gpt-5-6-luna")
+	})
+
+	t.Run("root", func(t *testing.T) {
+		logs := []*Log{{Other: other}}
+		FormatRootLogs(logs)
+		parsed, err := common.StrToMap(logs[0].Other)
+		require.NoError(t, err)
+		rootInfo, ok := parsed["root_info"].(map[string]any)
+		require.True(t, ok)
+		ursp, ok := rootInfo["ursp"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, true, ursp["mismatch"])
+	})
+}

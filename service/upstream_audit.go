@@ -533,7 +533,7 @@ func AppendUpstreamResponseAuditForError(ctx *gin.Context, relayInfo *relaycommo
 	appendUpstreamResponseAudit(ctx, relayInfo, other, errorType)
 }
 
-// appendUpstreamResponseAudit adds the ursp block to other.admin_info and
+// appendUpstreamResponseAudit adds the ursp block to other.root_info and
 // persists forensic evidence asynchronously. EVERY observed response is
 // persisted (kind=normal for clean ones — user decision 2026-09-02, full
 // retention for evidence completeness; normal rows are pruned after
@@ -655,8 +655,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		flipNote += "backend: " + bfrom + " -> " + backend
 	}
 	flipped = flipped || bflipped
-	// admin-only projection: LogOther strips admin_info for non-admin readers
-	other.SetAdmin("ursp", ursp)
+	// root-only projection: LogOther strips root_info for admin and user
+	// readers alike (user decision 2026-09-19: upstream-declared model data
+	// is for the super administrator only)
+	other.SetRoot("ursp", ursp)
 
 	kind, note := "normal", ""
 	switch {

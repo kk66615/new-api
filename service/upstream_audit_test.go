@@ -374,8 +374,8 @@ func TestAppendUpstreamResponseAuditNoopWithoutObservation(t *testing.T) {
 	other := model.NewLogOther()
 	AppendUpstreamResponseAuditForError(nil, nil, other, "upstream_error")
 	AppendUpstreamResponseAuditForError(nil, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5"}}, other, "upstream_error")
-	if _, ok := other.Snapshot()["admin_info"]; ok {
-		t.Fatal("admin_info written although nothing was observed")
+	if _, ok := other.Snapshot()["root_info"]; ok {
+		t.Fatal("root_info written although nothing was observed")
 	}
 }
 
@@ -397,8 +397,8 @@ func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
 	other := model.NewLogOther()
 	AppendUpstreamResponseAuditForError(nil, info, other, "upstream_error")
 
-	admin, _ := other.Snapshot()["admin_info"].(map[string]interface{})
-	ursp, ok := admin["ursp"].(map[string]interface{})
+	root, _ := other.Snapshot()["root_info"].(map[string]interface{})
+	ursp, ok := root["ursp"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("ursp missing on error path: %+v", other.Snapshot())
 	}
@@ -417,8 +417,8 @@ func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
 	after.SetUpstreamResponseForensics(`{"id":"chatcmpl-ok2"}`, map[string][]string{"Openai-Organization": {"org-x"}})
 	otherAfter := model.NewLogOther()
 	appendUpstreamResponseAudit(nil, after, otherAfter, "")
-	adminAfter, _ := otherAfter.Snapshot()["admin_info"].(map[string]interface{})
-	urspAfter, _ := adminAfter["ursp"].(map[string]interface{})
+	rootAfter, _ := otherAfter.Snapshot()["root_info"].(map[string]interface{})
+	urspAfter, _ := rootAfter["ursp"].(map[string]interface{})
 	if _, flipped := urspAfter["src_flip"]; flipped {
 		t.Fatalf("success after error flipped, so the error must have moved the tracker: %+v", urspAfter)
 	}

@@ -135,8 +135,26 @@ export interface LogOtherData {
     admin_id?: number | string
     admin_role?: number
     auth_method?: 'session' | 'access_token' | string
+    // Quota saturation marker: set when a quota conversion clamped at the
+    // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing
+    // this request's charge. Admin-only (nested under admin_info).
+    quota_saturation?: {
+      op: string
+      kind: 'overflow' | 'underflow' | 'nan'
+      original: number
+      clamped: number
+    }
+    // Reject / intercept reason (admin only)
+    reject_reason?: string
+    task_plugin?: TaskPluginInfo
+  }
+  root_info?: {
+    task_plugin?: TaskPluginRuntimeInfo
+    upstream_task_id?: string
+    node_name?: string
     // Upstream response model audit: what the upstream response declared vs
-    // what we sent. Admin-only (nested under admin_info).
+    // what we sent. Root-only (nested under root_info; the server strips it
+    // for admins and users alike).
     ursp?: {
       model?: string
       sent?: string
@@ -179,23 +197,6 @@ export interface LogOtherData {
       // error body, not a completed exchange.
       err?: string
     }
-    // Quota saturation marker: set when a quota conversion clamped at the
-    // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing
-    // this request's charge. Admin-only (nested under admin_info).
-    quota_saturation?: {
-      op: string
-      kind: 'overflow' | 'underflow' | 'nan'
-      original: number
-      clamped: number
-    }
-    // Reject / intercept reason (admin only)
-    reject_reason?: string
-    task_plugin?: TaskPluginInfo
-  }
-  root_info?: {
-    task_plugin?: TaskPluginRuntimeInfo
-    upstream_task_id?: string
-    node_name?: string
   }
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.

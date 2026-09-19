@@ -290,11 +290,11 @@ export function UsageLogsMobileList<TData>({
           | number
           | undefined
         let tintClass = logType != null ? (logTypeRowTint[logType] ?? '') : ''
-        // upstream anomaly (model mismatch / source flip) → yellow card; admin_info is
-        // stripped server-side for non-admins, so its presence already implies admin
+        // upstream anomaly (model mismatch / source flip) → yellow card; root_info is
+        // stripped server-side below root, so its presence already implies root
         const ursp = parseLogOther(
           ((row.original as Record<string, unknown>).other as string) ?? ''
-        )?.admin_info?.ursp
+        )?.root_info?.ursp
         if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
           tintClass = 'bg-yellow-100/80 dark:bg-yellow-900/35'
         }
