@@ -71,6 +71,18 @@ func TestClassifyUpstreamModelMismatch(t *testing.T) {
 		{"", "", VerdictNoModel},
 		// vendor namespace only
 		{"deepseek-v4-flash", "deepseek/deepseek-v4-flash", VerdictVendorPrefix},
+		// "-preview" public name reported as the bare id (Google image models, #168)
+		{"gemini-3-pro-image-preview", "gemini-3-pro-image", VerdictPreviewAlias},
+		{"gemini-3.1-flash-image-preview", "google/gemini-3.1-flash-image", VerdictPreviewAlias},
+		{"Gemini-3-Pro-Image-Preview", "gemini-3-pro-image", VerdictPreviewAlias},
+		// the reverse direction is a substituted build, still a mismatch
+		{"gemini-3-pro-image", "gemini-3-pro-image-preview", VerdictMismatch},
+		// only a whole trailing token counts; a different base stays a mismatch
+		{"gemini-3-pro-image-preview", "gemini-3-flash-image", VerdictMismatch},
+		{"-preview", "x", VerdictMismatch}, // reaches the length guard
+		// outside the gemini family the bare name is a different product
+		{"o1-preview", "o1", VerdictMismatch},
+		{"gpt-4.5-preview", "gpt-4.5", VerdictMismatch},
 		{"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6", VerdictVendorPrefix},
 		{"claude-sonnet-5", "global.anthropic.claude-sonnet-5", VerdictVendorPrefix},
 		// vendor runtime alias
@@ -111,6 +123,8 @@ func TestUpstreamModelIsTierDowngrade(t *testing.T) {
 	}{
 		// additive downgrade: response carries a weaker qualifier
 		{"deepseek-v4", "deepseek-v4-flash", true, "flash tier"},
+		// subtractive -preview is an accepted alias (preview_alias), never a downgrade
+		{"gemini-3-pro-image-preview", "gemini-3-pro-image", false, "preview alias, not a tier change"},
 		{"gpt-5", "gpt-5-mini", true, "mini tier"},
 		{"gemini-2.5-pro", "gemini-2.5-pro-preview", true, "preview tier"},
 		{"claude-sonnet-5", "claude-sonnet-5-lite", true, "lite tier"},

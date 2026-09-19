@@ -104,6 +104,7 @@ const (
 	VerdictRuntimeAlias = "runtime_alias" // vendor alias ↔ runtime build id (grok-4.5 ↔ grok-4.5-build)
 	VerdictSnapshotDate = "snapshot_date" // alias ↔ dated snapshot (gpt-5 ↔ gpt-5-2025-08-07)
 	VerdictRollingAlias = "rolling_alias" // "-latest" rolling alias resolving into the same family
+	VerdictPreviewAlias = "preview_alias" // "-preview" public name ↔ the bare id the upstream reports it as
 	VerdictNoModel      = "no_model"      // upstream declared no model at all
 	VerdictMismatch     = "mismatch"      // different model — the anomaly we exist to catch
 )
@@ -134,7 +135,31 @@ func ClassifyUpstreamModelMismatch(sentModel, responseModel string) string {
 	if latestFamilyMatch(sent, resp) {
 		return VerdictRollingAlias
 	}
+	if previewAliasMatch(sent, resp) {
+		return VerdictPreviewAlias
+	}
 	return VerdictMismatch
+}
+
+// previewAliasMatch accepts the one direction in which a "-preview" suffix is
+// a naming convention rather than a tier change: the public model name carries
+// "-preview" and the upstream reports the same id without it (Google image
+// models: gemini-3-pro-image-preview → modelVersion gemini-3-pro-image,
+// user decision 2026-09-19 after 2540 identical rows on one channel). Scoped
+// to the gemini family: for OpenAI the bare name is a different product
+// (o1-preview vs o1, gpt-4.5-preview vs gpt-4.5) and must stay a mismatch.
+// The reverse (sent bare, got -preview) is deliberately NOT accepted — that
+// is the upstream substituting a different build.
+func previewAliasMatch(sent, resp string) bool {
+	const suffix = "-preview"
+	if len(sent) <= len(suffix) || !strings.EqualFold(sent[len(sent)-len(suffix):], suffix) {
+		return false
+	}
+	base := sent[:len(sent)-len(suffix)]
+	if !strings.HasPrefix(strings.ToLower(base), "gemini-") {
+		return false
+	}
+	return strings.EqualFold(base, resp)
 }
 
 // UpstreamModelsMatchForAudit reports whether the upstream-declared model is

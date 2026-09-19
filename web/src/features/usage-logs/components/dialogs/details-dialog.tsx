@@ -257,6 +257,7 @@ const URSP_VERDICT_LABELS: Record<string, string> = {
   runtime_alias: 'Vendor runtime alias',
   snapshot_date: 'Dated snapshot of the same model',
   rolling_alias: 'Rolling "-latest" alias of the same family',
+  preview_alias: 'Public "-preview" name reported without the suffix',
   no_model: 'Upstream declared no model',
   mismatch: 'Different model',
 }

@@ -144,7 +144,8 @@ export interface LogOtherData {
       mismatch?: boolean
       // Why the pair matched or mismatched. Only 'mismatch' is an anomaly; the
       // other labels describe a benign canonical difference (vendor prefix,
-      // dated snapshot, rolling -latest alias, runtime alias) or an upstream
+      // dated snapshot, rolling -latest alias, runtime alias, gemini -preview
+      // public name reported bare) or an upstream
       // that declared no model at all.
       kind?:
         | 'exact'
@@ -152,6 +153,7 @@ export interface LogOtherData {
         | 'runtime_alias'
         | 'snapshot_date'
         | 'rolling_alias'
+        | 'preview_alias'
         | 'no_model'
         | 'mismatch'
       // Upstream served a weaker sibling of the same family (…-flash/-mini/
