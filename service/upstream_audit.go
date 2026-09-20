@@ -673,7 +673,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		bfrom, bflipped = trackBackendFlip(channelId, backendShape)
 		if bflipped {
-			ursp["backend_flip"] = bfrom + "->" + backend
+			// both sides are raw shapes: the flip string describes the wire
+			// shape change only; the reconciled label lives in ursp.backend
+			ursp["backend_flip"] = bfrom + "->" + backendShape
 		}
 	}
 	flipNote := ""
@@ -684,7 +686,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if flipNote != "" {
 			flipNote += "; "
 		}
-		flipNote += "backend: " + bfrom + " -> " + backend
+		flipNote += "backend: " + bfrom + " -> " + backendShape
 	}
 	flipped = flipped || bflipped
 	// root-only projection: LogOther strips root_info for admin and user

@@ -479,4 +479,19 @@ func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
 	if _, flipped := second["src_flip"]; !flipped {
 		t.Fatalf("source flip azure->newapi_relay should still be reported: %+v", second)
 	}
+	// a real shape change (chatcmpl → msg_bdrk_) behind Azure-looking headers
+	// is reported shape→shape on both sides, never with the reconciled label
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-sonnet-5", ChannelId: ch, ChannelType: 1}}
+	info.ObserveUpstreamResponse("claude-sonnet-5", "msg_bdrk_01abc", 0, "")
+	info.SetUpstreamResponseForensics(`{"id":"msg_bdrk_01abc"}`, azureHeaders)
+	other := model.NewLogOther()
+	appendUpstreamResponseAudit(nil, info, other, "")
+	root, _ := other.Snapshot()["root_info"].(map[string]interface{})
+	third, _ := root["ursp"].(map[string]interface{})
+	if third["backend"] != "aws" {
+		t.Fatalf("positive shape evidence must win: %+v", third)
+	}
+	if third["backend_flip"] != "gpt_relay->aws" {
+		t.Fatalf("backend flip must be shape->shape, got %+v", third)
+	}
 }
