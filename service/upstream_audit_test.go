@@ -423,3 +423,60 @@ func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
 		t.Fatalf("success after error flipped, so the error must have moved the tracker: %+v", urspAfter)
 	}
 }
+
+// The displayed backend must not contradict an officially-attested source when
+// the body shape is neutral; positive shape evidence still wins; relay
+// sources never get promoted.
+func TestReconcileBackendWithSource(t *testing.T) {
+	cases := []struct{ shape, src, want string }{
+		{"gpt_relay", "azure", "azure"},            // chatcmpl- body + Azure headers
+		{"gpt_relay", "openai", "openai"},          // chatcmpl- body + OpenAI org headers
+		{"claude_relay", "anthropic", "anthropic"}, // msg_ body + anthropic-ratelimit headers
+		{"unknown", "google", "google"},
+		{"gpt_relay", "newapi_relay", "gpt_relay"}, // relay headers say nothing about the backend
+		{"gpt_relay", "unknown", "gpt_relay"},
+		{"aws", "azure", "aws"},            // msg_bdrk_ behind Azure-looking headers: shape wins
+		{"deepseek", "openai", "deepseek"}, // positive model-family evidence wins
+		{"openrouter", "newapi_relay", "openrouter"},
+	}
+	for _, tc := range cases {
+		if got := reconcileBackendWithSource(tc.shape, tc.src); got != tc.want {
+			t.Errorf("reconcile(%q, %q) = %q, want %q", tc.shape, tc.src, got, tc.want)
+		}
+	}
+}
+
+// End to end through the audit: an Azure-attested response with a chatcmpl id
+// displays backend=azure, while the backend flip tracker still sees the raw
+// shape (gpt_relay) and does not flip.
+func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
+	const ch = 987651
+	t.Cleanup(func() { srcTracker.Delete(ch); backendTracker.Delete(ch) })
+	azureHeaders := map[string][]string{"Apim-Request-Id": {"x"}, "X-Ms-Region": {"East US 2"}}
+	run := func(headers map[string][]string) map[string]interface{} {
+		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: ch, ChannelType: 1}}
+		info.ObserveUpstreamResponse("gpt-5-2025-08-07", "chatcmpl-abc", 1, "")
+		info.SetUpstreamResponseForensics(`{"id":"chatcmpl-abc"}`, headers)
+		other := model.NewLogOther()
+		appendUpstreamResponseAudit(nil, info, other, "")
+		root, _ := other.Snapshot()["root_info"].(map[string]interface{})
+		ursp, _ := root["ursp"].(map[string]interface{})
+		return ursp
+	}
+	first := run(azureHeaders)
+	if first["src"] != "azure" || first["backend"] != "azure" {
+		t.Fatalf("expected src=azure backend=azure, got %+v", first)
+	}
+	// same shape, relay headers only: displayed backend drops back to the shape,
+	// the backend tracker saw gpt_relay both times → no backend flip
+	second := run(map[string][]string{"X-New-Api-Version": {"v1"}})
+	if second["backend"] != "gpt_relay" {
+		t.Fatalf("expected backend=gpt_relay behind a relay, got %+v", second)
+	}
+	if _, flipped := second["backend_flip"]; flipped {
+		t.Fatalf("backend flip must follow the raw shape, not the reconciled label: %+v", second)
+	}
+	if _, flipped := second["src_flip"]; !flipped {
+		t.Fatalf("source flip azure->newapi_relay should still be reported: %+v", second)
+	}
+}

@@ -390,6 +390,34 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string,
 	return inferBackendShape(channelType, id, modelLower, ccmaxHint)
 }
 
+// officialSources are labels InferUpstreamSource only assigns from the channel
+// protocol or from vendor response headers — evidence about who actually
+// served the response, not about the wire format.
+var officialSources = map[string]bool{
+	"aws": true, "vertex": true, "azure": true, "google": true, "aistudio": true,
+	"anthropic": true, "openai": true, "kimi": true,
+}
+
+// neutralShapes are the inferBackendShape fallbacks that carry no positive
+// evidence of a specific backend: an OpenAI- or Anthropic-shaped body could
+// have come from the vendor, from Azure, or from any relay.
+var neutralShapes = map[string]bool{"gpt_relay": true, "claude_relay": true, "unknown": true}
+
+// reconcileBackendWithSource returns the backend label to display. Positive
+// wire-shape evidence (msg_bdrk_, gen-, deepseek/glm/kimi naming, vertex ids)
+// always wins. When the shape is neutral but the source was established from
+// official vendor headers (e.g. Azure's apim-request-id / x-ms-region), the
+// backend follows the source instead of falling back to "gpt_relay", which
+// reads as an accusation the body never supported (user question 2026-09-20:
+// "src is azure, why is the backend gpt_relay?"). The flip tracker keeps
+// watching the raw shape so this never creates or hides a shape switch.
+func reconcileBackendWithSource(backendShape, src string) string {
+	if neutralShapes[backendShape] && officialSources[src] {
+		return src
+	}
+	return backendShape
+}
+
 // inferBackendShape classifies a response by wire shape alone (id prefix +
 // model naming), ignoring headers and channel type. It is the "look through
 // the relay" view: a NewAPI relay that returns msg_bdrk_ ids or Bedrock model
@@ -584,7 +612,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 	}
 	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
-	backend := inferBackendShape(channelType, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
+	// backendShape is the wire-shape-only view (what the flip tracker watches);
+	// backend is what gets displayed: when the shape is neutral and the source
+	// carries official-vendor evidence, the displayed backend follows the source
+	backendShape := inferBackendShape(channelType, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
+	backend := reconcileBackendWithSource(backendShape, src)
 
 	ursp := map[string]interface{}{
 		"sent":     sentModel,
@@ -639,7 +671,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
 		}
-		bfrom, bflipped = trackBackendFlip(channelId, backend)
+		bfrom, bflipped = trackBackendFlip(channelId, backendShape)
 		if bflipped {
 			ursp["backend_flip"] = bfrom + "->" + backend
 		}
