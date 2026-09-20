@@ -71,6 +71,7 @@ import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
 import {
   parseLogOther,
+  rootUpstreamResponseAudit,
   getParamOverrideActionLabel,
   parseAuditLine,
   decodeBillingExprB64,
@@ -556,6 +557,8 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const showAdminIp =
     !!props.log.ip && (showTiming || (props.isAdmin && isTopup))
   const adminInfo = other?.admin_info
+  // root-only audit block (root_info, with the pre-2026-09-20 admin_info fallback)
+  const ursp = props.isRoot ? rootUpstreamResponseAudit(other) : undefined
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo
       ? ([
@@ -886,15 +889,15 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* Upstream response model audit (root only; the server strips root_info for everyone else) */}
-        {props.isRoot && other?.root_info?.ursp && (
+        {props.isRoot && ursp && (
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
             label={t('Upstream Response Model')}
-            variant={other.root_info.ursp.mismatch ? 'danger' : 'default'}
+            variant={ursp.mismatch ? 'danger' : 'default'}
           >
-            {other.root_info.ursp.mismatch && (
+            {ursp.mismatch && (
               <p className='mb-1 text-xs wrap-break-word'>
-                {other.root_info.ursp.tier_downgrade
+                {ursp.tier_downgrade
                   ? t(
                       'Upstream served a different tier of the same model family: usually a cheaper, weaker variant (…-flash / …-mini / …-lite), but …-preview can also mean a newer preview build — check the model on the channel before acting'
                     )
@@ -903,73 +906,73 @@ export function DetailsDialog(props: DetailsDialogProps) {
             )}
             <DetailRow
               label={t('Sent Model')}
-              value={other.root_info.ursp.sent || '-'}
+              value={ursp.sent || '-'}
               mono
             />
             <DetailRow
               label={t('Declared Model')}
-              value={other.root_info.ursp.model || t('Not declared by upstream')}
+              value={ursp.model || t('Not declared by upstream')}
               mono
             />
-            {other.root_info.ursp.kind && (
+            {ursp.kind && (
               <DetailRow
                 label={t('Comparison Verdict')}
-                value={urspVerdictLabel(other.root_info.ursp.kind, t)}
+                value={urspVerdictLabel(ursp.kind, t)}
               />
             )}
-            {other.root_info.ursp.err && (
+            {ursp.err && (
               <DetailRow
                 label={t('Failed Attempt')}
-                value={`${t('Observed from the upstream error response')} (${other.root_info.ursp.err})`}
+                value={`${t('Observed from the upstream error response')} (${ursp.err})`}
               />
             )}
-            {other.root_info.ursp.mapped && (
+            {ursp.mapped && (
               <DetailRow
                 label={t('Model Mapping')}
                 value={t('Channel redirected the requested model')}
               />
             )}
-            {other.root_info.ursp.ch_type !== undefined && (
+            {ursp.ch_type !== undefined && (
               <DetailRow
                 label={t('Channel Type')}
-                value={`${getChannelTypeLabel(other.root_info.ursp.ch_type)} (${other.root_info.ursp.ch_type})`}
+                value={`${getChannelTypeLabel(ursp.ch_type)} (${ursp.ch_type})`}
               />
             )}
-            {other.root_info.ursp.id && (
+            {ursp.id && (
               <DetailRow
                 label={t('Upstream Response ID')}
-                value={other.root_info.ursp.id}
+                value={ursp.id}
                 mono
               />
             )}
             <DetailRow
               label={t('Upstream Source')}
-              value={upstreamSourceLabel(other.root_info.ursp.src, t)}
+              value={upstreamSourceLabel(ursp.src, t)}
             />
-            {other.root_info.ursp.src_flip && (
+            {ursp.src_flip && (
               <DetailRow
                 label={t('Source Flip')}
-                value={other.root_info.ursp.src_flip}
+                value={ursp.src_flip}
                 mono
               />
             )}
-            {other.root_info.ursp.backend && (
+            {ursp.backend && (
               <DetailRow
                 label={t('Inferred Backend')}
-                value={upstreamSourceLabel(other.root_info.ursp.backend, t)}
+                value={upstreamSourceLabel(ursp.backend, t)}
               />
             )}
-            {other.root_info.ursp.backend_flip && (
+            {ursp.backend_flip && (
               <DetailRow
                 label={t('Backend Flip')}
-                value={other.root_info.ursp.backend_flip}
+                value={ursp.backend_flip}
                 mono
               />
             )}
-            {other.root_info.ursp.sf && (
+            {ursp.sf && (
               <DetailRow
                 label={t('System Fingerprint')}
-                value={other.root_info.ursp.sf}
+                value={ursp.sf}
                 mono
               />
             )}

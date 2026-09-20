@@ -5253,6 +5253,7 @@
     "Session": "会话",
     "Session behavior": "会话保持",
     "Session behavior prevents switching channels": "会话保持设置阻止切换渠道",
+    "Client disconnected before a retry": "客户端在重试前已断开",
     "Session expired!": "会话已过期！",
     "Session expired?": "会话已过期？",
     "Session rule": "会话规则",

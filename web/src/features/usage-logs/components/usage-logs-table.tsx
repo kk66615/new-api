@@ -42,7 +42,7 @@ import {
   LOG_TYPE_ENUM,
 } from '../constants'
 import { useColumnsByCategory } from '../lib/columns'
-import { parseLogOther } from '../lib/format'
+import { parseLogOther, rootUpstreamResponseAudit } from '../lib/format'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
@@ -60,7 +60,7 @@ const logTypeRowTint: Record<number, string> = {
 // Warning tint for logs where a quota conversion saturated (admin-only marker).
 // Takes precedence over the per-type tint since it flags a billing anomaly.
 const quotaSaturationRowTint = 'bg-amber-50/60 dark:bg-amber-950/25'
-// upstream response anomaly (model mismatch / source flip) — yellow highlight, admin only
+// upstream response anomaly (model mismatch / source flip) — yellow highlight, root only
 const urspAnomalyRowTint = 'bg-yellow-100/80 dark:bg-yellow-900/35'
 
 function getColumnVisibilityStorageKey(
@@ -259,8 +259,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
             tintClass = quotaSaturationRowTint
           }
           // upstream anomaly wins: model mismatch or source flip → yellow row.
-          // root_info is stripped server-side below root, so presence implies root
-          const ursp = other?.root_info?.ursp
+          // root-only: the resolver reads root_info (plus the legacy admin_info
+          // scope of rows written before 2026-09-20), gated on the root view
+          const ursp = isRoot ? rootUpstreamResponseAudit(other) : undefined
           if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
             tintClass = urspAnomalyRowTint
           }

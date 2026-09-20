@@ -16,8 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// DecideRelayRetry is the single retry decision for relay attempts. The reason
-// is recorded in the request policy decision events of the log details.
 // clientRequestDone reports whether the client has already disconnected or
 // cancelled the request. Retrying in that case only wastes upstream quota
 // (fork patch: measured 77 of 3,689 client_gone requests retried on a second
@@ -26,6 +24,8 @@ func clientRequestDone(c *gin.Context) bool {
 	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 
+// DecideRelayRetry is the single retry decision for relay attempts. The reason
+// is recorded in the request policy decision events of the log details.
 func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) PolicyDecision {
 	if err == nil {
 		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}

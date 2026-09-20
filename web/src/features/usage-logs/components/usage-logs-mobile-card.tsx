@@ -32,10 +32,11 @@ import { cn } from '@/lib/utils'
 
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
-import { parseLogOther } from '../lib/format'
+import { parseLogOther, rootUpstreamResponseAudit } from '../lib/format'
 import { TASK_MOBILE_SUMMARY_FIELDS } from '../lib/task-mobile-layout'
 import type { LogCategory } from '../types'
 import { CommonLogMobileCard } from './common-log-mobile-card'
+import { useLogsViewScope } from './usage-logs-provider'
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]:
@@ -245,6 +246,7 @@ export function UsageLogsMobileList<TData>({
   logCategory,
 }: UsageLogsMobileListProps<TData>) {
   const { t } = useTranslation()
+  const { isRootView: isRoot } = useLogsViewScope()
 
   const resolvedEmptyTitle = emptyTitle ?? t('No Logs Found')
   const resolvedEmptyDescription =
@@ -290,11 +292,16 @@ export function UsageLogsMobileList<TData>({
           | number
           | undefined
         let tintClass = logType != null ? (logTypeRowTint[logType] ?? '') : ''
-        // upstream anomaly (model mismatch / source flip) → yellow card; root_info is
-        // stripped server-side below root, so its presence already implies root
-        const ursp = parseLogOther(
-          ((row.original as Record<string, unknown>).other as string) ?? ''
-        )?.root_info?.ursp
+        // upstream anomaly (model mismatch / source flip) → yellow card. Root-only:
+        // the resolver reads root_info (plus the legacy admin_info scope of rows
+        // written before 2026-09-20); both are stripped server-side below root
+        const ursp = isRoot
+          ? rootUpstreamResponseAudit(
+              parseLogOther(
+                ((row.original as Record<string, unknown>).other as string) ?? ''
+              )
+            )
+          : undefined
         if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
           tintClass = 'bg-yellow-100/80 dark:bg-yellow-900/35'
         }

@@ -114,6 +114,49 @@ export interface ToolSurchargeItem {
   price: number
 }
 
+export interface UpstreamResponseAudit {
+  model?: string
+  sent?: string
+  id?: string
+  sf?: string
+  created?: number
+  mismatch?: boolean
+  // Why the pair matched or mismatched. Only 'mismatch' is an anomaly; the
+  // other labels describe a benign canonical difference (vendor prefix,
+  // dated snapshot, rolling -latest alias, runtime alias, gemini -preview
+  // public name reported bare) or an upstream
+  // that declared no model at all.
+  kind?:
+    | 'exact'
+    | 'vendor_prefix'
+    | 'runtime_alias'
+    | 'snapshot_date'
+    | 'rolling_alias'
+    | 'preview_alias'
+    | 'no_model'
+    | 'mismatch'
+  // Upstream served a weaker sibling of the same family (…-flash/-mini/
+  // -lite/-nano/-preview): the highest-signal adulteration shape
+  tier_downgrade?: boolean
+  src?: string
+  src_flip?: string
+  backend?: string
+  backend_flip?: string
+  nomodel?: boolean
+  // Channel type (int enum) of the channel that produced this response. The
+  // channel id/name already live on the log record itself; the type is the
+  // part the record lacks, and is what tells a configured AWS channel apart
+  // from a response that merely looked like AWS.
+  ch_type?: number
+  // Set when the channel redirected the model, so an intentional mapping is
+  // not read as an upstream swap
+  mapped?: boolean
+  // Error type of the failed attempt this observation belongs to. Present
+  // only on error-log records: the audited response is the upstream's
+  // error body, not a completed exchange.
+  err?: string
+}
+
 export interface LogOtherData {
   admin_info?: {
     request_policy?: PolicyEvent[]
@@ -147,6 +190,9 @@ export interface LogOtherData {
     // Reject / intercept reason (admin only)
     reject_reason?: string
     task_plugin?: TaskPluginInfo
+    // Rows written before the audit became root-only (2026-09-20) still carry
+    // ursp here; the root view falls back to it. Never written any more.
+    ursp?: UpstreamResponseAudit
   }
   root_info?: {
     task_plugin?: TaskPluginRuntimeInfo
@@ -155,48 +201,7 @@ export interface LogOtherData {
     // Upstream response model audit: what the upstream response declared vs
     // what we sent. Root-only (nested under root_info; the server strips it
     // for admins and users alike).
-    ursp?: {
-      model?: string
-      sent?: string
-      id?: string
-      sf?: string
-      created?: number
-      mismatch?: boolean
-      // Why the pair matched or mismatched. Only 'mismatch' is an anomaly; the
-      // other labels describe a benign canonical difference (vendor prefix,
-      // dated snapshot, rolling -latest alias, runtime alias, gemini -preview
-      // public name reported bare) or an upstream
-      // that declared no model at all.
-      kind?:
-        | 'exact'
-        | 'vendor_prefix'
-        | 'runtime_alias'
-        | 'snapshot_date'
-        | 'rolling_alias'
-        | 'preview_alias'
-        | 'no_model'
-        | 'mismatch'
-      // Upstream served a weaker sibling of the same family (…-flash/-mini/
-      // -lite/-nano/-preview): the highest-signal adulteration shape
-      tier_downgrade?: boolean
-      src?: string
-      src_flip?: string
-      backend?: string
-      backend_flip?: string
-      nomodel?: boolean
-      // Channel type (int enum) of the channel that produced this response. The
-      // channel id/name already live on the log record itself; the type is the
-      // part the record lacks, and is what tells a configured AWS channel apart
-      // from a response that merely looked like AWS.
-      ch_type?: number
-      // Set when the channel redirected the model, so an intentional mapping is
-      // not read as an upstream swap
-      mapped?: boolean
-      // Error type of the failed attempt this observation belongs to. Present
-      // only on error-log records: the audited response is the upstream's
-      // error body, not a completed exchange.
-      err?: string
-    }
+    ursp?: UpstreamResponseAudit
   }
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.

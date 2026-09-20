@@ -13,6 +13,8 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Task failed')
     case 'strict_session':
       return t('Session behavior prevents switching channels')
+    case 'client_disconnected':
+      return t('Client disconnected before a retry')
     case 'attempt_budget_exhausted':
       return t('Total attempt budget exhausted')
     case 'channel_error':

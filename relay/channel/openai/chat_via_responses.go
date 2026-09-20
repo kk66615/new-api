@@ -99,7 +99,8 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		service.ObserveResponsesOutcome(info, &streamResp)
 		accumulator.ProcessEvent(&streamResp)
 		// upstream response forensics — observe every frame that carries a
-		// response object, before the accumulator/converter rewrites it
+		// response object (the accumulator does not touch Response.Model; the
+		// converter below rewrites the client-facing copy, not this one)
 		if streamResp.Response != nil {
 			info.ObserveUpstreamResponse(streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt), "")
 		}

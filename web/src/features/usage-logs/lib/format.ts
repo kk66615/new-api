@@ -26,7 +26,7 @@ import {
 } from '@/features/pricing/lib/billing-expr'
 
 import type { UsageLog } from '../data/schema'
-import type { LogOtherData } from '../types'
+import type { LogOtherData, UpstreamResponseAudit } from '../types'
 import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
@@ -158,6 +158,19 @@ export function hasToolSurcharge(other: LogOtherData | null): boolean {
 /**
  * Parse the 'other' field from JSON string to object
  */
+/**
+ * Upstream response audit block for the ROOT view. Written under root_info
+ * since 2026-09-20; rows from before that date still carry it under
+ * admin_info. Both scopes are stripped server-side for non-root readers of
+ * root_info (and for non-admin readers of admin_info), so callers must still
+ * gate on isRoot before rendering.
+ */
+export function rootUpstreamResponseAudit(
+  other: LogOtherData | null | undefined
+): UpstreamResponseAudit | undefined {
+  return other?.root_info?.ursp ?? other?.admin_info?.ursp
+}
+
 export function parseLogOther(other: string): LogOtherData | null {
   if (!other) return null
   try {
