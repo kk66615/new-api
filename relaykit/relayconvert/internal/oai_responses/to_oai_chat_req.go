@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -172,12 +173,25 @@ func responsesRequestMessagesToChat(req *dto.OpenAIResponsesRequest, preserveRea
 			return nil, fmt.Errorf("invalid input array: %w", err)
 		}
 		pendingReasoning := ""
+		// Chat Completions requires the tool messages answering one assistant tool_calls
+		// batch to stay contiguous, so media hoisted out of tool output items is
+		// held back and emitted as a single user message once the batch ends.
+		var pendingMedia []any
 		for _, item := range items {
-			nextMessages, err := responsesInputItemToChatMessages(item, messages, &pendingReasoning, preserveReasoning)
+			itemType := strings.TrimSpace(kitutil.Interface2String(item["type"]))
+			if len(pendingMedia) > 0 && itemType != responsesInputTypeFunctionCallOutput && itemType != responsesInputTypeCustomToolOutput {
+				messages = append(messages, dto.Message{Role: "user", Content: pendingMedia})
+				pendingMedia = nil
+			}
+			nextMessages, media, err := responsesInputItemToChatMessages(item, messages, &pendingReasoning, preserveReasoning)
 			if err != nil {
 				return nil, err
 			}
 			messages = nextMessages
+			pendingMedia = append(pendingMedia, media...)
+		}
+		if len(pendingMedia) > 0 {
+			messages = append(messages, dto.Message{Role: "user", Content: pendingMedia})
 		}
 		if preserveReasoning {
 			messages = attachPendingReasoningToLastAssistant(messages, &pendingReasoning)
@@ -188,18 +202,22 @@ func responsesRequestMessagesToChat(req *dto.OpenAIResponsesRequest, preserveRea
 	}
 }
 
-func responsesInputItemToChatMessages(item map[string]any, messages []dto.Message, pendingReasoning *string, preserveReasoning bool) ([]dto.Message, error) {
+// responsesInputItemToChatMessages appends the Chat messages for one Responses input item.
+// The second result carries media content parts hoisted out of a function_call_output item,
+// already in Chat shape; the caller decides where that user message lands.
+// Fork: pendingReasoning/preserveReasoning carry reasoning text back into assistant messages.
+func responsesInputItemToChatMessages(item map[string]any, messages []dto.Message, pendingReasoning *string, preserveReasoning bool) ([]dto.Message, []any, error) {
 	itemType := strings.TrimSpace(kitutil.Interface2String(item["type"]))
 	switch itemType {
 	case responsesInputTypeReasoning:
 		if preserveReasoning {
 			appendPendingReasoning(pendingReasoning, responsesItemReasoningText(item))
 		}
-		return messages, nil
+		return messages, nil, nil
 	case responsesInputTypeFunctionCall:
 		toolCall, err := responsesFunctionCallItemToChatToolCall(item)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if preserveReasoning {
 			appendPendingReasoning(pendingReasoning, responsesItemReasoningText(item))
@@ -208,11 +226,11 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
 		if preserveReasoning {
 			messages = attachPendingReasoningToLastAssistant(messages, pendingReasoning)
 		}
-		return messages, nil
+		return messages, nil, nil
 	case responsesInputTypeCustomToolCall:
 		toolCall, err := responsesCustomToolCallItemToChatToolCall(item)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if preserveReasoning {
 			appendPendingReasoning(pendingReasoning, responsesItemReasoningText(item))
@@ -221,14 +239,14 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
 		if preserveReasoning {
 			messages = attachPendingReasoningToLastAssistant(messages, pendingReasoning)
 		}
-		return messages, nil
+		return messages, nil, nil
 	case responsesInputTypeFunctionCallOutput, responsesInputTypeCustomToolOutput:
 		if preserveReasoning {
 			messages = attachPendingReasoningToLastAssistant(messages, pendingReasoning)
 		}
 		callID := strings.TrimSpace(kitutil.Interface2String(item["call_id"]))
-		content := responseToolOutputToChatContent(item["output"])
-		return append(messages, dto.Message{Role: "tool", ToolCallId: callID, Content: content}), nil
+		content, media := responsesToolOutputToChat(item["output"])
+		return append(messages, dto.Message{Role: "tool", ToolCallId: callID, Content: content}), media, nil
 	}
 
 	role := strings.TrimSpace(kitutil.Interface2String(item["role"]))
@@ -237,10 +255,10 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
 	}
 	content, err := responsesInputContentToChatContent(item["content"])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !preserveReasoning {
-		return append(messages, dto.Message{Role: role, Content: content}), nil
+		return append(messages, dto.Message{Role: role, Content: content}), nil, nil
 	}
 
 	message := dto.Message{Role: role, Content: content}
@@ -250,11 +268,11 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
 			*pendingReasoning = ""
 		}
 		appendReasoningContent(&message, responsesItemReasoningText(item))
-		return append(messages, message), nil
+		return append(messages, message), nil, nil
 	}
 
 	messages = attachPendingReasoningToLastAssistant(messages, pendingReasoning)
-	return append(messages, message), nil
+	return append(messages, message), nil, nil
 }
 
 func responsesItemReasoningText(item map[string]any) string {
@@ -636,6 +654,57 @@ func responseToolOutputToChatContent(value any) any {
 		}
 		return string(raw)
 	}
+}
+
+// responsesToolOutputToChat maps a function_call_output payload onto Chat Completions, where a
+// tool message may only carry text. A Responses content-part array keeps its text on the tool
+// message and returns the media parts in Chat shape for the caller to hoist into a user message;
+// stringifying them instead would hand base64 image data to the upstream text tokenizer. Any
+// other payload shape (string, object, plain JSON array) keeps the historical stringified form.
+func responsesToolOutputToChat(value any) (any, []any) {
+	rawParts, ok := value.([]any)
+	if !ok || len(rawParts) == 0 {
+		return responseToolOutputToChatContent(value), nil
+	}
+
+	texts := make([]string, 0, len(rawParts))
+	mediaParts := make([]any, 0, len(rawParts))
+	labels := make([]string, 0, len(rawParts))
+	for _, rawPart := range rawParts {
+		part, ok := rawPart.(map[string]any)
+		if !ok {
+			return responseToolOutputToChatContent(value), nil
+		}
+		partType := strings.TrimSpace(kitutil.Interface2String(part["type"]))
+		switch partType {
+		case "input_text", "output_text", "text":
+			if text := kitutil.Interface2String(part["text"]); text != "" {
+				texts = append(texts, text)
+			}
+		case "input_image", "input_file", "input_audio", "input_video":
+			mediaParts = append(mediaParts, part)
+			label := "[" + strings.TrimPrefix(partType, "input_") + "]"
+			if !slices.Contains(labels, label) {
+				labels = append(labels, label)
+			}
+		default:
+			return responseToolOutputToChatContent(value), nil
+		}
+	}
+	if len(mediaParts) == 0 {
+		return strings.Join(texts, "\n"), nil
+	}
+
+	converted, err := responsesContentPartsToChatContent(mediaParts)
+	if err != nil {
+		return responseToolOutputToChatContent(value), nil
+	}
+	media, _ := converted.([]any)
+	if len(texts) == 0 {
+		// Upstreams reject empty tool content; the media itself rides on the hoisted user message.
+		return strings.Join(labels, " "), media
+	}
+	return strings.Join(texts, "\n"), media
 }
 
 func responsesRawFloat(raw json.RawMessage) (*float64, error) {
