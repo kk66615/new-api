@@ -21,6 +21,10 @@ var legacySensitiveLogOtherKeys = []string{
 	"channel_name",
 	"channel_type",
 	"reject_reason",
+	// upstream_model_name moved to admin_info: the Claude stream path rewrites
+	// it to the model the upstream declared, which users must never see.
+	// Older rows still carry it at the top level.
+	"upstream_model_name",
 }
 
 type logOtherVisibility int

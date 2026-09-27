@@ -82,3 +82,21 @@ func TestLogOtherJSONStringDoesNotMutateReceiver(t *testing.T) {
 	require.Equal(t, before, after)
 	require.Equal(t, first, second)
 }
+
+// Contract (spec G1): the user projection never carries a model name the
+// upstream declared — neither the current admin_info copy nor the legacy
+// top-level upstream_model_name older rows still hold — while admins keep it.
+func TestUserProjectionHasNoUpstreamDeclaredModel(t *testing.T) {
+	other := NewLogOther()
+	assert.False(t, other.SetPublic("upstream_model_name", "claude-sonnet-4-6"), "must not be writable to the public scope")
+
+	legacy := `{"is_model_mapped":true,"upstream_model_name":"claude-sonnet-4-6",` +
+		`"admin_info":{"upstream_model_name":"claude-sonnet-4-6"},"root_info":{"ursp":{"model":"claude-sonnet-4-6"}}}`
+	user := formatLogOtherJSON(legacy, logOtherVisibilityUser)
+	assert.NotContains(t, user, "claude-sonnet-4-6")
+	assert.JSONEq(t, `{"is_model_mapped":true}`, user)
+
+	admin := formatLogOtherJSON(legacy, logOtherVisibilityAdmin)
+	assert.Contains(t, admin, `"upstream_model_name"`)
+	assert.NotContains(t, admin, "root_info")
+}

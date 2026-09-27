@@ -63,7 +63,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 	}
 	if info.IsModelMapped {
 		other.SetPublic("is_model_mapped", true)
-		other.SetPublic("upstream_model_name", info.UpstreamModelName)
+		other.SetAdmin("upstream_model_name", info.UpstreamModelName)
 	}
 	if snap := info.TieredBillingSnapshot; snap != nil {
 		other.SetPublic("billing_mode", "tiered_expr")
@@ -77,6 +77,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		setTaskImageCount(other, info.PriceData.OtherRatios()["image_count"])
 	}
 	appendTaskLogInfo(task, other)
+	appendUnobservedUpstreamAudit(other, "task")
 	attachQuotaSaturation(c, info, other)
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
 		ChannelId: info.ChannelId,
@@ -175,9 +176,10 @@ func taskBillingOther(task *model.Task) *model.LogOther {
 	props := task.Properties
 	if props.UpstreamModelName != "" && props.UpstreamModelName != props.OriginModelName {
 		other.SetPublic("is_model_mapped", true)
-		other.SetPublic("upstream_model_name", props.UpstreamModelName)
+		other.SetAdmin("upstream_model_name", props.UpstreamModelName)
 	}
 	appendTaskLogInfo(task, other)
+	appendUnobservedUpstreamAudit(other, "task")
 	return other
 }
 

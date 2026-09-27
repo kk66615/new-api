@@ -1,6 +1,9 @@
 package service
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -978,4 +981,77 @@ func TestCcmaxStickinessNeedsTwoHitsAndExpires(t *testing.T) {
 	assert.False(t, ccmaxObserve(ch, false, true), "stickiness expires 24h after the last evidence")
 	assert.True(t, ccmaxObserve(ch, true, false), "a channel test sees its own injection")
 	assert.False(t, ccmaxObserve(ch, false, true), "but a channel test never feeds the state")
+}
+
+// Contract (spec G1): the text log writer keeps the upstream model name out of
+// the public scope. The Claude stream path rewrites UpstreamModelName to the
+// model the upstream declared, so a public copy would leak it to the user.
+func TestTextLogKeepsUpstreamModelOutOfPublicScope(t *testing.T) {
+	original := enqueueUpstreamEvidence
+	enqueueUpstreamEvidence = func(*model.UpstreamEvidence) bool { return true }
+	t.Cleanup(func() { enqueueUpstreamEvidence = original })
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+
+	info := &relaycommon.RelayInfo{StartTime: time.Now(), ChannelMeta: &relaycommon.ChannelMeta{
+		UpstreamModelName: "claude-sonnet-5", IsModelMapped: true,
+	}}
+	info.SnapshotUpstreamWire("claude-sonnet-5", nil)
+	info.ObserveUpstreamResponse("claude-sonnet-4-6", "msg_01leak", 0, "")
+	info.UpstreamModelName = "claude-sonnet-4-6" // what the Claude stream handler does
+
+	other := GenerateTextOtherInfo(ctx, info, 1, 1, 1, 0, 0, 0, 1)
+	snapshot := other.Snapshot()
+	public := make(map[string]any)
+	for key, value := range snapshot {
+		if key != "admin_info" && key != "root_info" && key != "audit_info" {
+			public[key] = value
+		}
+	}
+	encoded, err := common.Marshal(public)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "claude-sonnet-4-6", "the user-visible scope must not carry the declared model")
+	assert.Equal(t, true, public["is_model_mapped"])
+	adminInfo, _ := snapshot["admin_info"].(map[string]any)
+	assert.Equal(t, "claude-sonnet-4-6", adminInfo["upstream_model_name"], "admins keep the value they had")
+}
+
+// Non-2xx upstream responses are observed before they become errors, so the
+// error log carries ursp.err and an evidence row; the error itself is exactly
+// what RelayErrorHandler returns for the same response (spec C3).
+func TestRelayErrorHandlerWithAuditObservesErrorBodies(t *testing.T) {
+	isolatedAuditKey(t, 987665, "gpt")
+	body := `{"error":{"message":"slow down","type":"rate_limit_error","code":"rate_limited"}}`
+	newResp := func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": {"3"}, "Authorization": {"Bearer secret"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+	info := &relaycommon.RelayInfo{StartTime: time.Now(), ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: 987665}}
+	got := RelayErrorHandlerWithAudit(context.Background(), info, newResp(), false)
+	want := RelayErrorHandler(context.Background(), newResp(), false)
+	require.NotNil(t, got)
+	assert.Equal(t, want.Error(), got.Error())
+	assert.Equal(t, want.StatusCode, got.StatusCode)
+
+	assert.Equal(t, body, info.UpstreamResponseExcerpt)
+	assert.Contains(t, info.UpstreamResponseHeaders, `"Retry-After":"3"`)
+	assert.NotContains(t, info.UpstreamResponseHeaders, "secret")
+
+	var queued *model.UpstreamEvidence
+	original := enqueueUpstreamEvidence
+	enqueueUpstreamEvidence = func(e *model.UpstreamEvidence) bool { queued = e; return true }
+	t.Cleanup(func() { enqueueUpstreamEvidence = original })
+	other := model.NewLogOther()
+	AppendUpstreamResponseAuditForError(nil, info, other, string(got.GetErrorType()))
+	ursp := urspOf(t, other)
+	assert.Equal(t, "error_response", ursp["h"])
+	assert.Equal(t, "partial", ursp["obs"])
+	assert.NotEmpty(t, ursp["err"])
+	require.NotNil(t, queued)
+	assert.Contains(t, queued.Note, "error: ")
+	assert.Equal(t, body, queued.ResponseExcerpt)
 }
