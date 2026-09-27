@@ -813,15 +813,16 @@ func TestAuditReplaySignals(t *testing.T) {
 	assert.Equal(t, "signals: dup_output,prompt_differs,sampled", ev.Note)
 
 	// the same id AND the same long output as an earlier request (req-a; the
-	// output's latest owner is req-b, so this is the id branch): replay
-	ursp, ev = run("req-c", "chatcmpl-idone0001", answerX, promptA, now, nil)
+	// output's latest owner is req-b, so this is the id branch) for a
+	// different prompt: replay
+	ursp, ev = run("req-c", "chatcmpl-idone0001", answerX, promptB, now, nil)
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
 	assert.Contains(t, ev.Note, "signals: dup_id,dup_output")
 
 	// a retry of the same request repeating its id is not a duplicate
-	ursp, _ = run("req-c", "chatcmpl-idone0001", answerX, promptA, now, nil)
+	ursp, _ = run("req-c", "chatcmpl-idone0001", answerX, promptB, now, nil)
 	assert.NotContains(t, ursp, "dup_id")
 
 	// a relay with a fixed id: text, then a tool-call-only turn (no output
@@ -850,12 +851,23 @@ func TestAuditReplaySignals(t *testing.T) {
 	assert.NotContains(t, ursp, "replay")
 	assert.Equal(t, "normal", ev.Kind)
 
-	// same id + same short text + the very same (fresh) created: replay
+	// same id + same short text + the very same FRESH created (two answers in
+	// one second behind a constant-id upstream): only dup_id (review round 4)
 	greeting := "Hello! How can I help you with it today?" // 40 chars
 	run("req-g1", "chatcmpl-greet0001", greeting, promptA, now-3, nil)
 	ursp, ev = run("req-g2", "chatcmpl-greet0001", greeting, promptB, now-3, nil)
-	assert.Equal(t, true, ursp["replay"])
-	assert.Equal(t, "replay_suspect", ev.Kind)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+
+	// constant-id upstream + the same prompt + a deterministic long answer
+	// with a fresh created: an honest repeated request, only dup_id
+	answerD := strings.Repeat("A deterministic answer to an identical prompt, repeated honestly. ", 4)
+	run("req-d1", "chatcmpl-constlong01", answerD, promptA, now-2, nil)
+	ursp, ev = run("req-d2", "chatcmpl-constlong01", answerD, promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
 
 	// same id + a different short text: a constant-id generator, dup_id only
 	ursp, _ = run("req-g3", "chatcmpl-greet0001", "Sure, what would you like to change?", promptA, now-3, nil)

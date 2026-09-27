@@ -143,14 +143,22 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// a stale created stamp only corroborates on channels whose created is not
 	// a constant (#109 stamps every answer with the same old value)
 	staleCorroborates := s.staleCreated && !constantCreated.observe(channelId, created, current.outputHash, relayInfo.UpstreamResponseId, record)
-	// same id + same text: deterministic short answers ("OK") behind a
-	// constant-id upstream repeat honestly, so this needs one more fact —
-	// a stale created, the very same created as the remembered answer, or a
-	// distinctive (≥200 char) text
+	// same id + same text: deterministic answers behind a constant-id
+	// upstream repeat honestly, so this needs one more fact —
+	//   - a stale created that corroborates on this channel, or
+	//   - the very same STALE created as the remembered answer (a cache hands
+	//     back its old stamp; this holds even on a constant-created channel,
+	//     while two fresh answers can share a one-second stamp), or
+	//   - a distinctive (≥200 char) text for a different prompt (the same
+	//     prompt answered identically is an honest repeated request)
+	samePrompt := current.promptHash != "" && idPrev.promptHash != "" && current.promptHash == idPrev.promptHash
+	sameStaleCreated := s.staleCreated && created != 0 && idPrev.created == created
 	sameIdSameOutput := s.dupId && current.outputHash != "" && idPrev.outputHash == current.outputHash &&
-		(staleCorroborates || (created != 0 && idPrev.created == created) || audit.OutputChars >= replayMinOutputChars)
-	sameEarlierRow := s.dupId && s.dupOutput && idPrev.requestId != "" && idPrev.requestId == outputPrev.requestId
-	s.replay = sameIdSameOutput || (s.dupOutput && (sameEarlierRow || staleCorroborates))
+		(staleCorroborates || sameStaleCreated || (audit.OutputChars >= replayMinOutputChars && !samePrompt))
+	// a duplicate output with the same id on the same earlier row is the
+	// same-id case above (including its same-prompt guard); across ids a
+	// duplicate output needs a corroborating stale created
+	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates)
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -262,7 +270,10 @@ type constantCreatedState struct {
 var constantCreated = &constantCreatedTracker{}
 
 // observe feeds one answer (unless record is false) and reports whether the
-// channel is known to stamp a constant created.
+// channel is known to stamp a constant created. Callers only feed answers
+// whose created is already stale: fresh answers on a busy channel share a
+// one-second stamp all the time, and feeding them would mark the channel as
+// constant-created and silence stale_created as corroboration there.
 func (c *constantCreatedTracker) observe(channelId int, created int64, output, id string, record bool) bool {
 	if channelId == 0 || created == 0 {
 		return false
