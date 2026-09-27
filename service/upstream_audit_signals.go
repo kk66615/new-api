@@ -130,11 +130,13 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// answer. A duplicate id counts only when both sides produced the same,
 	// non-empty output (tool-call-only turns and handlers without an output
 	// hash never qualify: relays with fixed ids would otherwise flag every
-	// such turn; nor do short outputs). A duplicate output counts only together with the same id
+	// such turn). Any non-empty text counts here — a cache replaying a short
+	// greeting under the same id is the #148 case, while a constant-id
+	// generator produces different text. Only the cross-id duplicate-output
+	// rule needs a distinctive (≥200 char) output. A duplicate output counts only together with the same id
 	// on that same earlier row, or a stale created stamp. A different prompt
 	// or an explicit temperature are recorded as reasons, not proof.
-	sameIdSameOutput := s.dupId && current.outputHash != "" && audit.OutputChars >= replayMinOutputChars &&
-		idPrev.outputHash == current.outputHash
+	sameIdSameOutput := s.dupId && current.outputHash != "" && idPrev.outputHash == current.outputHash
 	sameEarlierRow := s.dupId && s.dupOutput && idPrev.requestId != "" && idPrev.requestId == outputPrev.requestId
 	s.replay = sameIdSameOutput || (s.dupOutput && (sameEarlierRow || s.staleCreated))
 

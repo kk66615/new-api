@@ -841,12 +841,34 @@ func TestAuditReplaySignals(t *testing.T) {
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.NotContains(t, ursp, "replay")
 
-	// a short answer behind a fixed id is not distinctive enough
-	run("req-k1", "chatcmpl-short0001", "Sure, here you go.", promptA, now, nil)
-	ursp, _ = run("req-k2", "chatcmpl-short0001", "Sure, here you go.", promptB, now, nil)
+	// same id + the same short text (a cached greeting, the #148 case): the
+	// same-id rule has no length minimum, the cross-id rule does
+	greeting := "Hello! How can I help you with it today?" // 40 chars
+	run("req-k1", "chatcmpl-short0001", greeting, promptA, now, nil)
+	ursp, ev = run("req-k2", "chatcmpl-short0001", greeting, promptB, now, nil)
 	assert.Equal(t, true, ursp["dup_id"])
-	assert.NotContains(t, ursp, "dup_output")
+	assert.NotContains(t, ursp, "dup_output", "40 chars is below the cross-id minimum")
+	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+
+	// same id + a different short text: a constant-id generator, dup_id only
+	ursp, _ = run("req-k3", "chatcmpl-short0001", "Sure, what would you like to change?", promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
 	assert.NotContains(t, ursp, "replay")
+
+	// same id + a tool-call-only turn (no text hash): dup_id only
+	ursp, _ = run("req-k4", "chatcmpl-short0001", "", promptB, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+
+	// the #148 end-to-end shape: same id, same 22-day-old created, same short
+	// answer for two different prompts
+	stale := now - 22*86400
+	run("req-c1", "chatcmpl-cache0148", greeting+" (cached)", promptA, stale, nil)
+	ursp, ev = run("req-c2", "chatcmpl-cache0148", greeting+" (cached)", promptB, stale, nil)
+	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+	assert.Contains(t, ev.Note, "signals: dup_id,stale_created")
 
 	// the same long output with a stale created stamp: replay
 	ursp, ev = run("req-s", "chatcmpl-stale0001", answerX, promptB, now-22*86400, nil)
