@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func streamResponseXAI2OpenAI(xAIResp *dto.ChatCompletionsStreamResponse, usage *dto.Usage) *dto.ChatCompletionsStreamResponse {
@@ -40,8 +41,11 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var responseTextBuilder strings.Builder
 	var toolCount int
 	var containStreamUsage bool
+	var lastStreamData string
 
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("xai_chat_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var xAIResp *dto.ChatCompletionsStreamResponse
@@ -50,6 +54,9 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			sr.Error(err)
 			return
 		}
+		// upstream response forensics — xAI declares its runtime model per chunk
+		info.ObserveUpstreamResponseFrame(data, xAIResp.Model, xAIResp.Id, xAIResp.Created, xAIResp.GetSystemFingerprint())
+		lastStreamData = data
 
 		// 把 xAI 的usage转换为 OpenAI 的usage
 		if xAIResp.Usage != nil {
@@ -67,6 +74,8 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	})
 
+	info.SetUpstreamResponseForensics(lastStreamData, nil)
+	info.ObserveUpstreamOutput(responseTextBuilder.String())
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7
@@ -84,6 +93,12 @@ func xAIHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	// upstream response forensics — raw body before the usage rewrite below
+	info.MarkUpstreamObserver("xai_chat")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
+	info.ObserveUpstreamResponse(gjson.GetBytes(responseBody, "model").String(), gjson.GetBytes(responseBody, "id").String(),
+		gjson.GetBytes(responseBody, "created").Int(), gjson.GetBytes(responseBody, "system_fingerprint").String())
+	info.ObserveUpstreamOutputJSON(responseBody)
 	var xaiResponse ChatCompletionResponse
 	err = common.Unmarshal(responseBody, &xaiResponse)
 	if err != nil {

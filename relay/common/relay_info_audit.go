@@ -47,6 +47,9 @@ type UpstreamAuditObservation struct {
 	// Observed is set by any observation call, so "the upstream declared
 	// nothing" (partial) is distinguishable from "nobody looked" (none).
 	Observed bool
+	// NoModelConcept marks responses that have no model to judge (images):
+	// evidence is kept, but the observation level stays "none".
+	NoModelConcept bool
 
 	// SentField is UpstreamModelName at the send boundary when it differs
 	// from the model actually on the wire (pass-through bodies, param
@@ -370,7 +373,7 @@ func (info *RelayInfo) ObserveUpstreamTokenCounts(promptTokens, completionTokens
 // when no instrumented handler looked at it.
 func (info *RelayInfo) UpstreamObservationLevel() string {
 	switch {
-	case info == nil:
+	case info == nil, info.UpstreamAudit.NoModelConcept:
 		return "none"
 	case info.UpstreamResponseModel != "":
 		return "full"
@@ -541,4 +544,27 @@ func (info *RelayInfo) ObserveUpstreamResponsesEvent(eventType, frame, model, re
 		info.SetUpstreamResponseForensics(frame, nil)
 		info.ObserveUpstreamOutputJSON([]byte(gjson.Get(frame, "response").Raw))
 	}
+}
+
+// upstreamMediaExcerptCap bounds the excerpt of a media response: the head
+// carries created/ids/revised prompts, the rest is base64 payload.
+const upstreamMediaExcerptCap = 4 * 1024
+
+// ObserveUpstreamMediaResponse keeps cheap evidence for responses without a
+// model concept (image generation): the headers and the first 4KB of the body
+// with its full length. The observation level stays "none".
+func (info *RelayInfo) ObserveUpstreamMediaResponse(handler string, body []byte, headers map[string][]string) {
+	if info == nil {
+		return
+	}
+	info.MarkUpstreamObserver(handler)
+	info.UpstreamAudit.NoModelConcept = true
+	head := body[:min(len(body), upstreamMediaExcerptCap+utf8.UTFMax)]
+	info.SetUpstreamResponseForensicsBytes(head, headers)
+	if len(body) > 0 {
+		info.UpstreamResponseExcerpt, _ = common.TruncateAuditBytes(info.UpstreamResponseExcerpt, upstreamMediaExcerptCap)
+		info.UpstreamAudit.ExcerptTruncated = len(body) > upstreamMediaExcerptCap
+		info.UpstreamAudit.ExcerptFullLen = len(body)
+	}
+	info.ObserveUpstreamResponse("", "", gjson.GetBytes(head, "created").Int(), "")
 }

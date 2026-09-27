@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
+	"github.com/tidwall/gjson"
 )
 
 func requestOpenAI2Cohere(textRequest dto.GeneralOpenAIRequest) *CohereRequest {
@@ -111,6 +112,8 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		stopChan <- true
 	}()
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("cohere_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	isFirst := true
 	c.Stream(func(w io.Writer) bool {
 		select {
@@ -132,6 +135,10 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			openaiResp.Object = "chat.completion.chunk"
 			openaiResp.Model = info.UpstreamModelName
 			if cohereResp.IsFinished {
+				// upstream response forensics — Cohere declares no model; the
+				// final event carries the response id
+				info.ObserveUpstreamResponse("", gjson.Get(data, "response.response_id").String(), 0, "")
+				info.SetUpstreamResponseForensics(data, nil)
 				finishReason := stopReasonCohere2OpenAI(cohereResp.FinishReason)
 				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
 					{
@@ -181,11 +188,15 @@ func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("cohere")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	var cohereResp CohereResponseResult
 	err = json.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	// upstream response forensics — Cohere declares no model, only an id
+	info.ObserveUpstreamResponse("", cohereResp.ResponseId, 0, "")
 	usage := dto.Usage{}
 	usage.PromptTokens = cohereResp.Meta.BilledUnits.InputTokens
 	usage.CompletionTokens = cohereResp.Meta.BilledUnits.OutputTokens

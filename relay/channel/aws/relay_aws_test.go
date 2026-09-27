@@ -182,6 +182,34 @@ func TestDoAwsClientRequest_AppliesRuntimeHeaderOverrideToAnthropicBeta(t *testi
 	require.Equal(t, []any{"computer-use-2025-01-24"}, values)
 }
 
+// The audit's sent model on the AWS SDK path is the Bedrock modelId that is
+// actually invoked (cross-region prefix and -vN:M build included), and the
+// prompt hash comes from the InvokeModel body (spec B2).
+func TestDoAwsClientRequestSnapshotsBedrockModelId(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "claude-3-5-sonnet-20240620",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ApiKey:            "access-key|secret-key|us-east-1",
+			UpstreamModelName: "claude-3-5-sonnet-20240620",
+		},
+	}
+	adaptor := &Adaptor{}
+	_, err := doAwsClientRequest(ctx, info, adaptor,
+		bytes.NewBufferString(`{"messages":[{"role":"user","content":"hello"}],"max_tokens":128}`))
+	require.NoError(t, err)
+
+	awsReq, ok := adaptor.AwsReq.(*bedrockruntime.InvokeModelInput)
+	require.True(t, ok)
+	require.Equal(t, *awsReq.ModelId, info.UpstreamSentModel)
+	require.NotEqual(t, "claude-3-5-sonnet-20240620", info.UpstreamSentModel, "the wire id is the Bedrock modelId")
+	require.Equal(t, "claude-3-5-sonnet-20240620", info.UpstreamAudit.SentField)
+	require.Equal(t, relaycommon.CanonicalPromptSHA256(awsReq.Body), info.UpstreamAudit.PromptSHA256)
+	require.NotEmpty(t, info.UpstreamAudit.PromptSHA256)
+}
+
 func TestNewAwsInvokeContextInheritsParent(t *testing.T) {
 	originalRelayTimeout := common.RelayTimeout
 	t.Cleanup(func() {

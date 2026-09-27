@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -399,4 +400,30 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+// An in-stream error frame is kept as the error frame; it must not replace the
+// message_start excerpt and model frame that the verdict is based on (spec D2).
+func TestClaudeStreamErrorFrameKeepsMessageStartEvidence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	info := &relaycommon.RelayInfo{
+		RelayFormat:  types.RelayFormatClaude,
+		IsStream:     true,
+		StreamStatus: relaycommon.NewStreamStatus(),
+		ChannelMeta:  &relaycommon.ChannelMeta{UpstreamModelName: "claude-sonnet-5"},
+	}
+	claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{}}
+	start := `{"type":"message_start","message":{"id":"msg_01evidence","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}`
+	errFrame := `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
+
+	require.Nil(t, HandleStreamResponseData(c, info, claudeInfo, start))
+	require.NotNil(t, HandleStreamResponseData(c, info, claudeInfo, errFrame))
+
+	assert.Equal(t, start, info.UpstreamResponseExcerpt)
+	assert.Equal(t, start, info.UpstreamAudit.ModelFrame)
+	assert.Equal(t, errFrame, info.UpstreamAudit.ErrorFrame)
+	assert.Equal(t, "claude-sonnet-5", info.UpstreamSentModel, "sent model survives the message_start rewrite")
+	assert.Equal(t, "msg_01evidence", info.UpstreamResponseId)
 }

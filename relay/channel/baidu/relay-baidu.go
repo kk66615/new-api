@@ -116,12 +116,19 @@ func embeddingResponseBaidu2OpenAI(response *BaiduEmbeddingResponse) *dto.OpenAI
 
 func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	usage := &dto.Usage{}
+	info.MarkUpstreamObserver("baidu_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var baiduResponse BaiduChatStreamResponse
 		if err := common.Unmarshal([]byte(data), &baiduResponse); err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			sr.Error(err)
 			return
+		}
+		// upstream response forensics — ERNIE declares no model, only id/created
+		info.ObserveUpstreamResponse("", baiduResponse.Id, baiduResponse.Created, "")
+		if baiduResponse.IsEnd {
+			info.SetUpstreamResponseForensics(data, nil)
 		}
 		if baiduResponse.Usage.TotalTokens != 0 {
 			usage.TotalTokens = baiduResponse.Usage.TotalTokens
@@ -145,10 +152,14 @@ func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("baidu")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	err = json.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
+	// upstream response forensics — ERNIE declares no model, only id/created
+	info.ObserveUpstreamResponse("", baiduResponse.Id, baiduResponse.Created, "")
 	if baiduResponse.ErrorMsg != "" {
 		return types.NewError(fmt.Errorf("%s", baiduResponse.ErrorMsg), types.ErrorCodeBadResponseBody), nil
 	}

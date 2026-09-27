@@ -30,6 +30,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
 )
 
 const responsesWSEventTypeResponseCreate = "response.create"
@@ -275,6 +276,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if apiErr != nil {
 			return apiErr
 		}
+		info.SnapshotUpstreamWire(gjson.GetBytes(payload, "model").String(), payload)
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeAfter = true
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -309,6 +311,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			if apiErr != nil {
 				return apiErr
 			}
+			// the create event is what goes on the wire; DoWssRequest's own
+			// snapshot is write-once and becomes a no-op after this
+			info.SnapshotUpstreamWire(gjson.GetBytes(payload, "model").String(), payload)
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
@@ -357,6 +362,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	}
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
+	info.MarkUpstreamObserver("responses_ws")
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	info.StreamStatus.RequireTerminal()
 	common.SetContextKey(c, appconstant.ContextKeyResponseStreamStatus, info.StreamStatus)
@@ -399,7 +405,12 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				if event.Response != nil && event.Response.ID != "" && event.Response.ID == s.lastResponseID {
 					continue
 				}
+				// upstream response forensics — the upstream's own events for this stream
+				if event.Response != nil {
+					info.ObserveUpstreamResponsesEvent(event.Type, string(incoming.body), event.Response.Model, event.Response.ID, int64(event.Response.CreatedAt))
+				}
 				if event.Type == "error" {
+					info.ObserveUpstreamErrorFrame(string(incoming.body))
 					var rejection responsesWSErrorEvent
 					_ = common.Unmarshal(incoming.body, &rejection)
 					if rejection.ResponseID != "" && rejection.ResponseID == s.lastResponseID {

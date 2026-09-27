@@ -107,6 +107,9 @@ func palmHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respons
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	// upstream response forensics — PaLM declares neither model nor id
+	info.MarkUpstreamObserver("palm")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	var palmResponse PaLMChatResponse
 	err = json.Unmarshal(responseBody, &palmResponse)
 	if err != nil {

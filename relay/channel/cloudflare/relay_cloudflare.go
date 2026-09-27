@@ -17,6 +17,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func convertCf2CompletionsRequest(textRequest dto.GeneralOpenAIRequest) *CfRequest {
@@ -34,9 +35,12 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 	scanner.Split(bufio.ScanLines)
 
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("cloudflare_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	id := helper.GetResponseID(c)
 	var responseText string
 	isFirst := true
+	var lastStreamData string
 
 	for scanner.Scan() {
 		data := scanner.Text()
@@ -56,6 +60,9 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 			logger.LogError(c, "error_unmarshalling_stream_response: "+err.Error())
 			continue
 		}
+		// upstream response forensics — before the id/model are overwritten below
+		info.ObserveUpstreamResponseFrame(data, response.Model, response.Id, response.Created, "")
+		lastStreamData = data
 		for _, choice := range response.Choices {
 			choice.Delta.Role = "assistant"
 			responseText += choice.Delta.GetContentString()
@@ -75,6 +82,8 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 	if err := scanner.Err(); err != nil {
 		logger.LogError(c, "error_scanning_stream_response: "+err.Error())
 	}
+	info.SetUpstreamResponseForensics(lastStreamData, nil)
+	info.ObserveUpstreamOutput(responseText)
 	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	if info.ShouldIncludeUsage {
 		response := helper.GenerateFinalUsageResponse(id, info.StartTime.Unix(), info.UpstreamModelName, *usage)
@@ -96,6 +105,11 @@ func cfHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response)
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	service.CloseResponseBodyGracefully(resp)
+	// upstream response forensics — before the id/model are overwritten below
+	info.MarkUpstreamObserver("cloudflare")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
+	info.ObserveUpstreamResponse(gjson.GetBytes(responseBody, "model").String(), gjson.GetBytes(responseBody, "id").String(), gjson.GetBytes(responseBody, "created").Int(), "")
+	info.ObserveUpstreamOutputJSON(responseBody)
 	var response dto.TextResponse
 	err = json.Unmarshal(responseBody, &response)
 	if err != nil {

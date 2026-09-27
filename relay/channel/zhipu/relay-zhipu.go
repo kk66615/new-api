@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/tidwall/gjson"
 )
 
 // https://open.bigmodel.cn/doc/api#chatglm_std
@@ -186,6 +187,8 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		stopChan <- true
 	}()
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("zhipu_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case data := <-dataChan:
@@ -198,6 +201,10 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
 			return true
 		case data := <-metaChan:
+			// upstream response forensics — the legacy Zhipu API declares no
+			// model; the meta event carries the request id
+			info.ObserveUpstreamResponse("", gjson.Get(data, "request_id").String(), 0, "")
+			info.SetUpstreamResponseForensics(data, nil)
 			var zhipuResponse ZhipuStreamMetaResponse
 			err := json.Unmarshal([]byte(data), &zhipuResponse)
 			if err != nil {
@@ -229,6 +236,10 @@ func zhipuHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	// upstream response forensics — no model in the legacy Zhipu API
+	info.MarkUpstreamObserver("zhipu")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
+	info.ObserveUpstreamResponse("", gjson.GetBytes(responseBody, "data.request_id").String(), 0, "")
 	err = json.Unmarshal(responseBody, &zhipuResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)

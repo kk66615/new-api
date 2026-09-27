@@ -852,6 +852,13 @@ func AppendUpstreamResponseAuditForError(ctx *gin.Context, relayInfo *relaycommo
 	appendUpstreamResponseAudit(ctx, relayInfo, other, errorType)
 }
 
+// appendUnobservedUpstreamAudit marks a log whose path has no upstream model
+// to judge (tasks, Midjourney) as obs=none with the path name, so its absence
+// of a verdict is explicit rather than silent.
+func appendUnobservedUpstreamAudit(other *model.LogOther, handler string) {
+	other.SetRoot("ursp", map[string]any{"obs": "none", "h": handler})
+}
+
 // upstreamObserverName is ursp.h: the response handler that observed the
 // exchange, or — for paths without an instrumented handler — the relay mode.
 func upstreamObserverName(relayInfo *relaycommon.RelayInfo) string {

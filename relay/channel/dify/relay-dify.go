@@ -21,6 +21,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func uploadDifyFile(c *gin.Context, info *relaycommon.RelayInfo, user string, media dto.MediaContent) *DifyFile {
@@ -228,12 +229,19 @@ func difyStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	usage := &dto.Usage{}
 	var nodeToken int
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("dify_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var difyResponse DifyChunkChatCompletionResponse
 		if err := json.Unmarshal([]byte(data), &difyResponse); err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			sr.Error(err)
 			return
+		}
+		if difyResponse.Event == "message_end" || difyResponse.Event == "error" {
+			// upstream response forensics — Dify declares no model, only ids
+			info.ObserveUpstreamResponse("", gjson.Get(data, "message_id").String(), gjson.Get(data, "created_at").Int(), "")
+			info.SetUpstreamResponseForensics(data, nil)
 		}
 		if difyResponse.Event == "message_end" {
 			usage = &difyResponse.MetaData.Usage
@@ -271,6 +279,10 @@ func difyHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respons
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	// upstream response forensics — Dify declares no model, only ids
+	info.MarkUpstreamObserver("dify")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
+	info.ObserveUpstreamResponse("", gjson.GetBytes(responseBody, "message_id").String(), gjson.GetBytes(responseBody, "created_at").Int(), "")
 	err = json.Unmarshal(responseBody, &difyResponse)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)

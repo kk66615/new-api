@@ -79,6 +79,9 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if info.IsStream {
 		var responseText string
+		// PaLM declares neither model nor id; only the headers are evidence
+		info.MarkUpstreamObserver("palm_stream")
+		info.SetUpstreamResponseForensics("", resp.Header)
 		err, responseText = palmStreamHandler(c, resp)
 		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	} else {

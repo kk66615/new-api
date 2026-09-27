@@ -147,6 +147,8 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	defer service.CloseResponseBodyGracefully(resp)
 
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("ollama_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	scanner := helper.NewStreamScanner(resp.Body)
 	usage := &dto.Usage{}
 	var model = info.UpstreamModelName
@@ -173,6 +175,11 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			model = chunk.Model
 		}
 		created = toUnix(chunk.CreatedAt)
+		// upstream response forensics — every ollama chunk declares its model
+		info.ObserveUpstreamResponseFrame(line, chunk.Model, "", created, "")
+		if chunk.Done {
+			info.SetUpstreamResponseForensics(line, nil)
+		}
 
 		if !chunk.Done {
 			delta, _ := buildOllamaStreamDelta(&chunk, responseId, created, model, &toolCallIndex)
@@ -227,6 +234,8 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("ollama")
+	info.SetUpstreamResponseForensicsBytes(body, resp.Header)
 	raw := string(body)
 	if common.DebugEnabled {
 		println("ollama non-stream raw resp:", raw)
@@ -311,6 +320,7 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		}
 	}
 
+	info.ObserveUpstreamResponse(lastChunk.Model, "", toUnix(lastChunk.CreatedAt), "")
 	model := lastChunk.Model
 	if model == "" {
 		model = info.UpstreamModelName

@@ -30,6 +30,7 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	info.ObserveUpstreamMediaResponse("openai_image", responseBody, resp.Header)
 
 	var usageResp dto.SimpleResponse
 	err = common.Unmarshal(responseBody, &usageResp)
@@ -133,6 +134,7 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	if !strings.Contains(contentType, "text/event-stream") {
 		return openaiImageJSONAsStreamHandler(c, info, resp)
 	}
+	info.ObserveUpstreamMediaResponse("openai_image_stream", nil, resp.Header)
 	// Reuse the shared streaming engine (helper.StreamScannerHandler) so the
 	// image streaming path gets the same ping keepalive, streaming-timeout
 	// watchdog, client-disconnect detection, panic recovery and goroutine
@@ -264,6 +266,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	info.ObserveUpstreamMediaResponse("openai_image_json_stream", responseBody, resp.Header)
 
 	// Only decode usage/error. Do not Unmarshal data[] into dto.ImageResponse —
 	// b64_json values are large and would be copied into Go strings then

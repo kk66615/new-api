@@ -96,6 +96,9 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 	scanner.Split(bufio.ScanLines)
 
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("tencent_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
+	var lastStreamData string
 
 	for scanner.Scan() {
 		data := scanner.Text()
@@ -110,6 +113,9 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			continue
 		}
+		// upstream response forensics — Hunyuan declares no model, only id/created
+		info.ObserveUpstreamResponse("", tencentResponse.Id, tencentResponse.Created, "")
+		lastStreamData = data
 
 		response := streamResponseTencent2OpenAI(&tencentResponse)
 		if len(response.Choices) != 0 {
@@ -125,6 +131,7 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 	if err := scanner.Err(); err != nil {
 		common.SysLog("error reading stream: " + err.Error())
 	}
+	info.SetUpstreamResponseForensics(lastStreamData, nil)
 
 	helper.Done(c)
 
@@ -140,10 +147,14 @@ func tencentHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Resp
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("tencent")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	err = json.Unmarshal(responseBody, &tencentSb)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	// upstream response forensics — Hunyuan declares no model, only id/created
+	info.ObserveUpstreamResponse("", tencentSb.Response.Id, tencentSb.Response.Created, "")
 	if tencentSb.Response.Error.Code != 0 {
 		return nil, types.WithOpenAIError(types.OpenAIError{
 			Message: tencentSb.Response.Error.Message,

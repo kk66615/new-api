@@ -18,6 +18,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func convertCozeChatRequest(c *gin.Context, request dto.GeneralOpenAIRequest) *CozeChatRequest {
@@ -52,6 +53,10 @@ func cozeChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	service.CloseResponseBodyGracefully(resp)
+	// upstream response forensics — Coze declares no model, only the chat id
+	info.MarkUpstreamObserver("coze")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
+	info.ObserveUpstreamResponse("", gjson.GetBytes(responseBody, "data.0.chat_id").String(), 0, "")
 	// convert coze response to openai response
 	var response dto.TextResponse
 	var cozeResponse CozeChatDetailResponse
@@ -101,6 +106,8 @@ func cozeChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *ht
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 	helper.SetEventStreamHeaders(c)
+	info.MarkUpstreamObserver("coze_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	id := helper.GetResponseID(c)
 	var responseText string
 
@@ -152,6 +159,9 @@ func cozeChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *ht
 func handleCozeEvent(c *gin.Context, event string, data string, responseText *string, usage *dto.Usage, id string, info *relaycommon.RelayInfo) {
 	switch event {
 	case "conversation.chat.completed":
+		// upstream response forensics — Coze declares no model, only the chat id
+		info.ObserveUpstreamResponse("", gjson.Get(data, "id").String(), gjson.Get(data, "created_at").Int(), "")
+		info.SetUpstreamResponseForensics(data, nil)
 		// 将 data 解析为 CozeChatResponseData
 		var chatData CozeChatResponseData
 		err := json.Unmarshal([]byte(data), &chatData)

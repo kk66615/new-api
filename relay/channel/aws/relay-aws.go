@@ -139,6 +139,8 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 			return nil, types.NewError(errors.Wrap(err, "marshal nova request"), types.ErrorCodeBadResponseBody)
 		}
 		awsReq.Body = reqBody
+		// the Bedrock modelId is what is really on the wire (B2)
+		info.SnapshotUpstreamWire(awsModelId, reqBody)
 		a.AwsReq = awsReq
 		return nil, nil
 	} else {
@@ -157,6 +159,7 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 			if err != nil {
 				return nil, types.NewError(errors.Wrap(err, "marshal aws request fail"), types.ErrorCodeBadRequestBody)
 			}
+			info.SnapshotUpstreamWire(awsModelId, awsReq.Body)
 			a.AwsReq = awsReq
 			return nil, nil
 		} else {
@@ -169,6 +172,7 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 			if err != nil {
 				return nil, types.NewError(errors.Wrap(err, "marshal aws request fail"), types.ErrorCodeBadRequestBody)
 			}
+			info.SnapshotUpstreamWire(awsModelId, awsReq.Body)
 			a.AwsReq = awsReq
 			return nil, nil
 		}
@@ -250,6 +254,7 @@ func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types
 		c.Writer.Header().Set("Content-Type", *awsResp.ContentType)
 	}
 
+	info.MarkUpstreamObserver("aws_claude")
 	handlerErr := claude.HandleClaudeResponseData(c, info, claudeInfo, nil, awsResp.Body)
 	if handlerErr != nil {
 		return handlerErr, nil
@@ -268,6 +273,7 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 	}
 	stream := awsResp.GetStream()
 	defer stream.Close()
+	info.MarkUpstreamObserver("aws_claude_stream")
 
 	claudeInfo := &claude.ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
@@ -324,6 +330,10 @@ func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) 
 	if err != nil {
 		return newAwsInvokeError(requestContext, err, "InvokeModel"), nil
 	}
+
+	// upstream response forensics — Nova declares neither model nor id
+	info.MarkUpstreamObserver("aws_nova")
+	info.SetUpstreamResponseForensicsBytes(awsResp.Body, nil)
 
 	// 解析Nova响应
 	var novaResp struct {
