@@ -49,9 +49,9 @@ func canonicalGrokRuntimeModel(m string) string {
 //
 // Direction matters for pinned builds: sending the alias and getting a dated
 // build back is the vendor resolving its alias (snapshot_date /
-// version_suffix). Sending a pinned build and getting the bare alias back means
-// the upstream did not honour the pin — it may be serving any build — so that
-// direction is pinned_to_alias, which counts as a mismatch.
+// version_suffix). Sending a pinned build and getting the bare alias back is
+// labelled pinned_to_alias: recorded and shown, but not a mismatch (official
+// DeepSeek answers deepseek-v4-pro-0813 as deepseek-v4-pro).
 func snapshotAliasVerdict(sent, resp string) string {
 	sent, resp = strings.ToLower(strings.TrimSpace(sent)), strings.ToLower(strings.TrimSpace(resp))
 	alias, pinned, sentIsAlias := sent, resp, true
@@ -213,8 +213,8 @@ func canonicalModelPair(rawSent, rawResp string) (sent, resp, respPrefix string)
 	return sent, resp, respPrefix
 }
 
-// Mismatch verdict types. VerdictMismatch and VerdictPinnedToAlias are
-// anomalies (see VerdictIsMismatch); every other value means "consistent",
+// Mismatch verdict types. Only VerdictMismatch is an anomaly (see
+// VerdictIsMismatch); every other value means "consistent",
 // with the reason retained so the UI can label a benign difference honestly
 // instead of showing a bare boolean.
 const (
@@ -226,14 +226,14 @@ const (
 	VerdictRollingAlias  = "rolling_alias"   // "-latest" rolling alias resolving into the same family and tier
 	VerdictPreviewAlias  = "preview_alias"   // "-preview" public name ↔ the bare id the upstream reports it as
 	VerdictNoModel       = "no_model"        // upstream declared no model at all
-	VerdictPinnedToAlias = "pinned_to_alias" // sent a pinned build, got the bare alias back — pin not honoured (mismatch)
+	VerdictPinnedToAlias = "pinned_to_alias" // sent a pinned build, got the bare alias back — recorded, not a mismatch (owner decision 2026-09-28: official DeepSeek does this)
 	VerdictMismatch      = "mismatch"        // different model — the anomaly we exist to catch
 )
 
 // VerdictIsMismatch reports whether a verdict is an anomaly. It is the only
 // place that decides which verdicts count as a mismatch.
 func VerdictIsMismatch(verdict string) bool {
-	return verdict == VerdictMismatch || verdict == VerdictPinnedToAlias
+	return verdict == VerdictMismatch
 }
 
 // ClassifyUpstreamModelMismatch returns the verdict for the pair, explaining
@@ -467,10 +467,10 @@ func latestFamilyMatch(sentModel, responseModel string) bool {
 	}
 	respTokens := map[string]bool{}
 	for t := range strings.SplitSeq(strings.ToLower(responseModel), "-") {
-		// "preview" is how Google ships the build a -latest alias points at
-		// (gemini-flash-latest → gemini-2.5-flash-preview-09-2025); it stays a
-		// tier label elsewhere but does not fail the alias resolution
-		if lowerTierTokens[t] && t != "preview" && !aliasTokens[t] {
+		// "preview" is how Google ships the build a gemini -latest alias
+		// points at (gemini-flash-latest → gemini-2.5-flash-preview-09-2025);
+		// for gemini it stays a tier label but does not fail the resolution
+		if lowerTierTokens[t] && !(t == "preview" && strings.HasPrefix(alias, "gemini-")) && !aliasTokens[t] {
 			return false
 		}
 		respTokens[t] = true
@@ -743,8 +743,34 @@ func trackSourceFlip(key flipTrackerKey, src string) (from string, flipped bool)
 // relay is caught even though its own headers never change. The signature
 // includes the vendor prefix the response carried (gpt_relay/deepseek), so a
 // relay that starts answering through a different namespace is caught too.
+//
+// Only a change of wire shape, or of vendor between two responses that both
+// carry one, is a flip: a relay alternating gpt-4o / openai/gpt-4o, or Bedrock
+// region prefixes (us. / global.), is the same backend. A response without a
+// vendor keeps the last vendor seen, so v1 → none → v2 is still caught.
 func trackBackendFlip(key flipTrackerKey, backend string) (from string, flipped bool) {
-	return trackFlip(&backendTracker, key, backend)
+	if key.channelId == 0 || backend == "" || backend == "unknown" {
+		return "", false
+	}
+	v, _ := backendTracker.LoadOrStore(key, &channelSrcState{})
+	st := v.(*channelSrcState)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	prev := st.last
+	if prev == "" {
+		st.last = backend
+		return "", false
+	}
+	prevShape, prevVendor, _ := strings.Cut(prev, "/")
+	shape, vendor, _ := strings.Cut(backend, "/")
+	if srcFamily(prevShape) == srcFamily(shape) && (vendor == "" || prevVendor == "" || vendor == prevVendor) {
+		if vendor != "" || prevVendor == "" {
+			st.last = backend
+		}
+		return "", false
+	}
+	st.last = backend
+	return prev, true
 }
 
 func trackFlip(tracker *sync.Map, key flipTrackerKey, src string) (from string, flipped bool) {
@@ -764,12 +790,20 @@ func trackFlip(tracker *sync.Map, key flipTrackerKey, src string) (from string, 
 }
 
 // backendSignature is what the backend tracker compares: the wire shape plus
-// the vendor prefix, when the response carried one.
+// the vendor segment of the response's prefix (openrouter/deepseek → deepseek,
+// us.anthropic → anthropic). Gemini's "models/" path prefix is not a vendor.
 func backendSignature(backendShape, prefix string) string {
-	if backendShape == "" || backendShape == "unknown" || prefix == "" {
+	vendor := strings.ToLower(prefix)
+	if i := strings.LastIndex(vendor, "/"); i >= 0 {
+		vendor = vendor[i+1:]
+	}
+	if i := strings.LastIndex(vendor, "."); i >= 0 {
+		vendor = vendor[i+1:]
+	}
+	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
 	}
-	return backendShape + "/" + strings.ToLower(prefix)
+	return backendShape + "/" + vendor
 }
 
 // ── ccmax (Claude Max subscription relay) detection ──────────────────────────
@@ -946,13 +980,15 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	tierDowngrade := mismatch && UpstreamModelIsTierDowngrade(sentModel, respModel)
 	versionDowngrade := mismatch && UpstreamModelIsVersionDowngrade(sentModel, respModel)
 	_, _, respPrefix := canonicalModelPair(sentModel, respModel)
-	// a stream changed model when a later declaration is not a benign rename
-	// of the first one (alias → dated snapshot, vendor prefix, …)
+	// a stream changed model when any two of its declarations are not benign
+	// renames of each other (alias → dated snapshot, vendor prefix, …)
 	midStreamChange := false
-	for _, m := range audit.Models[min(1, len(audit.Models)):] {
-		if VerdictIsMismatch(ClassifyUpstreamModelMismatch(audit.Models[0], m)) {
-			midStreamChange = true
-			break
+	for i := 0; i < len(audit.Models) && !midStreamChange; i++ {
+		for _, later := range audit.Models[i+1:] {
+			if VerdictIsMismatch(ClassifyUpstreamModelMismatch(audit.Models[i], later)) {
+				midStreamChange = true
+				break
+			}
 		}
 	}
 
@@ -1095,11 +1131,19 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	} else if flipNote != "" {
 		notes = append(notes, flipNote)
 	}
-	if midStreamChange && kind != "mid_stream_change" {
+	// the trigger reasons always go into the note, whatever the primary kind:
+	// the watchdog's notification text is built from it
+	if midStreamChange {
 		notes = append(notes, "mid_stream_change: "+strings.Join(audit.Models, " -> "))
 	}
 	if signals.replay && kind != "replay_suspect" {
 		notes = append(notes, "replay_suspect")
+	}
+	if reasons := signals.reasons(); len(reasons) > 0 {
+		notes = append(notes, "signals: "+strings.Join(reasons, ","))
+	}
+	if verdict == VerdictPinnedToAlias {
+		notes = append(notes, VerdictPinnedToAlias)
 	}
 	if failed {
 		notes = append(notes, "error: "+errorType)

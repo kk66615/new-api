@@ -37,7 +37,7 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		// OpenAI alias ↔ snapshot
 		{"gpt-5", "gpt-5-2025-08-07", true},
 		{"gpt-5.2", "gpt-5.2-2025-12-11", true},
-		{"gpt-5-2025-08-07", "gpt-5", false}, // reversed: pin not honoured (pinned_to_alias)
+		{"gpt-5-2025-08-07", "gpt-5", true}, // reversed: pinned_to_alias is recorded, not a mismatch
 		// DeepSeek date build
 		{"deepseek-v4-flash", "deepseek-v4-flash-0731", true},
 		// -latest alias (suffix form)
@@ -237,6 +237,7 @@ func TestVerdictHardening(t *testing.T) {
 		{"latest pro to preview", "gemini-pro-latest", "gemini-3.1-pro-preview", VerdictRollingAlias},
 		{"latest flash to dated preview", "gemini-flash-latest", "gemini-2.5-flash-preview-09-2025", VerdictRollingAlias},
 		{"latest flash to lite preview", "gemini-flash-latest", "gemini-2.5-flash-lite-preview-09-2025", VerdictMismatch},
+		{"preview exemption is gemini-only", "gpt-latest", "gpt-5-preview", VerdictMismatch},
 		{"google MM-YYYY", "gemini-2.5-flash-preview", "gemini-2.5-flash-preview-09-2025", VerdictSnapshotDate},
 		{"MM-YYYY month 13", "gemini-2.5-flash-preview", "gemini-2.5-flash-preview-13-2025", VerdictMismatch},
 		// Vertex @YYYYMMDD pins on the wire vs the Claude body's model
@@ -789,6 +790,9 @@ func TestAuditReplaySignals(t *testing.T) {
 	now := time.Now().Unix()
 	promptA, promptB := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	warm := 0.7
+	answerX := strings.Repeat("The cached answer keeps coming back word for word. ", 5)
+	answerY := strings.Repeat("A first distinctive answer that only appears once here. ", 5)
+	answerZ := strings.Repeat("A second distinctive answer, also produced exactly once. ", 5)
 	run := func(req, id, output, prompt string, created int64, temp *float64) (map[string]any, *model.UpstreamEvidence) {
 		return runAuditExchange(t, auditExchange{
 			channelId: ch, requestId: req, models: []string{"gpt-5"}, id: id, created: created,
@@ -796,58 +800,73 @@ func TestAuditReplaySignals(t *testing.T) {
 		})
 	}
 
-	ursp, _ := run("req-1", "chatcmpl-first0001", longAnswer, promptA, now, nil)
-	assert.NotContains(t, ursp, "dup_id")
+	ursp, _ := run("req-a", "chatcmpl-idone0001", answerX, promptA, now, nil)
+	assert.NotContains(t, ursp, "dup_output")
 
-	// a recycled id over a fresh answer is only a weak dup_id flag
-	fresh := "a fresh answer that is long enough to be distinctive, written only once here"
-	ursp, ev := run("req-2", "chatcmpl-first0001", fresh, promptA, now, nil)
-	assert.Equal(t, true, ursp["dup_id"])
-	assert.NotContains(t, ursp, "replay")
-	assert.Equal(t, "normal", ev.Kind)
-
-	// a retry of the same request repeating its id is not a duplicate
-	ursp, _ = run("req-2", "chatcmpl-first0001", fresh, promptA, now, nil)
-	assert.NotContains(t, ursp, "dup_id")
-
-	// the same id with the same answer for another request is a replay
-	ursp, ev = run("req-2b", "chatcmpl-first0001", fresh, promptB, now, nil)
-	assert.Equal(t, true, ursp["dup_id"])
-	assert.Equal(t, true, ursp["replay"])
-	assert.Equal(t, "replay_suspect", ev.Kind)
-
-	// same output, same prompt, no sampling: an honest deterministic repeat
-	ursp, ev = run("req-3", "chatcmpl-third0001", longAnswer, promptA, now, nil)
+	// same long output for another prompt under sampling: reasons are recorded
+	// but a duplicate output alone is only a flag
+	ursp, ev := run("req-b", "chatcmpl-idtwo0001", answerX, promptB, now, &warm)
 	assert.Equal(t, true, ursp["dup_output"])
 	assert.NotContains(t, ursp, "replay")
 	assert.Equal(t, "normal", ev.Kind)
+	assert.Equal(t, "signals: dup_output,prompt_differs,sampled", ev.Note)
 
-	// same output for a different prompt: replay
-	ursp, _ = run("req-4", "chatcmpl-fourth001", longAnswer, promptB, now, nil)
+	// the same id AND the same long output as an earlier request (req-a; the
+	// output's latest owner is req-b, so this is the id branch): replay
+	ursp, ev = run("req-c", "chatcmpl-idone0001", answerX, promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
 	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+	assert.Contains(t, ev.Note, "signals: dup_id,dup_output")
 
-	// same output under explicit sampling temperature: replay
-	ursp, _ = run("req-5", "chatcmpl-fifth0001", longAnswer, promptB, now, &warm)
-	assert.Equal(t, true, ursp["replay"])
+	// a retry of the same request repeating its id is not a duplicate
+	ursp, _ = run("req-c", "chatcmpl-idone0001", answerX, promptA, now, nil)
+	assert.NotContains(t, ursp, "dup_id")
 
-	// same output with a stale created stamp: replay
-	ursp, _ = run("req-6", "chatcmpl-sixth0001", longAnswer, promptB, now-22*86400, nil)
+	// a relay with a fixed id: text, then a tool-call-only turn (no output
+	// hash), then fresh text — only dup_id flags, and the empty turn does
+	// not poison the comparison for the next one
+	run("req-f1", "msg_01fixedidfixed", answerY, promptA, now, nil)
+	ursp, ev = run("req-f2", "msg_01fixedidfixed", "", promptB, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+	ursp, _ = run("req-f3", "msg_01fixedidfixed", answerZ, promptB, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+
+	// handlers that never compute an output hash cannot produce a replay
+	run("req-h1", "as-12345678-legacy", "", promptA, now, nil)
+	ursp, _ = run("req-h2", "as-12345678-legacy", "", promptB, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+
+	// a short answer behind a fixed id is not distinctive enough
+	run("req-k1", "chatcmpl-short0001", "Sure, here you go.", promptA, now, nil)
+	ursp, _ = run("req-k2", "chatcmpl-short0001", "Sure, here you go.", promptB, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "dup_output")
+	assert.NotContains(t, ursp, "replay")
+
+	// the same long output with a stale created stamp: replay
+	ursp, ev = run("req-s", "chatcmpl-stale0001", answerX, promptB, now-22*86400, nil)
 	assert.Equal(t, true, ursp["stale_created"])
 	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
 
 	// stale created alone is only a flag (a constant created on fresh ids)
-	ursp, ev = run("req-7", "chatcmpl-seven0001", "a unique and sufficiently long answer that nobody has produced before today", promptA, now-86400, nil)
+	ursp, ev = run("req-t", "chatcmpl-seven0001", strings.Repeat("unique ", 40), promptA, now-86400, nil)
 	assert.Equal(t, true, ursp["stale_created"])
 	assert.NotContains(t, ursp, "replay")
 	assert.Equal(t, "normal", ev.Kind)
 
 	// millisecond stamps are normalised, not stale
-	ursp, _ = run("req-8", "chatcmpl-eight0001", "short", promptA, time.Now().UnixMilli(), nil)
+	ursp, _ = run("req-m", "chatcmpl-eight0001", "short", promptA, time.Now().UnixMilli(), nil)
 	assert.NotContains(t, ursp, "stale_created")
 
-	// placeholder ids and short outputs never count as duplicates
-	run("req-9", "resp_0", "ok", promptA, now, nil)
-	ursp, _ = run("req-10", "resp_0", "ok", promptB, now, nil)
+	// placeholder ids never count as duplicates
+	run("req-p1", "resp_0", "ok", promptA, now, nil)
+	ursp, _ = run("req-p2", "resp_0", "ok", promptB, now, nil)
 	assert.NotContains(t, ursp, "dup_id")
 	assert.NotContains(t, ursp, "dup_output")
 }
@@ -896,10 +915,41 @@ func TestAuditTrackersKeyedByFamilyAndKey(t *testing.T) {
 	assert.Equal(t, "azure->newapi_relay", ursp["src_flip"])
 	assert.Equal(t, "provider_switch", ev.Kind)
 
-	// same key, same shape, but the response starts carrying a vendor prefix
-	ursp, _ = runAuditExchange(t, auditExchange{channelId: ch, requestId: "k-4", sent: "gpt-5", models: []string{"vendorx/gpt-5"}, id: "chatcmpl-key00004", headers: relay, multiKey: true, keyIndex: 1})
+	// same key, same shape: a vendor prefix appearing or disappearing is the
+	// same backend; a different vendor between two prefixed answers is not
+	run := func(req, declared string) map[string]any {
+		ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "gpt-5", models: []string{declared},
+			id: "chatcmpl-" + req + "-000", headers: relay, multiKey: true, keyIndex: 1})
+		return ursp
+	}
+	ursp = run("k-4", "vendorx/gpt-5")
 	assert.Equal(t, "vendorx", ursp["prefix"])
-	assert.Equal(t, "gpt_relay->gpt_relay/vendorx", ursp["backend_flip"])
+	assert.NotContains(t, ursp, "backend_flip", "prefix appearing is not a flip")
+	assert.NotContains(t, run("k-5", "gpt-5"), "backend_flip", "prefix disappearing is not a flip")
+	assert.Equal(t, "gpt_relay/vendorx->gpt_relay/vendory", run("k-6", "vendory/gpt-5")["backend_flip"],
+		"the last vendor is remembered across an unprefixed answer")
+}
+
+// Region prefixes and Gemini's models/ path are not vendors: alternating them
+// never reads as a backend flip (spec review M5).
+func TestBackendSignatureComparesVendorSegmentOnly(t *testing.T) {
+	cases := []struct{ shape, prefix, want string }{
+		{"aws", "us.anthropic", "aws/anthropic"},
+		{"aws", "global.anthropic", "aws/anthropic"},
+		{"aws", "jp.anthropic", "aws/anthropic"},
+		{"gpt_relay", "openrouter/deepseek", "gpt_relay/deepseek"},
+		{"aistudio", "models", "aistudio"},
+		{"gpt_relay", "", "gpt_relay"},
+		{"unknown", "openai", "unknown"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, backendSignature(c.shape, c.prefix), c.prefix)
+	}
+	key := isolatedAuditKey(t, 987666, "claude")
+	for _, prefix := range []string{"us.anthropic", "", "global.anthropic", "apac.anthropic"} {
+		_, flipped := trackBackendFlip(key, backendSignature("aws", prefix))
+		assert.False(t, flipped, prefix)
+	}
 }
 
 func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
@@ -919,6 +969,14 @@ func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
 	assert.NotContains(t, ursp, "mid_stream_change")
 	assert.Equal(t, []string{"gpt-5", "gpt-5-2025-08-07"}, ursp["models"])
 	assert.Equal(t, "normal", ev.Kind)
+
+	// two later builds that disagree with each other, though each is a benign
+	// rename of the first alias, are a change too
+	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-p", stream: true,
+		models: []string{"gpt-5", "gpt-5-2025-08-07", "gpt-5-2025-09-01"}, id: "chatcmpl-midpair01"})
+	assert.Equal(t, true, ursp["mid_stream_change"])
+	assert.Equal(t, "mid_stream_change", ev.Kind)
+	assert.Contains(t, ev.Note, "mid_stream_change: gpt-5 -> gpt-5-2025-08-07 -> gpt-5-2025-09-01")
 
 	// combined with a mismatch the row stays a model_mismatch, noted
 	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-2", stream: true,
@@ -1078,4 +1136,17 @@ func TestRelayErrorHandlerWithAuditObservesErrorBodies(t *testing.T) {
 	require.NotNil(t, queued)
 	assert.Contains(t, queued.Note, "error: ")
 	assert.Equal(t, body, queued.ResponseExcerpt)
+}
+
+// Owner decision 2026-09-28: a pinned build answered by the bare alias (the
+// official DeepSeek behaviour) is recorded but is not a mismatch.
+func TestAuditPinnedToAliasIsRecordedNotMismatch(t *testing.T) {
+	isolatedAuditKey(t, 987667, "deepseek")
+	ursp, ev := runAuditExchange(t, auditExchange{channelId: 987667, requestId: "pin-1",
+		sent: "deepseek-v4-pro-0813", models: []string{"deepseek-v4-pro"}, id: "chatcmpl-pinned0001"})
+	assert.Equal(t, VerdictPinnedToAlias, ursp["kind"])
+	assert.Equal(t, false, ursp["mismatch"])
+	assert.NotContains(t, ursp, "tier_downgrade")
+	assert.Equal(t, "normal", ev.Kind)
+	assert.Equal(t, "pinned_to_alias", ev.Note)
 }

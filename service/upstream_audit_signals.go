@@ -22,9 +22,10 @@ const (
 	// staleCreatedSlack tolerates clock skew and queueing between the
 	// request start and the upstream stamping its response.
 	staleCreatedSlack = 120
-	// replayMinOutputChars ignores outputs too short to be distinctive
-	// ("OK", "Hello!") when looking for duplicate outputs.
-	replayMinOutputChars = 64
+	// replayMinOutputChars ignores outputs too short to be distinctive when
+	// looking for duplicate outputs: agent openers and short JSON answers
+	// repeat honestly across different prompts and at temperature > 0.
+	replayMinOutputChars = 200
 	// replayCacheEntries bounds the in-memory replay memory across channels.
 	replayCacheEntries = 100_000
 	// implausibleSpeedMinTokens / implausibleSpeedTokensPerSec: a long output
@@ -38,10 +39,29 @@ type replaySignals struct {
 	staleCreated     bool
 	dupId            bool
 	dupOutput        bool
+	promptDiffers    bool // recorded reason only: never enough on its own
+	sampled          bool // recorded reason only: never enough on its own
 	replay           bool
 	implausibleSpeed bool
 	extraKeys        []string
 	ptRatio          float64
+}
+
+// reasons lists the replay-related signals that fired, for the evidence note.
+func (s replaySignals) reasons() []string {
+	var reasons []string
+	for _, r := range []struct {
+		on   bool
+		name string
+	}{
+		{s.dupId, "dup_id"}, {s.dupOutput, "dup_output"}, {s.staleCreated, "stale_created"},
+		{s.promptDiffers, "prompt_differs"}, {s.sampled, "sampled"}, {s.implausibleSpeed, "implausible_speed"},
+	} {
+		if r.on {
+			reasons = append(reasons, r.name)
+		}
+	}
+	return reasons
 }
 
 func (s replaySignals) apply(ursp map[string]any) {
@@ -104,14 +124,19 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	if channelId != 0 && audit.OutputSHA256 != "" && audit.OutputChars >= replayMinOutputChars {
 		s.dupOutput, outputPrev = replayMemory.seen("o|"+strconv.Itoa(channelId)+"|"+audit.OutputSHA256, current, record)
 	}
-	// H4: a duplicate id is a replay when the output is the same too (or one
-	// side has no output to compare) — a relay that recycles ids over fresh
-	// answers only earns the dup_id flag. A duplicate output needs a second
-	// reason that rules out an honest deterministic repeat.
-	sameOutputBehindId := s.dupId && (idPrev.outputHash == "" || current.outputHash == "" || idPrev.outputHash == current.outputHash)
-	promptDiffers := s.dupOutput && outputPrev.promptHash != "" && current.promptHash != "" && outputPrev.promptHash != current.promptHash
-	sampled := audit.Temperature != nil && *audit.Temperature > 0
-	s.replay = sameOutputBehindId || (s.dupOutput && (s.staleCreated || promptDiffers || sampled))
+	s.promptDiffers = s.dupOutput && outputPrev.promptHash != "" && current.promptHash != "" && outputPrev.promptHash != current.promptHash
+	s.sampled = s.dupOutput && audit.Temperature != nil && *audit.Temperature > 0
+	// H4: a replay needs two independent facts pointing at the same earlier
+	// answer. A duplicate id counts only when both sides produced the same,
+	// non-empty output (tool-call-only turns and handlers without an output
+	// hash never qualify: relays with fixed ids would otherwise flag every
+	// such turn; nor do short outputs). A duplicate output counts only together with the same id
+	// on that same earlier row, or a stale created stamp. A different prompt
+	// or an explicit temperature are recorded as reasons, not proof.
+	sameIdSameOutput := s.dupId && current.outputHash != "" && audit.OutputChars >= replayMinOutputChars &&
+		idPrev.outputHash == current.outputHash
+	sameEarlierRow := s.dupId && s.dupOutput && idPrev.requestId != "" && idPrev.requestId == outputPrev.requestId
+	s.replay = sameIdSameOutput || (s.dupOutput && (sameEarlierRow || s.staleCreated))
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -182,6 +207,11 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 		dup = current.requestId == "" || entry.requestId != current.requestId
 		prev = *entry
 		if record {
+			if current.outputHash == "" {
+				// an output-less turn (tool calls only, or a handler that
+				// computes no hash) must not erase the output to compare with
+				current.outputHash = entry.outputHash
+			}
 			*entry = current
 			l.order.MoveToFront(el)
 		}
