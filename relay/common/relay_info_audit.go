@@ -306,7 +306,8 @@ func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created
 		}
 	}
 	if responseId != "" {
-		info.UpstreamResponseId = responseId
+		// bounded like the DB column: the id also keys the in-memory replay memory
+		info.UpstreamResponseId = common.TruncateAuditRunes(responseId, 255)
 	}
 	if created != 0 {
 		info.UpstreamResponseCreated = created

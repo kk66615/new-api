@@ -113,7 +113,11 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 		return s
 	}
 
-	current := replayEntry{requestId: requestId, promptHash: audit.PromptSHA256, outputHash: audit.OutputSHA256}
+	created := relayInfo.UpstreamResponseCreated
+	if created > 1e12 {
+		created /= 1000
+	}
+	current := replayEntry{requestId: requestId, promptHash: audit.PromptSHA256, outputHash: audit.OutputSHA256, created: created}
 	// H2: the same response id on this channel for a different request
 	var idPrev, outputPrev replayEntry
 	if id := strings.TrimSpace(relayInfo.UpstreamResponseId); channelId != 0 && !isPlaceholderResponseId(id) {
@@ -136,9 +140,17 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// rule needs a distinctive (≥200 char) output. A duplicate output counts only together with the same id
 	// on that same earlier row, or a stale created stamp. A different prompt
 	// or an explicit temperature are recorded as reasons, not proof.
-	sameIdSameOutput := s.dupId && current.outputHash != "" && idPrev.outputHash == current.outputHash
+	// a stale created stamp only corroborates on channels whose created is not
+	// a constant (#109 stamps every answer with the same old value)
+	staleCorroborates := s.staleCreated && !constantCreated.observe(channelId, created, current.outputHash, relayInfo.UpstreamResponseId, record)
+	// same id + same text: deterministic short answers ("OK") behind a
+	// constant-id upstream repeat honestly, so this needs one more fact —
+	// a stale created, the very same created as the remembered answer, or a
+	// distinctive (≥200 char) text
+	sameIdSameOutput := s.dupId && current.outputHash != "" && idPrev.outputHash == current.outputHash &&
+		(staleCorroborates || (created != 0 && idPrev.created == created) || audit.OutputChars >= replayMinOutputChars)
 	sameEarlierRow := s.dupId && s.dupOutput && idPrev.requestId != "" && idPrev.requestId == outputPrev.requestId
-	s.replay = sameIdSameOutput || (s.dupOutput && (sameEarlierRow || s.staleCreated))
+	s.replay = sameIdSameOutput || (s.dupOutput && (sameEarlierRow || staleCorroborates))
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -188,6 +200,7 @@ type replayEntry struct {
 	requestId  string
 	promptHash string
 	outputHash string
+	created    int64
 }
 
 func newReplayLRU(limit int) *replayLRU {
@@ -212,7 +225,7 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 			if current.outputHash == "" {
 				// an output-less turn (tool calls only, or a handler that
 				// computes no hash) must not erase the output to compare with
-				current.outputHash = entry.outputHash
+				current.outputHash, current.created = entry.outputHash, entry.created
 			}
 			*entry = current
 			l.order.MoveToFront(el)
@@ -228,6 +241,45 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 		}
 	}
 	return false, replayEntry{}
+}
+
+// constantCreatedTracker remembers, per channel, the last created stamp with
+// the id and output it came with. The same stamp on a different id with a
+// different output marks the channel as stamping a constant created, which
+// makes stale_created meaningless there. One small entry per channel.
+type constantCreatedTracker struct {
+	channels sync.Map // channelId(int) -> *constantCreatedState
+}
+
+type constantCreatedState struct {
+	mu       sync.Mutex
+	created  int64
+	id       string
+	output   string
+	constant bool
+}
+
+var constantCreated = &constantCreatedTracker{}
+
+// observe feeds one answer (unless record is false) and reports whether the
+// channel is known to stamp a constant created.
+func (c *constantCreatedTracker) observe(channelId int, created int64, output, id string, record bool) bool {
+	if channelId == 0 || created == 0 {
+		return false
+	}
+	v, _ := c.channels.LoadOrStore(channelId, &constantCreatedState{})
+	st := v.(*constantCreatedState)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if record {
+		switch {
+		case st.created != created:
+			st.created, st.id, st.output, st.constant = created, id, output, false
+		case id != "" && id != st.id && output != "" && st.output != "" && output != st.output:
+			st.constant = true
+		}
+	}
+	return st.constant
 }
 
 // knownResponseKeys are the standard top-level keys of each protocol's

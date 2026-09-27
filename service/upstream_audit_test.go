@@ -653,6 +653,7 @@ func isolatedAuditKey(t *testing.T, channelId int, family string) flipTrackerKey
 			})
 		}
 		ccmaxChannels.Delete(channelId)
+		constantCreated.channels.Delete(channelId)
 		replayMemory.mu.Lock()
 		marker := "|" + strconv.Itoa(channelId) + "|"
 		for key, el := range replayMemory.entries {
@@ -841,23 +842,28 @@ func TestAuditReplaySignals(t *testing.T) {
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.NotContains(t, ursp, "replay")
 
-	// same id + the same short text (a cached greeting, the #148 case): the
-	// same-id rule has no length minimum, the cross-id rule does
-	greeting := "Hello! How can I help you with it today?" // 40 chars
-	run("req-k1", "chatcmpl-short0001", greeting, promptA, now, nil)
-	ursp, ev = run("req-k2", "chatcmpl-short0001", greeting, promptB, now, nil)
+	// constant-id upstream + a deterministic short answer with fresh, distinct
+	// created stamps: only dup_id (spec review M-1)
+	run("req-k1", "chatcmpl-const0001", "OK", promptA, now-5, nil)
+	ursp, ev = run("req-k2", "chatcmpl-const0001", "OK", promptB, now, nil)
 	assert.Equal(t, true, ursp["dup_id"])
-	assert.NotContains(t, ursp, "dup_output", "40 chars is below the cross-id minimum")
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+
+	// same id + same short text + the very same (fresh) created: replay
+	greeting := "Hello! How can I help you with it today?" // 40 chars
+	run("req-g1", "chatcmpl-greet0001", greeting, promptA, now-3, nil)
+	ursp, ev = run("req-g2", "chatcmpl-greet0001", greeting, promptB, now-3, nil)
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
 
 	// same id + a different short text: a constant-id generator, dup_id only
-	ursp, _ = run("req-k3", "chatcmpl-short0001", "Sure, what would you like to change?", promptA, now, nil)
+	ursp, _ = run("req-g3", "chatcmpl-greet0001", "Sure, what would you like to change?", promptA, now-3, nil)
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.NotContains(t, ursp, "replay")
 
 	// same id + a tool-call-only turn (no text hash): dup_id only
-	ursp, _ = run("req-k4", "chatcmpl-short0001", "", promptB, now, nil)
+	ursp, _ = run("req-g4", "chatcmpl-greet0001", "", promptB, now-3, nil)
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.NotContains(t, ursp, "replay")
 
@@ -868,10 +874,10 @@ func TestAuditReplaySignals(t *testing.T) {
 	ursp, ev = run("req-c2", "chatcmpl-cache0148", greeting+" (cached)", promptB, stale, nil)
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
-	assert.Contains(t, ev.Note, "signals: dup_id,stale_created")
+	assert.True(t, strings.HasPrefix(ev.Note, "signals: dup_id,stale_created"), ev.Note)
 
 	// the same long output with a stale created stamp: replay
-	ursp, ev = run("req-s", "chatcmpl-stale0001", answerX, promptB, now-22*86400, nil)
+	ursp, ev = run("req-s", "chatcmpl-stale0001", answerX, promptB, now-23*86400, nil)
 	assert.Equal(t, true, ursp["stale_created"])
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
@@ -1171,4 +1177,49 @@ func TestAuditPinnedToAliasIsRecordedNotMismatch(t *testing.T) {
 	assert.NotContains(t, ursp, "tier_downgrade")
 	assert.Equal(t, "normal", ev.Kind)
 	assert.Equal(t, "pinned_to_alias", ev.Note)
+}
+
+// A channel that stamps every answer with the same old created (#109) makes
+// stale_created meaningless: once the same stamp shows up with different ids
+// and outputs, it no longer corroborates a duplicate output (spec review L-1).
+func TestAuditConstantCreatedDoesNotCorroborate(t *testing.T) {
+	const ch = 987668
+	isolatedAuditKey(t, ch, "gpt")
+	constantOld := time.Now().Unix() - 30*86400
+	long := strings.Repeat("A long deterministic answer that repeats word for word. ", 5)
+	run := func(req, id, output string) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, models: []string{"gpt-5"},
+			id: id, created: constantOld, output: output, promptHash: strings.Repeat("c", 64)})
+	}
+	run("req-1", "chatcmpl-constcr01", strings.Repeat("first distinct answer ", 12))
+	run("req-2", "chatcmpl-constcr02", long)
+	ursp, ev := run("req-3", "chatcmpl-constcr03", long)
+	assert.Equal(t, true, ursp["stale_created"], "still recorded as a flag")
+	assert.Equal(t, true, ursp["dup_output"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+}
+
+// provider_switch notes keep exactly the flip text the watchdog groups on;
+// other kinds put the signals first so the 255-char cut never drops them
+// (spec review L-3, L-4).
+func TestAuditNoteFormats(t *testing.T) {
+	const ch = 987669
+	isolatedAuditKey(t, ch, "gpt")
+	now := time.Now().Unix()
+	azure := map[string][]string{"Apim-Request-Id": {"x"}}
+	relay := map[string][]string{"X-New-Api-Version": {"v1"}}
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-1", models: []string{"gpt-5"}, id: "chatcmpl-note00001", headers: azure, created: now})
+	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-2", models: []string{"gpt-5"}, id: "chatcmpl-note00001",
+		headers: relay, created: now - 30*86400, output: "fresh"})
+	assert.Equal(t, "provider_switch", ev.Kind)
+	assert.Equal(t, "azure -> newapi_relay", ev.Note)
+
+	models := make([]string, 0, 8)
+	for i := range 8 {
+		models = append(models, "gpt-5-mini-variant-with-a-long-name-"+strconv.Itoa(i))
+	}
+	_, ev = runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-3", stream: true, models: models,
+		id: "chatcmpl-note00001", created: now - 30*86400})
+	assert.True(t, strings.HasPrefix(ev.Note, "signals: dup_id,stale_created"), ev.Note)
 }

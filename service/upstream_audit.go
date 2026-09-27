@@ -1126,30 +1126,34 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	case flipped:
 		kind = "provider_switch"
 	}
-	if kind != "provider_switch" && flipNote != "" {
-		notes = append(notes, "provider also flipped: "+flipNote)
-	} else if flipNote != "" {
+	if kind == "provider_switch" {
+		// exactly the flip, as before: the watchdog groups and renders these
+		// notes as the source change text
 		notes = append(notes, flipNote)
-	}
-	// the trigger reasons always go into the note, whatever the primary kind:
-	// the watchdog's notification text is built from it
-	if midStreamChange {
-		notes = append(notes, "mid_stream_change: "+strings.Join(audit.Models, " -> "))
-	}
-	if signals.replay && kind != "replay_suspect" {
-		notes = append(notes, "replay_suspect")
-	}
-	if reasons := signals.reasons(); len(reasons) > 0 {
-		notes = append(notes, "signals: "+strings.Join(reasons, ","))
-	}
-	if verdict == VerdictPinnedToAlias {
-		notes = append(notes, VerdictPinnedToAlias)
-	}
-	if failed {
-		notes = append(notes, "error: "+errorType)
-	}
-	if channelTest {
-		notes = append(notes, "channel_test")
+	} else {
+		// the trigger reasons come first so the 255-char cut never drops
+		// them; the watchdog's notification text is built from the note
+		if reasons := signals.reasons(); len(reasons) > 0 {
+			notes = append(notes, "signals: "+strings.Join(reasons, ","))
+		}
+		if signals.replay && kind != "replay_suspect" {
+			notes = append(notes, "replay_suspect")
+		}
+		if verdict == VerdictPinnedToAlias {
+			notes = append(notes, VerdictPinnedToAlias)
+		}
+		if failed {
+			notes = append(notes, "error: "+errorType)
+		}
+		if channelTest {
+			notes = append(notes, "channel_test")
+		}
+		if flipNote != "" {
+			notes = append(notes, "provider also flipped: "+flipNote)
+		}
+		if midStreamChange {
+			notes = append(notes, "mid_stream_change: "+strings.Join(audit.Models, " -> "))
+		}
 	}
 
 	ev := &model.UpstreamEvidence{

@@ -170,9 +170,9 @@ export function rootUpstreamResponseAudit(
 
 /**
  * Whether an upstream response audit block describes an anomaly worth
- * highlighting the log row for: a model mismatch (incl. a pinned build
- * answered by the bare alias), a suspected replay, a model change inside one
- * stream, or a source/backend flip.
+ * highlighting the log row for: a model mismatch, a suspected replay, a model
+ * change inside one stream, or a source/backend flip. A pinned build answered
+ * by the bare alias (pinned_to_alias) is not a mismatch and is not highlighted.
  */
 export function isUpstreamAuditAnomaly(
   ursp: UpstreamResponseAudit | null | undefined

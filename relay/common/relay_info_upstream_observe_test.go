@@ -301,3 +301,11 @@ func TestOutputHashExcludesToolCalls(t *testing.T) {
 	assert.Equal(t, streamed.UpstreamAudit.OutputSHA256, claude.UpstreamAudit.OutputSHA256)
 	assert.Equal(t, 14, claude.UpstreamAudit.OutputChars)
 }
+
+// The response id keys the in-memory replay memory, so it is bounded like the
+// DB column: an upstream cannot grow memory with huge ids.
+func TestObserveUpstreamResponseCapsResponseId(t *testing.T) {
+	info := &RelayInfo{}
+	info.ObserveUpstreamResponse("gpt-5", strings.Repeat("i", 100_000), 0, "")
+	assert.Len(t, info.UpstreamResponseId, 255)
+}
