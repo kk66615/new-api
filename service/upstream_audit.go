@@ -831,15 +831,20 @@ type backendTrackEvent struct {
 //   - Two positive decisions that disagree are a flip, immediately. Only the
 //     wire shape, or the vendor between two responses that both carry one,
 //     counts: gpt-4o / openai/gpt-4o or Bedrock region prefixes are the same.
-//   - A decision without vendor evidence (fallback) after a backend known from
-//     its id / model shape is compared like any other: ids and model names are
-//     on every answer, so their change is real (msg_bdrk_ → msg_). A vendor
-//     prefix segment counts as (weak) evidence.
-//   - After a backend known from headers or body fingerprints, a fallback is
-//     "no evidence this time", not a switch: the last positive backend is
-//     kept. Only backendEvidenceLostAfter consecutive answers without
-//     evidence record one "evidence lost" event, and the first positive
-//     answer after that one "evidence restored" event.
+//   - Every first decision seeds the key, a fallback included, so a key that
+//     starts without evidence still sees its first real switch (gpt_relay →
+//     openrouter).
+//   - A fallback after a backend known from its id / model shape, or after
+//     another fallback, is compared like any other answer: ids and model
+//     names are on every answer, so their change is real (msg_bdrk_ → msg_).
+//   - After a backend known from the channel type, headers or body
+//     fingerprints, a fallback (by == fallback, whatever vendor prefix it
+//     carries) is "no evidence this time", not a switch: the last backend is
+//     kept. Only backendEvidenceLostAfter consecutive such answers record one
+//     "evidence lost" event, and only the return of header/body/channel-type
+//     evidence records one "evidence restored" event.
+//   - The vendor prefix only takes part in comparing two answers' vendor
+//     segments (present ↔ absent is the same backend).
 func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent {
 	if key.channelId == 0 || backend == "" || backend == "unknown" {
 		return backendTrackEvent{}
@@ -849,17 +854,17 @@ func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent 
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	prev := st.last
-	// a vendor namespace prefix (gpt_relay/deepseek) is weak positive
-	// evidence even when the decision itself fell back to the format
-	_, prefixVendor, _ := strings.Cut(backend, "/")
-	positive := by != BackendByFallback || prefixVendor != ""
 	if prev == "" {
-		if positive {
-			st.last, st.lastBy = backend, by
-		}
+		// seed from any decision, a fallback included: a key that starts
+		// without vendor evidence must still see its first real switch
+		st.last, st.lastBy = backend, by
 		return backendTrackEvent{}
 	}
-	if !positive && (st.lastBy == BackendByHeader || st.lastBy == BackendByBody || st.lastBy == BackendByChannelType) {
+	// "no evidence" is decided by the decision alone, never by a vendor
+	// prefix: an Azure relay answering openai/gpt-4o without annotations is
+	// still an answer without vendor evidence
+	noEvidence := by == BackendByFallback
+	if noEvidence && isEvidenceBackedBy(st.lastBy) {
 		if st.lost {
 			return backendTrackEvent{}
 		}
@@ -874,10 +879,13 @@ func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent 
 		}
 	}
 	st.missing = 0
-	if st.lost && positive {
+	if st.lost {
 		st.lost = false
-		st.last, st.lastBy = backend, by
-		return backendTrackEvent{flip: "(none)->" + backend, note: "backend evidence restored: (none) -> " + backend}
+		if isEvidenceBackedBy(by) {
+			st.last, st.lastBy = backend, by
+			return backendTrackEvent{flip: "(none)->" + backend, note: "backend evidence restored: (none) -> " + backend}
+		}
+		// weaker evidence after a loss: compared like any other answer below
 	}
 	prevShape, prevVendor, _ := strings.Cut(prev, "/")
 	shape, vendor, _ := strings.Cut(backend, "/")
@@ -890,6 +898,14 @@ func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent 
 	}
 	st.last, st.lastBy = backend, by
 	return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend}
+}
+
+// isEvidenceBackedBy reports whether a backend decision came from evidence
+// that can be intermittently absent (headers stripped on some paths,
+// annotations off or partial), so its absence gets hysteresis instead of an
+// immediate flip.
+func isEvidenceBackedBy(by string) bool {
+	return by == BackendByChannelType || by == BackendByHeader || by == BackendByBody
 }
 
 // trackSourceFlip watches the hop label (src) of a tracker key; a change

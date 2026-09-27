@@ -1584,3 +1584,54 @@ func TestTrackBackendFlipPositiveChangeIsImmediate(t *testing.T) {
 	assert.Equal(t, "backend: azure -> aws", ev.note)
 	assert.Equal(t, "aws->deepseek", trackBackendFlip(key, "deepseek", BackendByModelName).flip)
 }
+
+// A vendor prefix never turns an answer without vendor evidence into
+// evidence: an Azure relay answering openai/gpt-4o alternates
+// azure/openai (body) and gpt_relay/openai (fallback) — no rows; 20 such
+// fallbacks record one "lost" row, and only real evidence restores it.
+func TestTrackBackendFlipPrefixDoesNotBypassHysteresis(t *testing.T) {
+	key := isolatedAuditKey(t, 987689, "gpt")
+	var events []backendTrackEvent
+	track := func(backend, by string) {
+		if ev := trackBackendFlip(key, backend, by); ev.flip != "" {
+			events = append(events, ev)
+		}
+	}
+	for range 10 {
+		track("azure/openai", BackendByBody)
+		track("gpt_relay/openai", BackendByFallback)
+	}
+	assert.Empty(t, events, "prefixed alternation body <-> fallback is not a switch")
+
+	track("azure/openai", BackendByBody)
+	for range backendEvidenceLostAfter + 5 {
+		track("gpt_relay/openai", BackendByFallback)
+	}
+	require.Len(t, events, 1)
+	assert.Equal(t, "backend evidence lost: azure/openai -> (none) after 20", events[0].note)
+
+	track("gpt_relay/openai", BackendByFallback)
+	assert.Len(t, events, 1, "a prefixed fallback does not restore")
+	track("azure/openai", BackendByBody)
+	require.Len(t, events, 2)
+	assert.Equal(t, "backend evidence restored: (none) -> azure/openai", events[1].note)
+}
+
+// A key that starts without vendor evidence is seeded all the same, so its
+// first real switch is recorded; fallbacks among themselves stay quiet.
+func TestTrackBackendFlipSeedsFromFallback(t *testing.T) {
+	key := isolatedAuditKey(t, 987690, "gpt")
+	for range 5 {
+		assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback).flip)
+	}
+	assert.Equal(t, "gpt_relay->openrouter", trackBackendFlip(key, "openrouter", BackendByIdShape).flip)
+
+	claude := isolatedAuditKey(t, 987691, "claude")
+	assert.Empty(t, trackBackendFlip(claude, "claude_relay", BackendByFallback).flip)
+	assert.Equal(t, "claude_relay->aws", trackBackendFlip(claude, "aws", BackendByIdShape).flip, "msg_ -> msg_bdrk_")
+
+	prefixed := isolatedAuditKey(t, 987692, "gpt")
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback).flip)
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay", BackendByFallback).flip, "prefix absent is the same backend")
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback).flip, "prefix present again")
+}
