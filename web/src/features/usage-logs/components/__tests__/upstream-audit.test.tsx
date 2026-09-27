@@ -190,6 +190,7 @@ describe('upstream response audit details', () => {
         model: 'gpt-5',
         mismatch: false,
         kind: 'exact',
+        src: 'gpt_relay',
         backend: 'gpt_relay',
         backend_by: 'fallback',
         backend_conf: 'none',
@@ -201,6 +202,7 @@ describe('upstream response audit details', () => {
       screen.getByText('OpenAI-compatible (backend unidentified)')
     ).toBeInTheDocument()
     expect(screen.getByText('No vendor evidence')).toBeInTheDocument()
+    expect(screen.getByText('OpenAI-compatible relay')).toBeInTheDocument()
     expect(screen.queryByText('Conflicting Evidence')).toBeNull()
   })
 

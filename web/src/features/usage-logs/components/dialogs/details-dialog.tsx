@@ -194,12 +194,22 @@ const UPSTREAM_SOURCE_LABELS: Record<string, string> = {
   cf_gateway: 'Cloudflare AI Gateway',
 }
 
+// The source row names the direct hop: for the protocol-format labels it
+// must not talk about the backend behind it.
+const UPSTREAM_HOP_LABELS: Record<string, string> = {
+  gpt_relay: 'OpenAI-compatible relay',
+  claude_relay: 'Anthropic-compatible relay',
+}
+
 function upstreamSourceLabel(
   src: string | undefined,
-  t: (key: string) => string
+  t: (key: string) => string,
+  role: 'hop' | 'backend' = 'backend'
 ): string {
   if (!src || src === 'unknown') return t('Unknown Source')
-  const label = UPSTREAM_SOURCE_LABELS[src]
+  const label =
+    (role === 'hop' ? UPSTREAM_HOP_LABELS[src] : undefined) ??
+    UPSTREAM_SOURCE_LABELS[src]
   return label ? t(label) : src
 }
 
@@ -1035,7 +1045,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
             )}
             <DetailRow
               label={t('Upstream Source')}
-              value={upstreamSourceLabel(ursp.src, t)}
+              value={upstreamSourceLabel(ursp.src, t, 'hop')}
             />
             {ursp.src_flip && (
               <DetailRow

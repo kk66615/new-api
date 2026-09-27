@@ -6840,6 +6840,8 @@
     "Strong evidence": "强",
     "Medium evidence": "中",
     "Weak evidence": "弱",
-    "No vendor evidence": "无"
+    "No vendor evidence": "无",
+    "OpenAI-compatible relay": "OpenAI 兼容中转",
+    "Anthropic-compatible relay": "Anthropic 兼容中转"
   }
 }

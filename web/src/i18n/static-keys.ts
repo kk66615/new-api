@@ -829,6 +829,8 @@ export const STATIC_I18N_KEYS = [
   // Upstream backend labels and evidence (usage-logs details dialog).
   'OpenAI-compatible (backend unidentified)',
   'Anthropic-compatible (backend unidentified)',
+  'OpenAI-compatible relay',
+  'Anthropic-compatible relay',
   'Channel protocol type',
   'Official vendor response headers',
   'Vendor-specific response body fields',

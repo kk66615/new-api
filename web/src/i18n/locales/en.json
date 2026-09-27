@@ -6813,6 +6813,8 @@
     "Strong evidence": "Strong evidence",
     "Medium evidence": "Medium evidence",
     "Weak evidence": "Weak evidence",
-    "No vendor evidence": "No vendor evidence"
+    "No vendor evidence": "No vendor evidence",
+    "OpenAI-compatible relay": "OpenAI-compatible relay",
+    "Anthropic-compatible relay": "Anthropic-compatible relay"
   }
 }
