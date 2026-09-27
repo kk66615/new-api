@@ -1,12 +1,23 @@
 package service
 
 import (
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/audit_setting"
+	"github.com/QuantumNous/new-api/setting/config"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpstreamModelsMatchForAudit(t *testing.T) {
@@ -383,7 +394,7 @@ func TestInjectionDetected(t *testing.T) {
 }
 
 func TestSourceFlipFamily(t *testing.T) {
-	ch := 987655
+	ch := isolatedAuditKey(t, 987655, "claude")
 	trackSourceFlip(ch, "claude_relay")
 	if _, flipped := trackSourceFlip(ch, "ccmax"); flipped {
 		t.Error("claude_relay -> ccmax is the same relay, must not count as a flip")
@@ -397,7 +408,7 @@ func TestSourceFlipFamily(t *testing.T) {
 }
 
 func TestTrackSourceFlip(t *testing.T) {
-	ch := 987654 // avoid clashing with other tests
+	ch := isolatedAuditKey(t, 987654, "gpt")
 	// first observation seeds silently
 	if _, flipped := trackSourceFlip(ch, "azure"); flipped {
 		t.Error("first observation must not flip")
@@ -465,7 +476,7 @@ func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
 }
 
 func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
-	ch := 987653
+	ch := isolatedAuditKey(t, 987653, "claude")
 	if _, f := trackBackendFlip(ch, "aws"); f {
 		t.Fatal("seed must not flip")
 	}
@@ -482,16 +493,19 @@ func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
 }
 
 // The error-log path calls the exported wrapper on every recorded error,
-// including ones where the request never reached an upstream. It must leave
-// the log untouched in that case and must tolerate a nil relayInfo (the
-// channel-test path passes one).
-func TestAppendUpstreamResponseAuditNoopWithoutObservation(t *testing.T) {
+// including ones where the request never reached an upstream. A nil relayInfo
+// leaves the log untouched; an unobserved exchange is recorded as obs=none
+// (so "not observed" is visible) without any verdict.
+func TestAppendUpstreamResponseAuditWithoutObservation(t *testing.T) {
 	other := model.NewLogOther()
 	AppendUpstreamResponseAuditForError(nil, nil, other, "upstream_error")
-	AppendUpstreamResponseAuditForError(nil, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5"}}, other, "upstream_error")
-	if _, ok := other.Snapshot()["root_info"]; ok {
-		t.Fatal("root_info written although nothing was observed")
-	}
+	_, ok := other.Snapshot()["root_info"]
+	require.False(t, ok, "nil relayInfo must not write anything")
+
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5"}}
+	AppendUpstreamResponseAuditForError(nil, info, other, "upstream_error")
+	ursp := urspOf(t, other)
+	assert.Equal(t, map[string]any{"obs": "none", "h": "unobserved", "err": "upstream_error", "sent": "gpt-5.5"}, ursp)
 }
 
 // An observed error response yields a ursp block that is labelled as failed,
@@ -499,8 +513,8 @@ func TestAppendUpstreamResponseAuditNoopWithoutObservation(t *testing.T) {
 // (an error answered with the relay's own headers must not look like a
 // provider switch).
 func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
-	const ch = 987652 // unused by the other tracker tests (987653-987655)
-	t.Cleanup(func() { srcTracker.Delete(ch); backendTracker.Delete(ch) })
+	const ch = 987652
+	isolatedAuditKey(t, ch, "gpt")
 	seed := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5.5", ChannelId: ch}}
 	seed.ObserveUpstreamResponse("gpt-5.5", "chatcmpl-ok", 1, "")
 	seed.SetUpstreamResponseForensics(`{"id":"chatcmpl-ok"}`, map[string][]string{"Openai-Organization": {"org-x"}})
@@ -566,7 +580,7 @@ func TestReconcileBackendWithSource(t *testing.T) {
 // shape (gpt_relay) and does not flip.
 func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
 	const ch = 987651
-	t.Cleanup(func() { srcTracker.Delete(ch); backendTracker.Delete(ch) })
+	isolatedAuditKey(t, ch, "gpt")
 	azureHeaders := map[string][]string{"Apim-Request-Id": {"x"}, "X-Ms-Region": {"East US 2"}}
 	run := func(headers map[string][]string) map[string]interface{} {
 		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: ch, ChannelType: 1}}
@@ -596,8 +610,8 @@ func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
 	}
 	// a real shape change (chatcmpl → msg_bdrk_) behind Azure-looking headers
 	// is reported shape→shape on both sides, never with the reconciled label
-	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-sonnet-5", ChannelId: ch, ChannelType: 1}}
-	info.ObserveUpstreamResponse("claude-sonnet-5", "msg_bdrk_01abc", 0, "")
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: ch, ChannelType: 1}}
+	info.ObserveUpstreamResponse("gpt-5", "msg_bdrk_01abc", 0, "")
 	info.SetUpstreamResponseForensics(`{"id":"msg_bdrk_01abc"}`, azureHeaders)
 	other := model.NewLogOther()
 	appendUpstreamResponseAudit(nil, info, other, "")
@@ -609,4 +623,359 @@ func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
 	if third["backend_flip"] != "gpt_relay->aws" {
 		t.Fatalf("backend flip must be shape->shape, got %+v", third)
 	}
+}
+
+// isolatedAuditKey returns the tracker key for a test channel and removes that
+// channel from every global audit tracker (flip trackers, ccmax stickiness,
+// replay memory) when the test ends, so shuffled runs cannot leak state.
+func isolatedAuditKey(t *testing.T, channelId int, family string) flipTrackerKey {
+	t.Helper()
+	forget := func() {
+		for _, tracker := range []*sync.Map{&srcTracker, &backendTracker} {
+			tracker.Range(func(k, _ any) bool {
+				if k.(flipTrackerKey).channelId == channelId {
+					tracker.Delete(k)
+				}
+				return true
+			})
+		}
+		ccmaxChannels.Delete(channelId)
+		replayMemory.mu.Lock()
+		marker := "|" + strconv.Itoa(channelId) + "|"
+		for key, el := range replayMemory.entries {
+			if strings.Contains(key, marker) {
+				replayMemory.order.Remove(el)
+				delete(replayMemory.entries, key)
+			}
+		}
+		replayMemory.mu.Unlock()
+	}
+	forget()
+	t.Cleanup(forget)
+	return flipTrackerKey{channelId: channelId, family: family}
+}
+
+// urspOf extracts root_info.ursp from a log.
+func urspOf(t *testing.T, other *model.LogOther) map[string]any {
+	t.Helper()
+	root, _ := other.Snapshot()["root_info"].(map[string]any)
+	ursp, ok := root["ursp"].(map[string]any)
+	require.True(t, ok, "ursp missing: %+v", other.Snapshot())
+	return ursp
+}
+
+// auditExchange describes one observed upstream exchange for the audit tests.
+type auditExchange struct {
+	channelId   int
+	requestId   string
+	sent        string
+	models      []string // declared models, in stream order
+	id          string
+	created     int64
+	headers     map[string][]string
+	excerpt     string
+	output      string
+	promptHash  string
+	temperature *float64
+	stream      bool
+	channelTest bool
+	keyIndex    int
+	multiKey    bool
+	completion  int
+	promptTok   int
+	estimate    int
+	elapsed     time.Duration
+	handler     string
+	useChannels []string
+	errorType   string
+}
+
+// runAuditExchange feeds one exchange through appendUpstreamResponseAudit and
+// returns its ursp block and the evidence row it queued (nil if none).
+func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.UpstreamEvidence) {
+	t.Helper()
+	var queued *model.UpstreamEvidence
+	original := enqueueUpstreamEvidence
+	enqueueUpstreamEvidence = func(e *model.UpstreamEvidence) bool { queued = e; return true }
+	t.Cleanup(func() { enqueueUpstreamEvidence = original })
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set(common.RequestIdKey, x.requestId)
+	if x.useChannels != nil {
+		ctx.Set("use_channel", x.useChannels)
+	}
+	if x.sent == "" {
+		x.sent = "gpt-5"
+	}
+	if x.handler == "" {
+		x.handler = "openai_chat"
+	}
+	if x.elapsed == 0 {
+		x.elapsed = 10 * time.Second
+	}
+	info := &relaycommon.RelayInfo{
+		StartTime:     time.Now().Add(-x.elapsed),
+		IsStream:      x.stream,
+		IsChannelTest: x.channelTest,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: x.sent, ChannelId: x.channelId, ChannelType: 1,
+			ChannelIsMultiKey: x.multiKey, ChannelMultiKeyIndex: x.keyIndex,
+		},
+	}
+	info.SetEstimatePromptTokens(x.estimate)
+	info.MarkUpstreamObserver(x.handler)
+	info.SnapshotUpstreamWire(x.sent, nil)
+	info.UpstreamAudit.PromptSHA256 = x.promptHash
+	info.UpstreamAudit.Temperature = x.temperature
+	for _, m := range x.models {
+		info.ObserveUpstreamResponseFrame(`{"model":"`+m+`"}`, m, x.id, x.created, "")
+	}
+	if len(x.models) == 0 {
+		info.ObserveUpstreamResponse("", x.id, x.created, "")
+	}
+	excerpt := x.excerpt
+	if excerpt == "" {
+		excerpt = `{"id":"` + x.id + `","object":"chat.completion","model":"x","choices":[]}`
+	}
+	info.SetUpstreamResponseForensics(excerpt, x.headers)
+	info.ObserveUpstreamOutput(x.output)
+	info.ObserveUpstreamTokenCounts(x.promptTok, x.completion, false)
+	other := model.NewLogOther()
+	appendUpstreamResponseAudit(ctx, info, other, x.errorType)
+	return urspOf(t, other), queued
+}
+
+var longAnswer = strings.Repeat("The quick brown fox jumps over the lazy dog. ", 3)
+
+func TestAuditHappyPathCarriesNoSignals(t *testing.T) {
+	isolatedAuditKey(t, 987656, "gpt")
+	ursp, ev := runAuditExchange(t, auditExchange{
+		channelId: 987656, requestId: "req-happy", models: []string{"gpt-5-2025-08-07"},
+		id: "chatcmpl-happy0001", created: time.Now().Unix(), output: longAnswer,
+		promptHash: strings.Repeat("a", 64), completion: 150, stream: true,
+	})
+	for _, flag := range []string{"stale_created", "dup_id", "dup_output", "replay", "implausible_speed",
+		"extra_keys", "mid_stream_change", "tier_downgrade", "version_downgrade", "src_flip", "backend_flip",
+		"sent_field", "retry", "err"} {
+		assert.NotContains(t, ursp, flag)
+	}
+	assert.Equal(t, "full", ursp["obs"])
+	assert.Equal(t, "openai_chat", ursp["h"])
+	assert.Equal(t, VerdictSnapshotDate, ursp["kind"])
+	require.NotNil(t, ev)
+	assert.Equal(t, "normal", ev.Kind)
+	assert.Empty(t, ev.Note)
+	assert.Equal(t, strings.Repeat("a", 64), ev.PromptSha256)
+	assert.Len(t, ev.OutputSha256, 64)
+	assert.Equal(t, `{"model":"gpt-5-2025-08-07"}`, ev.ModelFrame)
+}
+
+func TestAuditReplaySignals(t *testing.T) {
+	const ch = 987657
+	isolatedAuditKey(t, ch, "gpt")
+	now := time.Now().Unix()
+	promptA, promptB := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	warm := 0.7
+	run := func(req, id, output, prompt string, created int64, temp *float64) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{
+			channelId: ch, requestId: req, models: []string{"gpt-5"}, id: id, created: created,
+			output: output, promptHash: prompt, temperature: temp,
+		})
+	}
+
+	ursp, _ := run("req-1", "chatcmpl-first0001", longAnswer, promptA, now, nil)
+	assert.NotContains(t, ursp, "dup_id")
+
+	// the same id answering another request is a replay on its own
+	ursp, ev := run("req-2", "chatcmpl-first0001", "different answer entirely", promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+
+	// a retry of the same request repeating its id is not a duplicate
+	ursp, _ = run("req-2", "chatcmpl-first0001", "different answer entirely", promptA, now, nil)
+	assert.NotContains(t, ursp, "dup_id")
+
+	// same output, same prompt, no sampling: an honest deterministic repeat
+	ursp, ev = run("req-3", "chatcmpl-third0001", longAnswer, promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_output"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+
+	// same output for a different prompt: replay
+	ursp, _ = run("req-4", "chatcmpl-fourth001", longAnswer, promptB, now, nil)
+	assert.Equal(t, true, ursp["replay"])
+
+	// same output under explicit sampling temperature: replay
+	ursp, _ = run("req-5", "chatcmpl-fifth0001", longAnswer, promptB, now, &warm)
+	assert.Equal(t, true, ursp["replay"])
+
+	// same output with a stale created stamp: replay
+	ursp, _ = run("req-6", "chatcmpl-sixth0001", longAnswer, promptB, now-22*86400, nil)
+	assert.Equal(t, true, ursp["stale_created"])
+	assert.Equal(t, true, ursp["replay"])
+
+	// stale created alone is only a flag (a constant created on fresh ids)
+	ursp, ev = run("req-7", "chatcmpl-seven0001", "a unique and sufficiently long answer that nobody has produced before today", promptA, now-86400, nil)
+	assert.Equal(t, true, ursp["stale_created"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+
+	// millisecond stamps are normalised, not stale
+	ursp, _ = run("req-8", "chatcmpl-eight0001", "short", promptA, time.Now().UnixMilli(), nil)
+	assert.NotContains(t, ursp, "stale_created")
+
+	// placeholder ids and short outputs never count as duplicates
+	run("req-9", "resp_0", "ok", promptA, now, nil)
+	ursp, _ = run("req-10", "resp_0", "ok", promptB, now, nil)
+	assert.NotContains(t, ursp, "dup_id")
+	assert.NotContains(t, ursp, "dup_output")
+}
+
+// Channel tests may consult the replay memory but never add to it, never feed
+// the flip trackers, and are labelled in the evidence note (spec F2).
+func TestAuditChannelTestDoesNotFeedTrackers(t *testing.T) {
+	const ch = 987658
+	isolatedAuditKey(t, ch, "gpt")
+	azure := map[string][]string{"Apim-Request-Id": {"x"}}
+	relay := map[string][]string{"X-New-Api-Version": {"v1"}}
+	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "t-1", models: []string{"gpt-5"},
+		id: "chatcmpl-test00001", headers: azure, channelTest: true})
+	assert.Equal(t, "channel_test", ev.Note)
+	ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: "t-2", models: []string{"gpt-5"},
+		id: "chatcmpl-test00002", headers: relay, channelTest: true})
+	assert.NotContains(t, ursp, "src_flip")
+
+	// the real request reusing the channel test's id is not a duplicate: the
+	// test never recorded it
+	ursp, _ = runAuditExchange(t, auditExchange{channelId: ch, requestId: "real-1", models: []string{"gpt-5"},
+		id: "chatcmpl-test00001", headers: relay})
+	assert.NotContains(t, ursp, "dup_id")
+	assert.NotContains(t, ursp, "src_flip", "the tracker was seeded by this request, not by the tests")
+}
+
+// Trackers are keyed by (channel, model family, key index): a multi-model or
+// multi-key channel does not produce provider_switch rows across models or
+// keys, while a real change on one key still flips; the vendor prefix is part
+// of the backend signature (spec F1, A4).
+func TestAuditTrackersKeyedByFamilyAndKey(t *testing.T) {
+	const ch = 987659
+	isolatedAuditKey(t, ch, "gpt")
+	azure := map[string][]string{"Apim-Request-Id": {"x"}}
+	relay := map[string][]string{"X-New-Api-Version": {"v1"}}
+
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "f-1", sent: "gpt-5", models: []string{"gpt-5"}, id: "chatcmpl-fam00001", headers: azure})
+	ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: "f-2", sent: "claude-sonnet-5", models: []string{"claude-sonnet-5"}, id: "msg_bdrk_fam00002", headers: relay})
+	assert.NotContains(t, ursp, "src_flip", "another model family is another tracker")
+	assert.NotContains(t, ursp, "backend_flip")
+
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "k-1", sent: "gpt-5", models: []string{"gpt-5"}, id: "chatcmpl-key00001", headers: azure, multiKey: true, keyIndex: 1})
+	ursp, _ = runAuditExchange(t, auditExchange{channelId: ch, requestId: "k-2", sent: "gpt-5", models: []string{"gpt-5"}, id: "chatcmpl-key00002", headers: relay, multiKey: true, keyIndex: 2})
+	assert.NotContains(t, ursp, "src_flip", "another key is another tracker")
+	ursp, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "k-3", sent: "gpt-5", models: []string{"gpt-5"}, id: "chatcmpl-key00003", headers: relay, multiKey: true, keyIndex: 1})
+	assert.Equal(t, "azure->newapi_relay", ursp["src_flip"])
+	assert.Equal(t, "provider_switch", ev.Kind)
+
+	// same key, same shape, but the response starts carrying a vendor prefix
+	ursp, _ = runAuditExchange(t, auditExchange{channelId: ch, requestId: "k-4", sent: "gpt-5", models: []string{"vendorx/gpt-5"}, id: "chatcmpl-key00004", headers: relay, multiKey: true, keyIndex: 1})
+	assert.Equal(t, "vendorx", ursp["prefix"])
+	assert.Equal(t, "gpt_relay->gpt_relay/vendorx", ursp["backend_flip"])
+}
+
+func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
+	isolatedAuditKey(t, 987660, "gpt")
+	ursp, ev := runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-1", stream: true,
+		models: []string{"gpt-5-mini", "gpt-5"}, id: "chatcmpl-mid00001"})
+	assert.Equal(t, true, ursp["mid_stream_change"])
+	assert.Equal(t, []string{"gpt-5-mini", "gpt-5"}, ursp["models"])
+	assert.Equal(t, false, ursp["mismatch"], "the verdict still judges the final model")
+	assert.Equal(t, "mid_stream_change", ev.Kind)
+	assert.Equal(t, `{"model":"gpt-5-mini"}`, ev.ModelFrame, "the first model-bearing frame is kept")
+
+	// combined with a mismatch the row stays a model_mismatch, noted
+	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-2", stream: true,
+		models: []string{"gpt-5", "gpt-5-mini"}, id: "chatcmpl-mid00002"})
+	assert.Equal(t, true, ursp["mismatch"])
+	assert.Equal(t, "model_mismatch", ev.Kind)
+	assert.Contains(t, ev.Note, "mid_stream_change: gpt-5 -> gpt-5-mini")
+}
+
+func TestAuditSpeedKeysAndPromptRatio(t *testing.T) {
+	isolatedAuditKey(t, 987661, "gpt")
+	ursp, _ := runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-1", models: []string{"gpt-5"},
+		id: "chatcmpl-speed0001", completion: 2000, elapsed: time.Second, promptTok: 1234, estimate: 1000,
+		excerpt: `{"id":"chatcmpl-speed0001","object":"chat.completion","model":"gpt-5","choices":[],"provider":"x","api_key_id":"k"}`})
+	assert.Equal(t, true, ursp["implausible_speed"])
+	assert.Equal(t, []string{"api_key_id", "provider"}, ursp["extra_keys"])
+	assert.Equal(t, 1.23, ursp["pt_ratio"])
+
+	ursp, _ = runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-2", models: []string{"gpt-5"},
+		id: "chatcmpl-speed0002", completion: 2000, elapsed: 20 * time.Second})
+	assert.NotContains(t, ursp, "implausible_speed")
+	assert.NotContains(t, ursp, "pt_ratio")
+}
+
+func TestAuditRecordsObservationSentFieldAndRetry(t *testing.T) {
+	isolatedAuditKey(t, 987662, "gpt")
+	ursp, ev := runAuditExchange(t, auditExchange{channelId: 987662, requestId: "r-1", models: []string{"gpt-5"},
+		id: "chatcmpl-retry0001", useChannels: []string{"5", "987662"}})
+	assert.Equal(t, 1, ursp["retry"])
+	assert.Equal(t, 1, ev.RetryIndex)
+
+	// partial: observed, but the upstream declared no model
+	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987662, requestId: "r-2", id: "chatcmpl-retry0002"})
+	assert.Equal(t, "partial", ursp["obs"])
+	assert.Equal(t, true, ursp["nomodel"])
+	require.NotNil(t, ev)
+}
+
+// With digest mode on, normal rows keep only the edges of the excerpt while
+// anomalies keep everything; the default stays full (spec E10).
+func TestAuditDigestModeOnlyAffectsNormalRows(t *testing.T) {
+	isolatedAuditKey(t, 987663, "gpt")
+	big := `{"id":"chatcmpl-dig00001","model":"gpt-5","pad":"` + strings.Repeat("x", 10000) + `"}`
+	require.Equal(t, audit_setting.NormalExcerptModeFull, audit_setting.NormalExcerptMode(), "default must stay full")
+	_, ev := runAuditExchange(t, auditExchange{channelId: 987663, requestId: "d-0", models: []string{"gpt-5"}, id: "chatcmpl-dig00000", excerpt: big})
+	assert.Equal(t, big, ev.ResponseExcerpt)
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"audit_setting.normal_excerpt_mode": "digest"}))
+	t.Cleanup(func() {
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"audit_setting.normal_excerpt_mode": "full"})
+	})
+	_, ev = runAuditExchange(t, auditExchange{channelId: 987663, requestId: "d-1", models: []string{"gpt-5"}, id: "chatcmpl-dig00001", excerpt: big})
+	assert.Less(t, len(ev.ResponseExcerpt), 5000)
+	assert.Contains(t, ev.ResponseExcerpt, "bytes omitted")
+	assert.True(t, ev.ExcerptTruncated)
+	assert.Len(t, ev.OutputSha256, 0, "no output was observed in this exchange")
+
+	_, ev = runAuditExchange(t, auditExchange{channelId: 987663, requestId: "d-2", models: []string{"gpt-5-mini"}, id: "chatcmpl-dig00002", excerpt: big})
+	assert.Equal(t, "model_mismatch", ev.Kind)
+	assert.Equal(t, big, ev.ResponseExcerpt, "anomalies always keep the full excerpt")
+}
+
+// ccmax stickiness needs two visible injections within an hour and expires
+// 24h after the last one (spec F3).
+func TestCcmaxStickinessNeedsTwoHitsAndExpires(t *testing.T) {
+	const ch = 987664
+	isolatedAuditKey(t, ch, "claude")
+	clock := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	original := auditNow
+	auditNow = func() time.Time { return clock }
+	t.Cleanup(func() { auditNow = original })
+
+	assert.True(t, ccmaxObserve(ch, true, true), "a visible injection labels its own request")
+	assert.False(t, ccmaxObserve(ch, false, true), "one hit is not enough to stick")
+	clock = clock.Add(2 * time.Hour)
+	assert.True(t, ccmaxObserve(ch, true, true))
+	assert.False(t, ccmaxObserve(ch, false, true), "two hits two hours apart do not stick")
+	clock = clock.Add(30 * time.Minute)
+	ccmaxObserve(ch, true, true)
+	assert.True(t, ccmaxObserve(ch, false, true), "two hits within an hour stick")
+	clock = clock.Add(23 * time.Hour)
+	assert.True(t, ccmaxObserve(ch, false, true))
+	clock = clock.Add(2 * time.Hour)
+	assert.False(t, ccmaxObserve(ch, false, true), "stickiness expires 24h after the last evidence")
+	assert.True(t, ccmaxObserve(ch, true, false), "a channel test sees its own injection")
+	assert.False(t, ccmaxObserve(ch, false, true), "but a channel test never feeds the state")
 }

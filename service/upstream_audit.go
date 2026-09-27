@@ -1,7 +1,6 @@
 package service
 
 import (
-	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/setting/audit_setting"
 
 	"github.com/gin-gonic/gin"
 )
@@ -484,7 +485,7 @@ func headerKeysLower(headersJSON string) map[string]string {
 		return nil
 	}
 	var m map[string]string
-	if err := json.Unmarshal([]byte(headersJSON), &m); err != nil {
+	if err := common.UnmarshalJsonStr(headersJSON, &m); err != nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
@@ -657,20 +658,56 @@ func inferBackendShape(channelType int, id, respModel string, ccmaxHint bool) st
 	return "unknown"
 }
 
-// ── per-channel source flip tracking ─────────────────────────────────────────
+// ── source / backend flip tracking ──────────────────────────────────────────
 // A channel whose inferred source flips (az → gpt_relay → az ...) is a strong
 // adulteration / backend-swap signal. EVERY known→known flip is recorded as
 // evidence (kind=provider_switch) — no rate limiting, per user decision
 // 2026-09-02: evidence completeness beats table size. Push-side dedup in the
 // watchdog keeps notifications sane. State is in-memory: after a restart the
 // first request re-seeds silently (no false alarm).
+//
+// State is keyed by (channel, model family, multi-key index), not by channel:
+// a multi-model channel legitimately routes claude and gpt to different
+// backends, and each key of a multi-key channel may be a different account,
+// so comparing across them produced provider_switch rows that were not
+// switches at all.
+
+type flipTrackerKey struct {
+	channelId int
+	family    string
+	keyIndex  int
+}
 
 type channelSrcState struct {
 	mu   sync.Mutex
 	last string
 }
 
-var srcTracker sync.Map // channelId(int) -> *channelSrcState
+var srcTracker sync.Map     // flipTrackerKey -> *channelSrcState
+var backendTracker sync.Map // flipTrackerKey -> *channelSrcState (look-through backend shape + vendor prefix)
+
+// auditTrackerKey derives the tracker key for one exchange.
+func auditTrackerKey(relayInfo *relaycommon.RelayInfo, sentModel string) flipTrackerKey {
+	key := flipTrackerKey{family: auditModelFamily(sentModel)}
+	if relayInfo != nil && relayInfo.ChannelMeta != nil {
+		key.channelId = relayInfo.ChannelId
+		if relayInfo.ChannelIsMultiKey {
+			key.keyIndex = relayInfo.ChannelMultiKeyIndex
+		}
+	}
+	return key
+}
+
+// auditModelFamily is the family word of a model id (gpt, claude, gemini,
+// deepseek, qwen, o …), used to partition the flip trackers.
+func auditModelFamily(model string) string {
+	_, bare, _ := splitVendorPrefix(model)
+	family, tokens := modelTokens(strings.ToLower(bare))
+	if family == "" && len(tokens) > 0 {
+		return tokens[0]
+	}
+	return family
+}
 
 // srcFamily collapses labels that describe the same backend so request-shape
 // dependent relabeling never reads as a backend switch: ccmax is only a
@@ -683,24 +720,24 @@ func srcFamily(s string) string {
 	return s
 }
 
-var backendTracker sync.Map // channelId(int) -> *channelSrcState (look-through backend shape)
-
-func trackSourceFlip(channelId int, src string) (from string, flipped bool) {
-	return trackFlip(&srcTracker, channelId, src)
+func trackSourceFlip(key flipTrackerKey, src string) (from string, flipped bool) {
+	return trackFlip(&srcTracker, key, src)
 }
 
 // trackBackendFlip watches the wire-shape backend behind a channel independently
 // of the hop label, so a relay that silently moves from Bedrock to a Claude
-// relay is caught even though its own headers never change.
-func trackBackendFlip(channelId int, backend string) (from string, flipped bool) {
-	return trackFlip(&backendTracker, channelId, backend)
+// relay is caught even though its own headers never change. The signature
+// includes the vendor prefix the response carried (gpt_relay/deepseek), so a
+// relay that starts answering through a different namespace is caught too.
+func trackBackendFlip(key flipTrackerKey, backend string) (from string, flipped bool) {
+	return trackFlip(&backendTracker, key, backend)
 }
 
-func trackFlip(tracker *sync.Map, channelId int, src string) (from string, flipped bool) {
-	if channelId == 0 || src == "" || src == "unknown" {
+func trackFlip(tracker *sync.Map, key flipTrackerKey, src string) (from string, flipped bool) {
+	if key.channelId == 0 || src == "" || src == "unknown" {
 		return "", false
 	}
-	v, _ := tracker.LoadOrStore(channelId, &channelSrcState{})
+	v, _ := tracker.LoadOrStore(key, &channelSrcState{})
 	st := v.(*channelSrcState)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -712,14 +749,72 @@ func trackFlip(tracker *sync.Map, channelId int, src string) (from string, flipp
 	return prev, true
 }
 
+// backendSignature is what the backend tracker compares: the wire shape plus
+// the vendor prefix, when the response carried one.
+func backendSignature(backendShape, prefix string) string {
+	if backendShape == "" || backendShape == "unknown" || prefix == "" {
+		return backendShape
+	}
+	return backendShape + "/" + strings.ToLower(prefix)
+}
+
 // ── ccmax (Claude Max subscription relay) detection ──────────────────────────
 // Such relays strip every Anthropic header, but they MUST inject the Claude Code
 // OAuth system prompt (~3-4k tokens) to be accepted upstream. The upstream then
 // reports far more input (incl. cache) than we estimated for the client's own
-// request. A channel that shows this evidence once is remembered in-memory so
-// requests whose own big cached prompts hide the injection still get the ccmax
-// label (restart re-seeds on the next visible injection — no false alarms).
-var ccmaxChannels sync.Map // channelId(int) -> true
+// request. A request that shows the injection is labelled directly. The
+// channel only becomes sticky — so requests whose own big cached prompts hide
+// the injection still get the label — after two visible injections within an
+// hour, and the stickiness expires 24h after the last visible injection.
+
+type ccmaxState struct {
+	mu      sync.Mutex
+	lastHit time.Time
+	hits    int
+	sticky  bool
+}
+
+var ccmaxChannels sync.Map // channelId(int) -> *ccmaxState
+
+const (
+	ccmaxHitWindow  = time.Hour
+	ccmaxStickyTTL  = 24 * time.Hour
+	ccmaxStickyHits = 2
+)
+
+// auditNow is the audit clock; tests replace it.
+var auditNow = time.Now
+
+// ccmaxObserve feeds one exchange into the channel's ccmax state (unless
+// record is false, e.g. for channel tests) and returns the hint for it.
+func ccmaxObserve(channelId int, injected, record bool) bool {
+	if channelId == 0 {
+		return injected
+	}
+	v, _ := ccmaxChannels.LoadOrStore(channelId, &ccmaxState{})
+	st := v.(*ccmaxState)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	now := auditNow()
+	if st.sticky && now.Sub(st.lastHit) > ccmaxStickyTTL {
+		st.sticky, st.hits = false, 0
+	}
+	if injected {
+		if record {
+			if !st.lastHit.IsZero() && now.Sub(st.lastHit) <= ccmaxHitWindow {
+				st.hits++
+			} else {
+				st.hits = 1
+			}
+			st.lastHit = now
+			if st.hits >= ccmaxStickyHits {
+				st.sticky = true
+			}
+		}
+		return true
+	}
+	return st.sticky
+}
 
 const (
 	injectionMinAbs   = 2000 // tokens: above the Claude Code preamble noise floor
@@ -748,8 +843,8 @@ func injectionDetected(est, injected int) bool {
 // audit most wants evidence on. errorType labels the record (ursp.err and the
 // evidence note) so a failed attempt is never mistaken for a clean exchange.
 //
-// It is a no-op when nothing was observed, so calling it on a path that has no
-// upstream response (quota rejections, model-not-found before dispatch) is free.
+// On a path with no upstream response (quota rejections, model-not-found
+// before dispatch) it only records obs=none; no evidence row is written.
 func AppendUpstreamResponseAuditForError(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther, errorType string) {
 	if errorType == "" {
 		errorType = "unknown"
@@ -757,32 +852,72 @@ func AppendUpstreamResponseAuditForError(ctx *gin.Context, relayInfo *relaycommo
 	appendUpstreamResponseAudit(ctx, relayInfo, other, errorType)
 }
 
+// upstreamObserverName is ursp.h: the response handler that observed the
+// exchange, or — for paths without an instrumented handler — the relay mode.
+func upstreamObserverName(relayInfo *relaycommon.RelayInfo) string {
+	if relayInfo.UpstreamAudit.Handler != "" {
+		return relayInfo.UpstreamAudit.Handler
+	}
+	switch relayInfo.RelayMode {
+	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
+		return "image"
+	case relayconstant.RelayModeAudioSpeech, relayconstant.RelayModeAudioTranscription, relayconstant.RelayModeAudioTranslation:
+		return "audio"
+	case relayconstant.RelayModeRerank:
+		return "rerank"
+	case relayconstant.RelayModeRealtime:
+		return "realtime"
+	case relayconstant.RelayModeEmbeddings:
+		return "embedding"
+	case relayconstant.RelayModeModerations:
+		return "moderation"
+	}
+	return "unobserved"
+}
+
 // appendUpstreamResponseAudit adds the ursp block to other.root_info and
-// persists forensic evidence asynchronously. EVERY observed response is
-// persisted (kind=normal for clean ones — user decision 2026-09-02, full
-// retention for evidence completeness; normal rows are pruned after
-// model.NormalEvidenceRetentionDays, anomalies are kept forever).
+// queues the forensic evidence row. EVERY observed response is persisted
+// (kind=normal for clean ones — user decision 2026-09-02; normal rows are
+// pruned after model.NormalEvidenceRetentionDays, every other kind is kept).
+// A text log with nothing observed still gets ursp.obs=none and ursp.h, so
+// "not observed" is distinguishable from "the upstream declared nothing".
 //
 // errorType is empty on the success path. When set, the attempt failed: the
-// record is labelled (ursp.err, evidence note) and the source/backend flip
-// trackers are NOT fed — they are calibrated on success shapes, and a relay
-// that answers errors with its own headers would otherwise flip on every error
-// and flip back on the next success.
+// record is labelled (ursp.err, evidence note) and no tracker is fed — they
+// are calibrated on success shapes, and a relay that answers errors with its
+// own headers would otherwise flip on every error and flip back on the next
+// success. Channel tests (F2) never feed trackers either and are labelled
+// channel_test in the evidence note.
 func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther, errorType string) {
 	if relayInfo == nil || other == nil {
 		return
 	}
-	respModel := relayInfo.UpstreamResponseModel
-	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" {
-		return // nothing observed at all
-	}
-	// respModel may be empty: the upstream sent a terminal event without a model.
-	// Tri-state still applies to the mismatch verdict (never flags), but the
-	// exchange is recorded (ursp.nomodel + evidence) so it stays auditable.
+	audit := &relayInfo.UpstreamAudit
+	failed := errorType != ""
 	sentModel := relayInfo.UpstreamSentModel
 	if sentModel == "" && relayInfo.ChannelMeta != nil {
 		sentModel = relayInfo.UpstreamModelName
 	}
+	ursp := map[string]any{
+		"obs": relayInfo.UpstreamObservationLevel(),
+		"h":   upstreamObserverName(relayInfo),
+	}
+	if failed {
+		ursp["err"] = errorType // this attempt failed; the observation is of its error response
+	}
+	respModel := relayInfo.UpstreamResponseModel
+	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" {
+		// nothing to judge: record only that it was not observed
+		if sentModel != "" {
+			ursp["sent"] = sentModel
+		}
+		other.SetRoot("ursp", ursp)
+		return
+	}
+	// respModel may be empty: the upstream sent a terminal event without a model.
+	// Tri-state still applies to the mismatch verdict (never flags), but the
+	// exchange is recorded (ursp.nomodel + evidence) so it stays auditable.
+
 	// verdict is the single decision point: the boolean below and the label the
 	// UI renders both derive from it, so they can never disagree.
 	verdict := ClassifyUpstreamModelMismatch(sentModel, respModel)
@@ -790,25 +925,21 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	tierDowngrade := mismatch && UpstreamModelIsTierDowngrade(sentModel, respModel)
 	versionDowngrade := mismatch && UpstreamModelIsVersionDowngrade(sentModel, respModel)
 	_, _, respPrefix := canonicalModelPair(sentModel, respModel)
+	midStreamChange := len(audit.Models) > 1
 
 	channelId, channelType := 0, 0
 	if relayInfo.ChannelMeta != nil {
 		channelId = relayInfo.ChannelMeta.ChannelId
 		channelType = relayInfo.ChannelMeta.ChannelType
 	}
-	// ccmax evidence: sticky per-channel memory, refreshed whenever injection is visible
+	channelTest := relayInfo.IsChannelTest
+	feedTrackers := !failed && !channelTest
+
+	// ccmax evidence: a visible injection labels this request; the channel
+	// becomes sticky only after repeated evidence (see ccmaxObserve)
 	anthropicShape := strings.HasPrefix(relayInfo.UpstreamResponseId, "msg_")
-	inj := injectedTokens(relayInfo)
-	ccmaxHint := false
-	if channelId != 0 {
-		_, ccmaxHint = ccmaxChannels.Load(channelId)
-	}
-	if anthropicShape && injectionDetected(relayInfo.GetEstimatePromptTokens(), inj) {
-		ccmaxHint = true
-		if channelId != 0 {
-			ccmaxChannels.Store(channelId, true)
-		}
-	}
+	injected := anthropicShape && injectionDetected(relayInfo.GetEstimatePromptTokens(), injectedTokens(relayInfo))
+	ccmaxHint := ccmaxObserve(channelId, injected, feedTrackers)
 	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
 	// backendShape is the wire-shape-only view (what the flip tracker watches);
 	// backend is what gets displayed: when the shape is neutral and the source
@@ -816,11 +947,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	backendShape := inferBackendShape(channelType, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
 	backend := reconcileBackendWithSource(backendShape, src)
 
-	ursp := map[string]interface{}{
-		"sent":     sentModel,
-		"mismatch": mismatch,
-		"kind":     verdict, // why it matched/mismatched (exact / snapshot_date / mismatch / ...)
-		"src":      src,
+	ursp["sent"] = sentModel
+	ursp["mismatch"] = mismatch
+	ursp["kind"] = verdict // why it matched/mismatched (exact / snapshot_date / pinned_to_alias / mismatch / ...)
+	ursp["src"] = src
+	if audit.SentField != "" {
+		ursp["sent_field"] = audit.SentField // UpstreamModelName when the wire carried a different model
 	}
 	if tierDowngrade {
 		// the highest-signal adulteration shape: upstream served a weaker
@@ -832,6 +964,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 	if respPrefix != "" {
 		ursp["prefix"] = respPrefix // vendor namespace stripped before comparing (deepseek/, global.anthropic.)
+	}
+	if midStreamChange {
+		ursp["mid_stream_change"] = true
+		ursp["models"] = audit.Models
 	}
 	// Channel TYPE only. The numeric channel id is deliberately NOT duplicated
 	// here: the log record already carries it (log.channel_id / channel_name),
@@ -864,22 +1000,28 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if relayInfo.UpstreamResponseCreated != 0 {
 		ursp["created"] = relayInfo.UpstreamResponseCreated
 	}
-	failed := errorType != ""
-	if failed {
-		ursp["err"] = errorType // this attempt failed; the observation is of its error response
+	retryIndex := 0
+	if ctx != nil {
+		retryIndex = max(0, len(ctx.GetStringSlice("use_channel"))-1)
 	}
+	if retryIndex > 0 {
+		ursp["retry"] = retryIndex
+	}
+
+	key := auditTrackerKey(relayInfo, sentModel)
 	var from, bfrom string
 	var flipped, bflipped bool
-	if !failed {
-		from, flipped = trackSourceFlip(channelId, src)
+	backendSig := backendSignature(backendShape, respPrefix)
+	if feedTrackers {
+		from, flipped = trackSourceFlip(key, src)
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
 		}
-		bfrom, bflipped = trackBackendFlip(channelId, backendShape)
+		bfrom, bflipped = trackBackendFlip(key, backendSig)
 		if bflipped {
 			// both sides are raw shapes: the flip string describes the wire
 			// shape change only; the reconciled label lives in ursp.backend
-			ursp["backend_flip"] = bfrom + "->" + backendShape
+			ursp["backend_flip"] = bfrom + "->" + backendSig
 		}
 	}
 	flipNote := ""
@@ -890,42 +1032,55 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if flipNote != "" {
 			flipNote += "; "
 		}
-		flipNote += "backend: " + bfrom + " -> " + backendShape
+		flipNote += "backend: " + bfrom + " -> " + backendSig
 	}
 	flipped = flipped || bflipped
-	// root-only projection: LogOther strips root_info for admin and user
-	// readers alike (user decision 2026-09-19: upstream-declared model data
-	// is for the super administrator only)
-	other.SetRoot("ursp", ursp)
-
-	kind, note := "normal", ""
-	switch {
-	case flipped && !mismatch:
-		kind = "provider_switch"
-		note = flipNote
-	case mismatch && flipped:
-		kind = "model_mismatch"
-		note = "provider also flipped: " + flipNote
-	case mismatch:
-		kind = "model_mismatch"
-	}
-	if failed {
-		if note != "" {
-			note += "; "
-		}
-		note += "error: " + errorType
-	}
 
 	requestId := ""
 	if ctx != nil {
 		requestId = ctx.GetString(common.RequestIdKey)
 	}
+	signals := evaluateReplaySignals(relayInfo, channelId, requestId, !failed, feedTrackers)
+	signals.apply(ursp)
+	// root-only projection: LogOther strips root_info for admin and user
+	// readers alike (user decision 2026-09-19: upstream-declared model data
+	// is for the super administrator only)
+	other.SetRoot("ursp", ursp)
 
-	// evidence snapshot — copy everything needed before leaving the request scope
+	kind := "normal"
+	var notes []string
+	switch {
+	case mismatch:
+		kind = "model_mismatch"
+	case midStreamChange:
+		kind = "mid_stream_change"
+	case signals.replay:
+		kind = "replay_suspect"
+	case flipped:
+		kind = "provider_switch"
+	}
+	if kind != "provider_switch" && flipNote != "" {
+		notes = append(notes, "provider also flipped: "+flipNote)
+	} else if flipNote != "" {
+		notes = append(notes, flipNote)
+	}
+	if midStreamChange && kind != "mid_stream_change" {
+		notes = append(notes, "mid_stream_change: "+strings.Join(audit.Models, " -> "))
+	}
+	if signals.replay && kind != "replay_suspect" {
+		notes = append(notes, "replay_suspect")
+	}
+	if failed {
+		notes = append(notes, "error: "+errorType)
+	}
+	if channelTest {
+		notes = append(notes, "channel_test")
+	}
+
 	ev := &model.UpstreamEvidence{
 		CreatedAt:         common.GetTimestamp(),
 		Kind:              kind,
-		Note:              note,
+		Note:              strings.Join(notes, "; "),
 		Source:            src,
 		RequestId:         requestId,
 		ChannelId:         channelId,
@@ -941,18 +1096,44 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		UseTimeMs:         int(time.Since(relayInfo.StartTime).Milliseconds()),
 		ResponseExcerpt:   relayInfo.UpstreamResponseExcerpt,
 		ResponseHeaders:   relayInfo.UpstreamResponseHeaders,
+		ModelFrame:        audit.ModelFrame,
+		ErrorFrame:        audit.ErrorFrame,
+		ExcerptTruncated:  audit.ExcerptTruncated,
+		ExcerptFullLen:    audit.ExcerptFullLen,
+		RetryIndex:        retryIndex,
+		PromptSha256:      audit.PromptSHA256,
+		OutputSha256:      audit.OutputSHA256,
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				common.SysError("upstream evidence persist panic recovered")
-			}
-		}()
-		if err := model.InsertUpstreamEvidence(ev); err != nil {
-			common.SysError("upstream evidence persist failed: " + err.Error())
-		} else if kind != "normal" { // normal rows are high-volume — no per-row logging
-			common.SysLog("[upstream-audit] " + kind + " recorded: sent=" + ev.SentModel +
-				" got=" + ev.ResponseModel + " src=" + src + " " + note)
+	if kind == "normal" && audit_setting.NormalExcerptMode() == audit_setting.NormalExcerptModeDigest {
+		digestNormalEvidence(ev)
+	}
+	if enqueueUpstreamEvidence(ev) && kind != "normal" { // normal rows are high-volume — no per-row logging
+		common.SysLog("[upstream-audit] " + kind + " queued: sent=" + ev.SentModel +
+			" got=" + ev.ResponseModel + " src=" + src + " " + ev.Note)
+	}
+}
+
+// enqueueUpstreamEvidence hands evidence rows to the background writer;
+// tests replace it to inspect the rows.
+var enqueueUpstreamEvidence = model.EnqueueUpstreamEvidence
+
+// evidenceDigestEdge is how much of each end a digest-mode normal row keeps.
+const evidenceDigestEdge = 2 * 1024
+
+// digestNormalEvidence reduces a normal row to its hashes plus the first and
+// last 2KB of the excerpt and model frame (audit_setting digest mode).
+// Anomaly rows never pass through here: they always keep the full excerpt.
+func digestNormalEvidence(ev *model.UpstreamEvidence) {
+	digest := func(s string) (string, bool) {
+		if len(s) <= 2*evidenceDigestEdge {
+			return s, false
 		}
-	}()
+		head, _ := common.TruncateAuditBytes(s, evidenceDigestEdge)
+		tail := common.TruncateAuditBytesTail(s, evidenceDigestEdge)
+		return head + "\n…[digest: " + strconv.Itoa(len(s)-len(head)-len(tail)) + " bytes omitted]…\n" + tail, true
+	}
+	var cut bool
+	ev.ResponseExcerpt, cut = digest(ev.ResponseExcerpt)
+	ev.ExcerptTruncated = ev.ExcerptTruncated || cut
+	ev.ModelFrame, _ = digest(ev.ModelFrame)
 }
