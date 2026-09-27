@@ -347,6 +347,7 @@ func InitResources() error {
 	if err != nil {
 		return err
 	}
+	model.StartUpstreamEvidenceWriter()
 
 	// Initialize Redis
 	err = common.InitRedisClient()

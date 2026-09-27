@@ -28,8 +28,10 @@ const NormalEvidenceRetentionDays = 30
 //
 // Every column added after the table reached production size is nullable
 // with no default, so AutoMigrate adds it without rewriting the table. Its
-// secondary indexes are NOT declared here: they are built in the background
-// after startup (ensureUpstreamEvidenceIndexes), never by AutoMigrate.
+// secondary indexes are NOT declared here and never built by AutoMigrate:
+// they are created manually (SQL in CHANGES.md) or, with
+// AUDIT_EVIDENCE_AUTO_INDEX=true, by a background job after startup
+// (ensureUpstreamEvidenceIndexes).
 type UpstreamEvidence struct {
 	Id        int   `json:"id" gorm:"primaryKey;autoIncrement"`
 	CreatedAt int64 `json:"created_at" gorm:"bigint;index"`
@@ -102,9 +104,13 @@ const (
 	evidenceQueueByteBudget = 64 << 20
 	evidenceBatchMax        = 200
 	evidenceFlushInterval   = time.Second
-	// evidenceIndexDelay keeps the background index build well clear of
-	// startup and the first burst of traffic.
+	// evidenceIndexDelay keeps the background index build (opt-in via
+	// AUDIT_EVIDENCE_AUTO_INDEX=true) well clear of startup and the first
+	// burst of traffic.
 	evidenceIndexDelay = 2 * time.Minute
+	// evidenceTableRetryFirst / Max bound the backoff while the table is missing.
+	evidenceTableRetryFirst = 30 * time.Second
+	evidenceTableRetryMax   = 10 * time.Minute
 )
 
 // UpstreamEvidenceHealth is the admin view of the evidence writer.
@@ -129,6 +135,7 @@ type evidenceWriter struct {
 	batchMax   int
 	interval   time.Duration
 	byteBudget int64
+	tableRetry time.Duration
 	// maintenance starts the pruner and the background index build with
 	// the writer (the process-wide writer only).
 	maintenance bool
@@ -156,6 +163,7 @@ func newEvidenceWriter(db func() *gorm.DB, queueCap, batchMax int, interval time
 		batchMax:   batchMax,
 		interval:   interval,
 		byteBudget: evidenceQueueByteBudget,
+		tableRetry: evidenceTableRetryFirst,
 		flushReq:   make(chan chan struct{}),
 	}
 }
@@ -165,6 +173,13 @@ var defaultEvidenceWriter = func() *evidenceWriter {
 	w.maintenance = true
 	return w
 }()
+
+// StartUpstreamEvidenceWriter starts the process-wide evidence writer. Called
+// once the log database is initialised, so the health endpoint reflects the
+// real state right after a restart instead of waiting for the first row.
+func StartUpstreamEvidenceWriter() {
+	defaultEvidenceWriter.startOnce.Do(defaultEvidenceWriter.start)
+}
 
 // EnqueueUpstreamEvidence hands a row to the background writer. It never
 // blocks: when persistence is disabled it returns false, and when the queue is
@@ -218,12 +233,17 @@ func (w *evidenceWriter) dequeued(e *UpstreamEvidence) *UpstreamEvidence {
 	return e
 }
 
-// start decides once whether persistence is possible (E6): a missing log
-// database, an unsupported engine (ClickHouse) or a missing table disables
-// it with a single warning instead of an error per request.
+// start decides whether persistence is possible (E6). A missing log
+// database or an unsupported engine (ClickHouse) disables it for the life of
+// the process with a single warning. A missing table may be transient (a
+// migration still running, a connection hiccup during the check), so it is
+// re-checked with backoff and persistence switches on once it appears.
 func (w *evidenceWriter) start() {
 	w.started.Store(time.Now().Unix())
 	w.index.Store("pending")
+	if w.maintenance && !common.GetEnvOrDefaultBool("AUDIT_EVIDENCE_AUTO_INDEX", false) {
+		w.index.Store("disabled") // indexes are created manually, see CHANGES.md
+	}
 	db := w.db()
 	reason := ""
 	switch {
@@ -231,8 +251,6 @@ func (w *evidenceWriter) start() {
 		reason = "log database not initialised"
 	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
 		reason = "log database engine does not support upstream_evidences"
-	case !db.Migrator().HasTable(&UpstreamEvidence{}):
-		reason = "table upstream_evidences does not exist"
 	}
 	if reason != "" {
 		w.reason.Store(reason)
@@ -240,11 +258,39 @@ func (w *evidenceWriter) start() {
 		common.SysError("[upstream-audit] evidence persistence disabled: " + reason)
 		return
 	}
+	if !db.Migrator().HasTable(&UpstreamEvidence{}) {
+		w.reason.Store("table upstream_evidences not found; retrying")
+		common.SysError("[upstream-audit] table upstream_evidences not found; evidence persistence paused, retrying")
+		go w.waitForTable()
+		return
+	}
+	w.activate()
+}
+
+// waitForTable re-checks the table with exponential backoff (up to
+// evidenceTableRetryMax) and activates the writer once it exists.
+func (w *evidenceWriter) waitForTable() {
+	delay := w.tableRetry
+	for {
+		time.Sleep(delay)
+		if db := w.db(); db != nil && db.Migrator().HasTable(&UpstreamEvidence{}) {
+			common.SysLog("[upstream-audit] table upstream_evidences found; evidence persistence enabled")
+			w.activate()
+			return
+		}
+		delay = min(delay*2, evidenceTableRetryMax)
+	}
+}
+
+func (w *evidenceWriter) activate() {
+	w.reason.Store("")
 	w.enabled.Store(true)
 	go w.run()
 	if w.maintenance {
 		go w.pruneLoop()
-		go w.buildIndexes(evidenceIndexDelay)
+		if index, _ := w.index.Load().(string); index != "disabled" {
+			go w.buildIndexes(evidenceIndexDelay)
+		}
 	}
 }
 
@@ -390,7 +436,8 @@ func (w *evidenceWriter) pruneLoop() {
 }
 
 // pruneOnce deletes expired normal rows in batches of evidencePruneBatch
-// (oldest first, by primary key) with a short pause between batches, so a
+// (oldest first: created_at, then id — served by the created_at index) with
+// a short pause between batches, so a
 // large backlog never becomes one long-running DELETE.
 func (w *evidenceWriter) pruneOnce(cutoff int64) (deleted int64) {
 	defer func() {
@@ -406,7 +453,7 @@ func (w *evidenceWriter) pruneOnce(cutoff int64) (deleted int64) {
 		var ids []int
 		if err := db.Model(&UpstreamEvidence{}).
 			Where("kind = ? AND created_at < ?", "normal", cutoff).
-			Order("id").Limit(evidencePruneBatch).
+			Order("created_at, id").Limit(evidencePruneBatch).
 			Pluck("id", &ids).Error; err != nil {
 			common.SysError("[upstream-audit] evidence prune select failed: " + err.Error())
 			return deleted
@@ -444,6 +491,8 @@ var upstreamEvidenceIndexes = []struct{ name, columns string }{
 }
 
 // buildIndexes creates the secondary indexes after a delay, outside startup.
+// Opt-in (AUDIT_EVIDENCE_AUTO_INDEX=true); by default index_state stays
+// "disabled" and the indexes are created manually.
 // On PostgreSQL the build is CREATE INDEX CONCURRENTLY, which never blocks
 // reads or writes on the (very large) table; an INVALID leftover from an
 // interrupted build is dropped concurrently and rebuilt. MySQL uses an online

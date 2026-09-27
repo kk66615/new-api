@@ -81,15 +81,29 @@ func TestEvidenceWriterDropsWhenQueueIsFull(t *testing.T) {
 	assert.Equal(t, 1, health.QueueLen)
 }
 
-func TestEvidenceWriterDisablesOnceWithoutTableOrDatabase(t *testing.T) {
-	noTable := openEvidenceTestDB(t, false)
-	w := newEvidenceWriter(func() *gorm.DB { return noTable }, 4, 4, time.Hour)
-	assert.False(t, w.enqueue(&UpstreamEvidence{Kind: "normal"}))
+// A missing table pauses persistence and is re-checked with backoff: once
+// the table appears (a late migration), the writer switches on by itself.
+func TestEvidenceWriterWaitsForAMissingTable(t *testing.T) {
+	db := openEvidenceTestDB(t, false)
+	w := newEvidenceWriter(func() *gorm.DB { return db }, 4, 4, 10*time.Millisecond)
+	w.tableRetry = 5 * time.Millisecond
 	assert.False(t, w.enqueue(&UpstreamEvidence{Kind: "normal"}))
 	health := w.health()
 	assert.False(t, health.Enabled)
-	assert.Contains(t, health.DisabledReason, "does not exist")
-	assert.Zero(t, health.DroppedTotal, "a disabled writer is not a dropping writer")
+	assert.Contains(t, health.DisabledReason, "retrying")
+	assert.Zero(t, health.DroppedTotal, "a paused writer is not a dropping writer")
+
+	require.NoError(t, db.AutoMigrate(&UpstreamEvidence{}))
+	require.Eventually(t, func() bool { return w.health().Enabled }, 2*time.Second, 5*time.Millisecond)
+	assert.Empty(t, w.health().DisabledReason)
+	require.True(t, w.enqueue(&UpstreamEvidence{Kind: "normal", ChannelId: 987653}))
+	w.flush(2 * time.Second)
+	var count int64
+	require.NoError(t, db.Model(&UpstreamEvidence{}).Where("channel_id = ?", 987653).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestEvidenceWriterDisablesOnceWithoutDatabase(t *testing.T) {
 
 	nilDB := newEvidenceWriter(func() *gorm.DB { return nil }, 4, 4, time.Hour)
 	assert.False(t, nilDB.enqueue(&UpstreamEvidence{Kind: "normal"}))
@@ -197,4 +211,22 @@ func TestRedactDatabaseAddress(t *testing.T) {
 		assert.NotContains(t, redacted, secret)
 	}
 	assert.Contains(t, redacted, "connection refused")
+}
+
+// The background index build is opt-in: without AUDIT_EVIDENCE_AUTO_INDEX the
+// production writer reports index_state=disabled and builds nothing.
+func TestEvidenceIndexBuildIsOptIn(t *testing.T) {
+	t.Setenv("AUDIT_EVIDENCE_AUTO_INDEX", "")
+	db := openEvidenceTestDB(t, true)
+	w := newEvidenceWriter(func() *gorm.DB { return db }, 4, 4, time.Hour)
+	w.maintenance = true
+	w.startOnce.Do(w.start)
+	assert.True(t, w.health().Enabled)
+	assert.Equal(t, "disabled", w.health().IndexState)
+
+	t.Setenv("AUDIT_EVIDENCE_AUTO_INDEX", "true")
+	enabled := newEvidenceWriter(func() *gorm.DB { return db }, 4, 4, time.Hour)
+	enabled.maintenance = true
+	enabled.startOnce.Do(enabled.start)
+	assert.Equal(t, "pending", enabled.health().IndexState)
 }
