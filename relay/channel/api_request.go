@@ -522,18 +522,17 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	// Upstream response forensics — freeze the model we are actually sending.
+	// Upstream response forensics — freeze the model we are actually sending,
+	// read from the final request (body "model" / URL path), not from
+	// UpstreamModelName: pass-through bodies and param overrides can put a
+	// different model on the wire.
 	//
 	// This is the last point on the request side: model mapping, reasoning /
 	// search suffix handling and every adaptor's ConvertRequest have all run by
 	// now, and nothing downstream rewrites UpstreamModelName until the RESPONSE
 	// handlers do (the claude stream handlers overwrite it with the model the
-	// upstream declared). Snapshotting any earlier — e.g. in ModelMappedHelper —
-	// captures a pre-strip name such as "claude-3-7-sonnet-thinking" and makes an
-	// upstream that honestly echoes the request look like a model swapper.
-	//
-	// Write-once, so the repeated calls across the retry loop are harmless.
-	info.SnapshotUpstreamSentModel()
+	// upstream declared). Write-once, so repeated calls are harmless.
+	info.SnapshotUpstreamRequest(req)
 
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {

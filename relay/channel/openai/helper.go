@@ -17,6 +17,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // 辅助函数
@@ -148,13 +149,14 @@ func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuil
 		// upstream response forensics — mid-stream frames declare the upstream's
 		// own model; observed here so a mismatch is caught even when the relay
 		// never reaches the final-frame path (aborted streams included).
-		info.ObserveUpstreamResponse(streamResponse.Model, streamResponse.Id, streamResponse.Created, "")
+		info.ObserveUpstreamResponseFrame(data, streamResponse.Model, streamResponse.Id, streamResponse.Created, streamResponse.GetSystemFingerprint())
 		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
 	case relayconstant.RelayModeCompletions:
 		var streamResponse dto.CompletionsStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			return err
 		}
+		info.ObserveUpstreamResponseFrame(data, gjson.Get(data, "model").String(), gjson.Get(data, "id").String(), gjson.Get(data, "created").Int(), "")
 		processCompletionsStreamResponse(streamResponse, responseTextBuilder)
 	}
 	return nil

@@ -26,12 +26,15 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("responses_to_chat")
 
 	var responsesResp dto.OpenAIResponsesResponse
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	// upstream response forensics — the raw Responses body and headers
+	info.SetUpstreamResponseForensicsBytes(body, resp.Header)
 
 	if err := common.Unmarshal(body, &responsesResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -45,6 +48,7 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	// upstream response forensics — the Responses API declares its own model
 	// here, before any converter rewrites it for the client
 	info.ObserveUpstreamResponse(responsesResp.Model, responsesResp.ID, int64(responsesResp.CreatedAt), "")
+	info.ObserveUpstreamOutputJSON(body)
 
 	responseValue, usage, err := convertResponsesResponseForClient(c, info, &responsesResp)
 	if err != nil {
@@ -64,6 +68,8 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("responses_to_chat_buffered")
+	info.SetUpstreamResponseForensics("", resp.Header)
 
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	info.StreamStatus.RequireTerminal()
@@ -102,7 +108,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		// response object (the accumulator does not touch Response.Model; the
 		// converter below rewrites the client-facing copy, not this one)
 		if streamResp.Response != nil {
-			info.ObserveUpstreamResponse(streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt), "")
+			info.ObserveUpstreamResponsesEvent(streamResp.Type, data, streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt))
 		}
 		switch streamResp.Type {
 		case "response.completed", "response.done", "response.incomplete":
@@ -185,6 +191,8 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	}
 
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("responses_to_chat_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 
 	responseId := helper.GetResponseID(c)
 	createAt := time.Now().Unix()
@@ -280,7 +288,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		// upstream response forensics — before the error branch below consumes
 		// the frame and before ConvertStreamResponseChunk rewrites the model
 		if streamResp.Response != nil {
-			info.ObserveUpstreamResponse(streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt), "")
+			info.ObserveUpstreamResponsesEvent(streamResp.Type, data, streamResp.Response.Model, streamResp.Response.ID, int64(streamResp.Response.CreatedAt))
 		}
 
 		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {

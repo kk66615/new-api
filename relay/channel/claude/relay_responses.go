@@ -18,6 +18,8 @@ import (
 )
 
 func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+	info.MarkUpstreamObserver("claude_to_responses_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
 	responseID := helper.GetResponseID(c)
 	created := common.GetTimestamp()
 	state, err := relayconvert.NewResponseStreamState(types.RelayFormatClaude, types.RelayFormatOpenAIResponses, relayconvert.ResponseStreamOptions{
@@ -98,6 +100,7 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			return
 		}
 		if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+			info.ObserveUpstreamErrorFrame(data)
 			if failResponsesStream(fmt.Errorf("%s", claudeError.Message)) {
 				sr.Stop(streamErr)
 				return
@@ -122,7 +125,8 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			// snapshot must be taken while UpstreamModelName still holds the
 			// model we actually addressed upstream. message.id is read off the
 			// raw frame because ClaudeMediaMessage carries no Id field.
-			info.ObserveUpstreamResponse(claudeResponse.Message.Model, gjson.Get(data, "message.id").String(), 0, "")
+			info.ObserveUpstreamResponseFrame(data, claudeResponse.Message.Model, gjson.Get(data, "message.id").String(), 0, "")
+			info.SetUpstreamResponseForensics(data, nil)
 			info.UpstreamModelName = claudeResponse.Message.Model
 		}
 		FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)

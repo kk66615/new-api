@@ -173,6 +173,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var accumulatedUsageMetadata *dto.GeminiUsageMetadata
 	responseText := strings.Builder{}
 
+	info.MarkUpstreamObserver("gemini_stream")
 	// forensics: headers-only update (stream chunks supply the excerpt)
 	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -200,9 +201,9 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 
 		// upstream response forensics — every stream chunk declares modelVersion;
-		// last declaration wins, matching terminal-chunk semantics
+		// the first one is kept as the model frame, the last one as the excerpt
 		if geminiResponse.ModelVersion != "" {
-			info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
+			info.ObserveUpstreamResponseFrame(data, geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
 			info.SetUpstreamResponseForensics(data, nil)
 		}
 
@@ -239,6 +240,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 	})
 	info.StreamStatus.RequireTerminal()
+	info.ObserveUpstreamOutput(responseText.String())
 
 	if !hasBillableUsageMetadata {
 		if info.ReceivedResponseCount > 0 {
@@ -388,6 +390,8 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	}
 	service.CloseResponseBodyGracefully(resp)
 	logger.LogDebug(c, "Gemini response body: %s", responseBody)
+	info.MarkUpstreamObserver("gemini_chat")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	var geminiResponse dto.GeminiChatResponse
 	err = common.Unmarshal(responseBody, &geminiResponse)
 	if err != nil {
@@ -396,7 +400,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	info.ObserveResponseModel(gjson.GetBytes(responseBody, "modelVersion").Str)
 	// upstream response forensics
 	info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
-	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+	info.ObserveUpstreamOutputJSON(responseBody)
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {

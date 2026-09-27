@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
@@ -107,6 +108,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("openai_chat_stream")
 
 	model := info.UpstreamModelName
 	var responseId string
@@ -150,8 +152,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
-	// forensic material: last frame + response headers (persisted only on model mismatch)
+	// forensic material: last frame + response headers; the first model-bearing
+	// frame was kept by processTokenData, and the output hash covers content,
+	// reasoning and tool calls
 	info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
+	info.ObserveUpstreamOutput(responseTextBuilder.String())
 
 	// 部分兼容网关把完整的累计usage附在倒数第二个事件上，随后发送一个空的最后事件。
 	// 仅当最后一个事件没有有效usage时，回退到倒数第二个事件的完整快照。
@@ -252,6 +257,7 @@ func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[str
 
 func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("openai_chat")
 
 	var simpleResponse dto.OpenAITextResponse
 	responseBody, err := io.ReadAll(resp.Body)
@@ -259,6 +265,9 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	logger.LogDebug(c, "upstream response body: %s", responseBody)
+	// upstream response forensics — the raw upstream bytes, captured before the
+	// OpenRouter enterprise envelope is unwrapped below
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	// Unmarshal to simpleResponse
 	if info.ChannelType == constant.ChannelTypeOpenRouter && info.ChannelOtherSettings.IsOpenRouterEnterprise() {
 		// 尝试解析为 openrouter enterprise
@@ -290,8 +299,8 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	case int64:
 		respCreated = v
 	}
-	info.ObserveUpstreamResponse(simpleResponse.Model, simpleResponse.Id, respCreated, "")
-	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+	info.ObserveUpstreamResponse(simpleResponse.Model, simpleResponse.Id, respCreated, gjson.GetBytes(responseBody, "system_fingerprint").String())
+	info.ObserveUpstreamOutputJSON(responseBody)
 
 	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)

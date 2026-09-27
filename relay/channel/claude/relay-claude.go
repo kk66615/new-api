@@ -95,11 +95,11 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		// An in-stream error frame is still upstream evidence: observe it before
-		// returning so the failure path carries a ursp block. A stream error
-		// frame has no model/id of its own, so this mostly keeps the raw frame
-		// (and any message_start already observed) for forensics.
+		// returning so the failure path carries a ursp block. It is kept as the
+		// error frame, so the message_start excerpt that declared the model is
+		// not overwritten.
 		info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
-		info.SetUpstreamResponseForensics(data, nil)
+		info.ObserveUpstreamErrorFrame(data)
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
@@ -121,7 +121,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		// ClaudeMediaMessage carries no Id/Usage fields, so read them off the raw
 		// frame — message.id is the strongest provider fingerprint we have.
 		msgId := gjson.Get(data, "message.id").String()
-		info.ObserveUpstreamResponse(claudeResponse.Message.Model, msgId, 0, "")
+		info.ObserveUpstreamResponseFrame(data, claudeResponse.Message.Model, msgId, 0, "")
 		if upstreamUsageTrustworthy(info) {
 			info.ObserveUpstreamUsage(
 				int(gjson.Get(data, "message.usage.input_tokens").Int()),
@@ -285,6 +285,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 		claudeInfo.Usage.UsageSemantic = "anthropic"
 	}
 	relayconvert.FinalizeClaudeStreamBillingUsage(claudeInfo)
+	info.ObserveUpstreamOutput(claudeInfo.ResponseText.String())
 
 	if info.RelayFormat == types.RelayFormatClaude {
 		//
@@ -324,6 +325,7 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
+	info.MarkUpstreamObserver("claude_stream")
 	// forensics: headers-only update (the message_start frame supplies the excerpt)
 	info.SetUpstreamResponseForensics("", resp.Header)
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -342,6 +344,13 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 }
 
 func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, httpResp *http.Response, data []byte) *types.NewAPIError {
+	// upstream response forensics — the raw body (and headers when the
+	// transport has them; the AWS SDK path does not)
+	var upstreamHeader http.Header
+	if httpResp != nil {
+		upstreamHeader = httpResp.Header
+	}
+	info.SetUpstreamResponseForensicsBytes(data, upstreamHeader)
 	var claudeResponse dto.ClaudeResponse
 	err := common.Unmarshal(data, &claudeResponse)
 	if err != nil {
@@ -351,11 +360,6 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		// An upstream error response is still evidence: observe it before
 		// returning so the failure path carries a ursp block.
 		info.ObserveUpstreamResponse(claudeResponse.Model, claudeResponse.Id, 0, "")
-		if httpResp != nil {
-			info.SetUpstreamResponseForensics(string(data), httpResp.Header)
-		} else {
-			info.SetUpstreamResponseForensics(string(data), nil)
-		}
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	info.ObserveResponseModel(claudeResponse.Model)
@@ -365,11 +369,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if claudeResponse.Usage != nil && upstreamUsageTrustworthy(info) {
 		info.ObserveUpstreamUsage(claudeResponse.Usage.InputTokens, claudeResponse.Usage.CacheCreationInputTokens, claudeResponse.Usage.CacheReadInputTokens)
 	}
-	if httpResp != nil {
-		info.SetUpstreamResponseForensics(string(data), httpResp.Header)
-	} else {
-		info.SetUpstreamResponseForensics(string(data), nil)
-	}
+	info.ObserveUpstreamOutputJSON(data)
 	if claudeInfo.Usage == nil {
 		claudeInfo.Usage = &dto.Usage{}
 	}
@@ -447,6 +447,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 
 func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("claude")
 
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),

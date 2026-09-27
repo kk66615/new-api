@@ -60,23 +60,3 @@ func TestSentModelSnapshotMustBeTakenAfterSuffixHandling(t *testing.T) {
 			"write-once is why the call site must be right, not merely present")
 	})
 }
-
-// An upstream that echoes back exactly the model it was sent must compare
-// clean. This is the assertion the regression violated.
-func TestHonestEchoOfStrippedModelComparesClean(t *testing.T) {
-	info := &relaycommon.RelayInfo{
-		OriginModelName: "claude-3-7-sonnet-thinking",
-		ChannelMeta: &relaycommon.ChannelMeta{
-			UpstreamModelName: "claude-3-7-sonnet-thinking",
-		},
-	}
-	mustApplyReasoningModelSuffix(t, info)
-	info.SnapshotUpstreamSentModel()
-
-	// the upstream honestly echoes the name it received
-	info.ObserveUpstreamResponse(info.UpstreamSentModel, "msg_01", 0, "")
-
-	assert.Equal(t, info.UpstreamSentModel, info.UpstreamResponseModel)
-	assert.Equal(t, "claude-3-7-sonnet", info.UpstreamSentModel)
-	assert.NotEqual(t, "claude-3-7-sonnet-thinking", info.UpstreamSentModel)
-}

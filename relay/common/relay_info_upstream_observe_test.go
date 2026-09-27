@@ -1,6 +1,12 @@
 package common
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // A converted relay may emit a terminal event without a model; the id must
 // still be captured so the exchange is auditable (model-less ursp).
@@ -106,73 +112,6 @@ func TestSnapshotUpstreamSentModelNilReceiver(t *testing.T) {
 	info.SnapshotUpstreamSentModel()
 }
 
-// The snapshot must be taken at the SEND boundary, i.e. after every
-// request-side rewrite. This test reproduces the real handler order
-// (InitChannelMeta -> ModelMappedHelper -> reasoning/search suffix handling ->
-// adaptor ConvertRequest -> doRequest) and asserts the snapshot lands on the
-// final name, not the pre-strip one.
-//
-// This is the case that slipped through the first fix: taking the snapshot in
-// ModelMappedHelper recorded "claude-3-7-sonnet-thinking" while the request
-// that actually went out carried "claude-3-7-sonnet", so an upstream honestly
-// echoing the request was reported as a model swapper.
-func TestSnapshotHappensAfterRequestSideRewrites(t *testing.T) {
-	cases := []struct {
-		name        string
-		atSnapshot  string // UpstreamModelName when the snapshot is taken
-		preStripped string // an earlier, not-yet-stripped value
-		want        string
-	}{
-		{
-			name:        "reasoning suffix stripped before send",
-			preStripped: "claude-3-7-sonnet-thinking",
-			atSnapshot:  "claude-3-7-sonnet",
-			want:        "claude-3-7-sonnet",
-		},
-		{
-			name:        "xai -search suffix stripped before send",
-			preStripped: "grok-4.5-search",
-			atSnapshot:  "grok-4.5",
-			want:        "grok-4.5",
-		},
-		{
-			name:        "reasoning effort suffix stripped before send",
-			preStripped: "gpt-5-high",
-			atSnapshot:  "gpt-5",
-			want:        "gpt-5",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: c.preStripped}}
-			info.ResetUpstreamObservation() // what InitChannelMeta does per attempt
-			// ModelMappedHelper no longer snapshots; the suffix handling then
-			// rewrites the name, and only doRequest freezes it.
-			info.UpstreamModelName = c.atSnapshot
-			info.SnapshotUpstreamSentModel()
-			if info.UpstreamSentModel != c.want {
-				t.Fatalf("sent model = %q, want %q (a pre-strip snapshot makes an "+
-					"honest upstream look like a swapper)", info.UpstreamSentModel, c.want)
-			}
-		})
-	}
-}
-
-// The pairing that matters: after the snapshot, the comparison against the
-// model the upstream declares must be clean when the upstream honestly echoes
-// the request.
-func TestSnapshotMakesHonestEchoCompareClean(t *testing.T) {
-	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "claude-3-7-sonnet"}}
-	info.SnapshotUpstreamSentModel()
-	info.UpstreamModelName = "claude-3-7-sonnet" // any later rewrite
-	if info.UpstreamSentModel != info.UpstreamModelName {
-		t.Fatalf("snapshot drifted: %q vs %q", info.UpstreamSentModel, info.UpstreamModelName)
-	}
-	if info.UpstreamSentModel == "claude-3-7-sonnet-thinking" {
-		t.Fatal("snapshot kept a pre-strip suffix")
-	}
-}
-
 // A failed attempt observes an upstream error response; its declared model
 // must not be attributed to the channel that serves the retry — especially
 // when the retry's response omits the model (nomodel terminal event).
@@ -202,4 +141,93 @@ func TestAttemptResetClearsPreviousAttemptObservation(t *testing.T) {
 	if info.UpstreamResponseId != "resp_0" {
 		t.Fatalf("retry id not recorded: %q", info.UpstreamResponseId)
 	}
+}
+
+// Excerpts are cut on a rune boundary with NUL bytes and invalid UTF-8 removed
+// (PostgreSQL rejects both), and the truncation is recorded with the full size.
+func TestForensicsExcerptIsUTF8SafeAndRecordsTruncation(t *testing.T) {
+	body := strings.Repeat("a", UpstreamExcerptCap-1) + "海" + "tail"
+	info := &RelayInfo{}
+	info.SetUpstreamResponseForensicsBytes([]byte(body), nil)
+	assert.True(t, strings.HasSuffix(info.UpstreamResponseExcerpt, "a"), "the split rune must be dropped, not mangled")
+	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), UpstreamExcerptCap)
+	assert.True(t, info.UpstreamAudit.ExcerptTruncated)
+	assert.Equal(t, len(body), info.UpstreamAudit.ExcerptFullLen)
+	assert.True(t, strings.HasSuffix(info.UpstreamAudit.ModelFrame, "海tail"), "an oversized body keeps its tail as the model frame")
+
+	info = &RelayInfo{}
+	info.SetUpstreamResponseForensics("ok\x00\xff\xfeend", nil)
+	assert.Equal(t, "ok\uFFFDend", info.UpstreamResponseExcerpt)
+	assert.False(t, info.UpstreamAudit.ExcerptTruncated)
+}
+
+// Headers keep every value, redact credentials, and when over the cap keep
+// what fits plus a marker instead of dropping everything.
+func TestForensicsHeadersKeepValuesRedactAndCap(t *testing.T) {
+	info := &RelayInfo{}
+	info.SetUpstreamResponseForensics("", map[string][]string{
+		"Via":           {"1.1 a", "1.1 b"},
+		"Set-Cookie":    {"session=secret"},
+		"Authorization": {"Bearer sk-secret"},
+		"X-Api-Key":     {"sk-secret"},
+	})
+	headers := info.UpstreamResponseHeaders
+	assert.Contains(t, headers, `"Via":"1.1 a, 1.1 b"`)
+	assert.NotContains(t, headers, "secret")
+	assert.Contains(t, headers, `"Set-Cookie":"[redacted]"`)
+	assert.False(t, info.UpstreamAudit.HeadersTruncated)
+
+	big := map[string][]string{"A-Small": {"1"}, "B-Huge": {strings.Repeat("x", 9000)}, "C-Small": {"2"}}
+	encoded, truncated := EncodeUpstreamAuditHeaders(big)
+	assert.True(t, truncated)
+	assert.LessOrEqual(t, len(encoded), 8*1024)
+	assert.Contains(t, encoded, `"A-Small":"1"`)
+	assert.Contains(t, encoded, `"C-Small":"2"`)
+	assert.Contains(t, encoded, HeadersTruncatedKey)
+}
+
+// A stream records its first model-bearing frame and every distinct model,
+// so a usage-only final frame cannot erase the evidence and a mid-stream
+// model change is visible.
+func TestStreamObservationKeepsModelFrameAndDistinctModels(t *testing.T) {
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "gpt-5"}}
+	first := `{"id":"c1","model":"gpt-5","choices":[{"delta":{"content":"hi"}}]}`
+	info.ObserveUpstreamResponseFrame(first, "gpt-5", "c1", 1, "")
+	info.ObserveUpstreamResponseFrame(`{"id":"c1","model":"gpt-5-mini","choices":[]}`, "gpt-5-mini", "c1", 1, "")
+	info.ObserveUpstreamResponseFrame(`{"id":"c1","choices":[],"usage":{"total_tokens":3}}`, "", "c1", 1, "")
+	info.SetUpstreamResponseForensics(`{"id":"c1","choices":[],"usage":{"total_tokens":3}}`, nil)
+
+	assert.Equal(t, first, info.UpstreamAudit.ModelFrame)
+	assert.Equal(t, "gpt-5", info.UpstreamAudit.FirstModel)
+	assert.Equal(t, []string{"gpt-5", "gpt-5-mini"}, info.UpstreamAudit.Models)
+	assert.Equal(t, "gpt-5-mini", info.UpstreamResponseModel)
+
+	info.ObserveUpstreamErrorFrame(`{"type":"error"}`)
+	assert.Equal(t, first, info.UpstreamAudit.ModelFrame, "an error frame must not replace the model frame")
+	assert.Equal(t, `{"type":"error"}`, info.UpstreamAudit.ErrorFrame)
+}
+
+func TestUpstreamObservationLevel(t *testing.T) {
+	info := &RelayInfo{}
+	assert.Equal(t, "none", info.UpstreamObservationLevel())
+	info.SetUpstreamResponseForensics("", map[string][]string{"X": {"1"}})
+	assert.Equal(t, "partial", info.UpstreamObservationLevel())
+	info.ObserveUpstreamResponse("gpt-5", "", 0, "")
+	assert.Equal(t, "full", info.UpstreamObservationLevel())
+	info.ResetUpstreamObservation()
+	assert.Equal(t, "none", info.UpstreamObservationLevel())
+	require.Empty(t, info.UpstreamAudit.Models)
+}
+
+// The output hash ignores whitespace layout, so the same answer streamed in
+// different chunkings hashes the same.
+func TestObserveUpstreamOutputNormalisesWhitespace(t *testing.T) {
+	a, b := &RelayInfo{}, &RelayInfo{}
+	a.ObserveUpstreamOutput("Hello,\n  world")
+	b.ObserveUpstreamOutput(" Hello, world ")
+	assert.Equal(t, a.UpstreamAudit.OutputSHA256, b.UpstreamAudit.OutputSHA256)
+	assert.Equal(t, 12, a.UpstreamAudit.OutputChars)
+	c := &RelayInfo{}
+	c.ObserveUpstreamOutput("   ")
+	assert.Empty(t, c.UpstreamAudit.OutputSHA256)
 }

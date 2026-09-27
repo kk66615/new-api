@@ -136,22 +136,25 @@ type RelayInfo struct {
 	// ── upstream response forensics（上游响应模型审计，纯旁路观测，不影响转发）──
 	// UpstreamResponseModel: model name declared by the upstream response body,
 	// captured BEFORE any protocol conversion or client-facing rewrite.
-	// UpstreamSentModel: snapshot of the model name we actually sent upstream,
-	// taken at observation time (claude relay overwrites UpstreamModelName with
-	// the response model afterwards, so the snapshot must happen first).
+	// UpstreamSentModel: the model actually on the wire, frozen at the send
+	// boundary (relay/channel.doRequest) from the final request body/URL — the
+	// claude relay overwrites UpstreamModelName with the response model later.
 	UpstreamResponseModel     string
 	UpstreamResponseId        string
 	UpstreamResponseCreated   int64
 	UpstreamSystemFingerprint string
 	UpstreamSentModel         string
-	UpstreamResponseExcerpt   string // raw body (non-stream) / last+first frame (stream); only persisted on mismatch
-	UpstreamResponseHeaders   string // JSON-serialized upstream response headers; only persisted on mismatch
+	UpstreamResponseExcerpt   string // raw body (non-stream) / terminal frame (stream), UTF-8 safe, capped at 64KB; persisted for every observed exchange
+	UpstreamResponseHeaders   string // JSON-serialized upstream response headers (redacted, capped at 8KB); persisted for every observed exchange
 	// Upstream-reported input usage (Anthropic semantics). Compared against our own
 	// pre-request estimate to detect relay-side prompt injection (Claude Max / ccmax
 	// relays must inject the Claude Code OAuth system prompt).
 	UpstreamInputTokens         int
 	UpstreamCacheCreationTokens int
 	UpstreamCacheReadTokens     int
+	// UpstreamAudit holds the rest of the per-attempt audit observation
+	// (relay_info_audit.go); cleared with the fields above on every attempt.
+	UpstreamAudit UpstreamAuditObservation
 	// ForcePreConsume 为 true 时禁用 BillingSession 的信任额度旁路，
 	// 强制预扣全额。用于异步任务（视频/音乐生成等），因为请求返回后任务仍在运行，
 	// 必须在提交前锁定全额。
@@ -870,131 +873,6 @@ func (info *RelayInfo) GetUpstreamModelName() string {
 		return ""
 	}
 	return info.UpstreamModelName
-}
-
-// SnapshotUpstreamSentModel freezes the model name we are about to address
-// upstream. Call it at the SEND boundary — relay/channel.doRequest — which is
-// the last point before the request goes out.
-//
-// The window matters in both directions:
-//   - too early (e.g. in ModelMappedHelper) and it captures a pre-strip name
-//     like "claude-3-7-sonnet-thinking", so an upstream that honestly echoes
-//     the request is recorded as having swapped the model;
-//   - too late (after a response handler has run) and it adopts the model the
-//     UPSTREAM declared, making every comparison compare-equal and turning the
-//     audit into a silent no-op.
-//
-// The value is therefore write-once, and InitChannelMeta clears it per attempt
-// (a retry can land on a different channel with a different model mapping).
-func (info *RelayInfo) SnapshotUpstreamSentModel() {
-	if info == nil || info.UpstreamSentModel != "" {
-		return
-	}
-	if info.ChannelMeta != nil {
-		info.UpstreamSentModel = info.UpstreamModelName
-	}
-}
-
-// ResetUpstreamObservation clears everything observed from the previous
-// attempt's upstream response (sent-model snapshot, declared model/id,
-// forensics, usage) so the next attempt starts clean. Called from
-// InitChannelMeta, which runs once per upstream attempt. Without this, a
-// failed attempt's declared model would be attributed to the channel that
-// served the retry whenever that retry's response omits the model.
-func (info *RelayInfo) ResetUpstreamObservation() {
-	if info == nil {
-		return
-	}
-	info.UpstreamSentModel = ""
-	info.UpstreamResponseModel = ""
-	info.UpstreamResponseId = ""
-	info.UpstreamResponseCreated = 0
-	info.UpstreamSystemFingerprint = ""
-	info.UpstreamResponseExcerpt = ""
-	info.UpstreamResponseHeaders = ""
-	info.UpstreamInputTokens = 0
-	info.UpstreamCacheCreationTokens = 0
-	info.UpstreamCacheReadTokens = 0
-}
-
-// ObserveUpstreamResponse records the model identity the upstream response
-// declared. Call it at the point the response is parsed, BEFORE any code path
-// that rewrites info.UpstreamModelName (e.g. claude message_start handling).
-// First observation wins for the sent-model snapshot; the response fields are
-// updated on every call so streaming paths naturally keep the last declaration.
-// Empty model is a no-op (tri-state semantics: absent stays absent).
-func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created int64, systemFingerprint string) {
-	if info == nil {
-		return
-	}
-	model = strings.TrimSpace(model)
-	if len(model) > 200 {
-		model = model[:200]
-	}
-	// Fallback snapshot for paths that never went through ModelMappedHelper
-	// (tests, task relays). UpstreamModelName is promoted from the embedded
-	// *ChannelMeta, which those paths may leave nil.
-	if info.UpstreamSentModel == "" && info.ChannelMeta != nil {
-		info.UpstreamSentModel = info.UpstreamModelName
-	}
-	// a terminal event may omit the model (seen on converted relays); keep the
-	// id/created/fingerprint so the exchange is still recorded (model-less)
-	if model != "" {
-		info.UpstreamResponseModel = model
-	}
-	if responseId != "" {
-		info.UpstreamResponseId = responseId
-	}
-	if created != 0 {
-		info.UpstreamResponseCreated = created
-	}
-	if systemFingerprint != "" {
-		info.UpstreamSystemFingerprint = systemFingerprint
-	}
-}
-
-// ObserveUpstreamUsage records the upstream's own input-side token accounting.
-// Zero values are ignored so a later, fuller declaration (message_delta) never
-// erases an earlier one.
-func (info *RelayInfo) ObserveUpstreamUsage(inputTokens, cacheCreation, cacheRead int) {
-	if info == nil {
-		return
-	}
-	if inputTokens > 0 {
-		info.UpstreamInputTokens = inputTokens
-	}
-	if cacheCreation > 0 {
-		info.UpstreamCacheCreationTokens = cacheCreation
-	}
-	if cacheRead > 0 {
-		info.UpstreamCacheReadTokens = cacheRead
-	}
-}
-
-// SetUpstreamResponseForensics stores the raw evidence material (capped).
-// It is held in memory for every request but only persisted on mismatch.
-func (info *RelayInfo) SetUpstreamResponseForensics(excerpt string, headers map[string][]string) {
-	if info == nil {
-		return
-	}
-	const excerptCap = 64 * 1024
-	if len(excerpt) > excerptCap {
-		excerpt = excerpt[:excerptCap]
-	}
-	if excerpt != "" { // empty excerpt = headers-only update, keep existing excerpt
-		info.UpstreamResponseExcerpt = excerpt
-	}
-	if headers != nil {
-		flat := make(map[string]string, len(headers))
-		for k, v := range headers {
-			if len(v) > 0 {
-				flat[k] = v[0]
-			}
-		}
-		if b, err := json.Marshal(flat); err == nil && len(b) <= 8*1024 {
-			info.UpstreamResponseHeaders = string(b)
-		}
-	}
 }
 
 func (info *RelayInfo) HasChannelMeta() bool { return info != nil && info.ChannelMeta != nil }

@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -21,11 +22,14 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("chat_to_responses")
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	// upstream response forensics — the raw Chat body and headers
+	info.SetUpstreamResponseForensicsBytes(body, resp.Header)
 
 	var chatResp dto.OpenAITextResponse
 	if err := common.Unmarshal(body, &chatResp); err != nil {
@@ -45,7 +49,8 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	case int64:
 		chatCreated = v
 	}
-	info.ObserveUpstreamResponse(chatResp.Model, chatResp.Id, chatCreated, "")
+	info.ObserveUpstreamResponse(chatResp.Model, chatResp.Id, chatCreated, gjson.GetBytes(body, "system_fingerprint").String())
+	info.ObserveUpstreamOutputJSON(body)
 
 	if responseID := helper.GetResponseID(c); responseID != "" {
 		chatResp.Id = responseID
@@ -79,6 +84,9 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("chat_to_responses_stream")
+	info.SetUpstreamResponseForensics("", resp.Header)
+	var lastStreamData string
 
 	responseID := helper.GetResponseID(c)
 	state, err := relayconvert.NewResponseStreamState(types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, relayconvert.ResponseStreamOptions{
@@ -130,6 +138,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		var errorResp dto.OpenAITextResponse
 		if err := common.UnmarshalJsonStr(data, &errorResp); err == nil {
 			if oaiError := errorResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+				info.ObserveUpstreamErrorFrame(data)
 				if failResponsesStream(fmt.Errorf("%s", oaiError.Message)) {
 					sr.Stop(streamErr)
 					return
@@ -159,7 +168,8 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if chunk.SystemFingerprint != nil {
 			chunkFingerprint = *chunk.SystemFingerprint
 		}
-		info.ObserveUpstreamResponse(chunk.Model, chunk.Id, chunk.Created, chunkFingerprint)
+		info.ObserveUpstreamResponseFrame(data, chunk.Model, chunk.Id, chunk.Created, chunkFingerprint)
+		lastStreamData = data
 
 		results, err := service.ConvertStreamResponseChunk(c, info, state, &chunk)
 		if err != nil {
@@ -184,6 +194,8 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	info.SetUpstreamResponseForensics(lastStreamData, nil)
+	info.ObserveUpstreamOutput(state.UsageText())
 
 	if streamErr != nil {
 		return nil, streamErr

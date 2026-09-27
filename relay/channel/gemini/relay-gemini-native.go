@@ -28,6 +28,8 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	}
 
 	logger.LogDebug(c, "Gemini native response body: %s", responseBody)
+	info.MarkUpstreamObserver("gemini_native")
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 
 	// 解析为 Gemini 原生响应格式
 	var geminiResponse dto.GeminiChatResponse
@@ -38,7 +40,7 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	info.ObserveResponseModel(gjson.GetBytes(responseBody, "modelVersion").Str)
 	// upstream response forensics (native generateContent path)
 	info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
-	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+	info.ObserveUpstreamOutputJSON(responseBody)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
 	if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {

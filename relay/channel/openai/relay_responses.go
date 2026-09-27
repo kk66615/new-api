@@ -21,6 +21,7 @@ import (
 
 func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
+	info.MarkUpstreamObserver("openai_responses")
 
 	// read response body
 	var responsesResponse dto.OpenAIResponsesResponse
@@ -28,6 +29,9 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	// upstream response forensics — raw upstream bytes, before any rewrite
+	// (the SGLang created_at patch below changes what the client receives)
+	info.SetUpstreamResponseForensicsBytes(responseBody, resp.Header)
 	err = common.Unmarshal(responseBody, &responsesResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -37,10 +41,10 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 
 	info.ObserveResponseModel(responsesResponse.Model)
-	responseBody = rewriteSGLangResponsesCreatedAt(info, responseBody, "created_at", responsesResponse.CreatedAt)
 	// upstream response forensics — capture the upstream's own model declaration
 	info.ObserveUpstreamResponse(responsesResponse.Model, responsesResponse.ID, int64(responsesResponse.CreatedAt), "")
-	info.SetUpstreamResponseForensics(string(responseBody), resp.Header)
+	info.ObserveUpstreamOutputJSON(responseBody)
+	responseBody = rewriteSGLangResponsesCreatedAt(info, responseBody, "created_at", responsesResponse.CreatedAt)
 
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
@@ -81,6 +85,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	defer service.CloseResponseBodyGracefully(resp)
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
+	info.MarkUpstreamObserver("openai_responses_stream")
 
 	// forensics: headers-only update (the terminal event supplies the excerpt)
 	info.SetUpstreamResponseForensics("", resp.Header)
@@ -94,15 +99,13 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			return
 		}
 		if streamResponse.Response != nil {
+			// upstream response forensics — observed on the raw upstream frame,
+			// before the SGLang created_at rewrite below. Every event carrying a
+			// response object declares the model (response.created supplies the
+			// first model frame); the terminal event (success or not) becomes the
+			// excerpt and carries the full output for the output hash.
+			info.ObserveUpstreamResponsesEvent(streamResponse.Type, data, streamResponse.Response.Model, streamResponse.Response.ID, int64(streamResponse.Response.CreatedAt))
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
-			// upstream response forensics — every terminal event (success or not)
-			// carries the upstream's own model/id declaration; observed here on
-			// the raw frame so the excerpt is the untouched upstream event
-			switch streamResponse.Type {
-			case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
-				info.ObserveUpstreamResponse(streamResponse.Response.Model, streamResponse.Response.ID, int64(streamResponse.Response.CreatedAt), "")
-				info.SetUpstreamResponseForensics(data, nil)
-			}
 		}
 		sendResponsesStreamData(c, streamResponse, data)
 		accumulator.Observe(&streamResponse)
