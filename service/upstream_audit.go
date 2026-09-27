@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,79 +36,193 @@ func canonicalGrokRuntimeModel(m string) string {
 	}
 }
 
-// snapshotAliasVerdict classifies the vendor alias↔snapshot pattern: one name
-// extends the other by "-<date>" (gpt-5 vs gpt-5-2025-08-07, x vs x-0731) or by
-// "-latest" (claude-sonnet-4-6 vs claude-sonnet-4-6-latest). It returns "" when
-// the pair does not match this pattern. Deliberately NOT a general prefix match
-// — an arbitrary suffix (deepseek-v4 vs deepseek-v4-flash) is a different model
-// and must still flag.
+// snapshotAliasVerdict classifies the vendor alias↔pinned-build pattern: one
+// name extends the other by a strict date segment set (gpt-5 vs
+// gpt-5-2025-08-07, x vs x-0731, claude-x vs claude-x-20251001), by a Gemini
+// "-NNN" version (gemini-2.0-flash vs gemini-2.0-flash-001) or by "-latest"
+// (claude-sonnet-4-6 vs claude-sonnet-4-6-latest). It returns "" when the pair
+// does not match this pattern. Deliberately NOT a general prefix match — an
+// arbitrary suffix (deepseek-v4 vs deepseek-v4-flash, deepseek-v3 vs
+// deepseek-v3-1-250821, gpt-5 vs gpt-5-1234) is a different model and must
+// still flag.
 //
-// The two forms are reported separately so the log can label them honestly: a
-// dated snapshot is the vendor pinning a version, while "-latest" is the vendor
-// appending its own rolling marker to the exact id we sent.
-func snapshotAliasVerdict(a, b string) string {
-	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
-	if len(a) > len(b) {
-		a, b = b, a
+// Direction matters for pinned builds: sending the alias and getting a dated
+// build back is the vendor resolving its alias (snapshot_date /
+// version_suffix). Sending a pinned build and getting the bare alias back means
+// the upstream did not honour the pin — it may be serving any build — so that
+// direction is pinned_to_alias, which counts as a mismatch.
+func snapshotAliasVerdict(sent, resp string) string {
+	sent, resp = strings.ToLower(strings.TrimSpace(sent)), strings.ToLower(strings.TrimSpace(resp))
+	alias, pinned, sentIsAlias := sent, resp, true
+	if len(sent) > len(resp) {
+		alias, pinned, sentIsAlias = resp, sent, false
 	}
-	if !strings.HasPrefix(b, a+"-") {
+	suffix, ok := strings.CutPrefix(pinned, alias+"-")
+	if !ok {
 		return ""
 	}
-	suffix := b[len(a)+1:]
 	if suffix == "latest" {
 		return VerdictRollingAlias
 	}
-	digits := strings.ReplaceAll(suffix, "-", "")
-	if len(digits) < 4 || len(digits) > 8 {
+	verdict := ""
+	switch {
+	case isSnapshotDateSuffix(suffix):
+		verdict = VerdictSnapshotDate
+	case strings.HasPrefix(alias, "gemini-") && isThreeDigitVersion(suffix):
+		verdict = VerdictVersionSuffix
+	default:
 		return ""
 	}
-	for _, r := range digits {
-		if r < '0' || r > '9' {
-			return ""
-		}
+	if !sentIsAlias {
+		return VerdictPinnedToAlias
 	}
-	return VerdictSnapshotDate
+	return verdict
 }
 
-// stripVendorPrefix drops an OpenRouter-style "vendor/" prefix
-// (deepseek/deepseek-v4-flash → deepseek-v4-flash) so a relay that echoes the
-// namespaced id is not flagged. Only the last path segment is kept.
+// isSnapshotDateSuffix accepts only the date forms vendors actually use for
+// pinned builds, with the month and day range-checked so an arbitrary number
+// (gpt-5-1234, deepseek-v3-1-250821) is never mistaken for a date:
+//
+//	YYYY-MM-DD  OpenAI      gpt-5-2025-08-07
+//	YYYYMMDD    Anthropic   claude-haiku-4-5-20251001
+//	YYMMDD      Volcengine  deepseek-v3-250324
+//	MMDD        DeepSeek    deepseek-v4-flash-0731, gpt-4-0613
+//	MM-DD       Google      gemini-2.5-flash-preview-05-20
+func isSnapshotDateSuffix(suffix string) bool {
+	segs := strings.Split(suffix, "-")
+	for _, seg := range segs {
+		if !isAllDigits(seg) {
+			return false
+		}
+	}
+	switch len(segs) {
+	case 3:
+		return len(segs[0]) == 4 && strings.HasPrefix(segs[0], "20") &&
+			len(segs[1]) == 2 && len(segs[2]) == 2 && validMonthDay(segs[1], segs[2])
+	case 2:
+		return len(segs[0]) == 2 && len(segs[1]) == 2 && validMonthDay(segs[0], segs[1])
+	case 1:
+		d := segs[0]
+		switch len(d) {
+		case 8:
+			return strings.HasPrefix(d, "20") && validMonthDay(d[4:6], d[6:8])
+		case 6:
+			return validMonthDay(d[2:4], d[4:6])
+		case 4:
+			return validMonthDay(d[0:2], d[2:4])
+		}
+	}
+	return false
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isThreeDigitVersion(s string) bool {
+	return len(s) == 3 && isAllDigits(s)
+}
+
+func validMonthDay(mm, dd string) bool {
+	m, errM := strconv.Atoi(mm)
+	d, errD := strconv.Atoi(dd)
+	return errM == nil && errD == nil && m >= 1 && m <= 12 && d >= 1 && d <= 31
+}
+
 // bedrockModelRe matches Bedrock model ids: an optional region/routing prefix
 // (global. / us. / eu. / apac. ...), a vendor segment and the model name, e.g.
 // global.anthropic.claude-sonnet-5, anthropic.claude-haiku-4-5-20251001-v1:0.
 var bedrockModelRe = regexp.MustCompile(`^(?:[a-z]{2,6}\.)?(anthropic|amazon|meta|mistral|cohere|ai21|deepseek|writer|stability|luma|twelvelabs|qwen|openai)\.(.+)$`)
 var bedrockVersionSuffixRe = regexp.MustCompile(`-v\d+(?::\d+)?$`)
+var colonVersionSuffixRe = regexp.MustCompile(`-v\d+:\d+$`)
 
 func isBedrockModelId(m string) bool {
 	return bedrockModelRe.MatchString(strings.ToLower(strings.TrimSpace(m)))
 }
 
-// stripVendorPrefix canonicalizes vendor namespaces: OpenRouter-style
-// "vendor/model" and Bedrock-style "region.vendor.model-v1:0" both reduce to
-// the bare model name so the mismatch verdict compares like with like.
-func stripVendorPrefix(m string) string {
-	if i := strings.LastIndex(m, "/"); i >= 0 && i < len(m)-1 {
-		m = m[i+1:]
+// splitVendorPrefix separates a vendor namespace from the bare model name:
+// OpenRouter-style "vendor/model" and Bedrock-style "region.vendor.model"
+// (deepseek/deepseek-v4-flash → "deepseek" + deepseek-v4-flash,
+// global.anthropic.claude-sonnet-5 → "global.anthropic" + claude-sonnet-5).
+// The Bedrock "-vN:M" build suffix is NOT touched here: whether it takes part
+// in the comparison depends on the other side (see canonicalModelPair).
+func splitVendorPrefix(m string) (prefix, bare string, bedrock bool) {
+	bare = strings.TrimSpace(m)
+	if i := strings.LastIndex(bare, "/"); i >= 0 && i < len(bare)-1 {
+		prefix, bare = bare[:i], bare[i+1:]
 	}
-	if sub := bedrockModelRe.FindStringSubmatch(strings.ToLower(m)); sub != nil {
-		m = bedrockVersionSuffixRe.ReplaceAllString(sub[2], "")
+	if loc := bedrockModelRe.FindStringSubmatchIndex(strings.ToLower(bare)); loc != nil {
+		modelStart := loc[4]
+		bedrockPrefix := bare[:modelStart-1]
+		if prefix != "" {
+			prefix += "/" + bedrockPrefix
+		} else {
+			prefix = bedrockPrefix
+		}
+		bare = bare[modelStart:]
+		bedrock = true
 	}
-	return m
+	return prefix, bare, bedrock
 }
 
-// Mismatch verdict types. Only VerdictMismatch is an anomaly; every other
-// value means "consistent", with the reason retained so the UI can label a
-// benign difference honestly instead of showing a bare boolean.
+// canonicalModelPair reduces both names to comparable bare ids and returns the
+// namespace prefix the response carried (recorded as ursp.prefix and fed into
+// the backend tracker, so a relay that starts answering "deepseek/…" for an
+// OpenAI model is visible even though the comparison ignores the prefix).
+//
+// The Bedrock "-vN[:M]" build suffix is compared when BOTH sides carry one
+// (anthropic.x-v1:0 vs anthropic.x-v2:0 is a different build). When only one
+// side has it — Bedrock bodies report the vendor model name, and clients send
+// the bare name — it is stripped from that side. A "-vN" suffix is only
+// treated as a Bedrock build marker on a Bedrock-shaped id or in the
+// unambiguous "-vN:M" form, never on names like deepseek-v3.
+func canonicalModelPair(rawSent, rawResp string) (sent, resp, respPrefix string) {
+	_, sent, sentBedrock := splitVendorPrefix(rawSent)
+	respPrefix, resp, respBedrock := splitVendorPrefix(rawResp)
+	sentVersioned := (sentBedrock && bedrockVersionSuffixRe.MatchString(sent)) || colonVersionSuffixRe.MatchString(sent)
+	respVersioned := (respBedrock && bedrockVersionSuffixRe.MatchString(resp)) || colonVersionSuffixRe.MatchString(resp)
+	if sentVersioned && respVersioned {
+		return sent, resp, respPrefix
+	}
+	if sentVersioned {
+		sent = bedrockVersionSuffixRe.ReplaceAllString(sent, "")
+	}
+	if respVersioned {
+		resp = bedrockVersionSuffixRe.ReplaceAllString(resp, "")
+	}
+	return sent, resp, respPrefix
+}
+
+// Mismatch verdict types. VerdictMismatch and VerdictPinnedToAlias are
+// anomalies (see VerdictIsMismatch); every other value means "consistent",
+// with the reason retained so the UI can label a benign difference honestly
+// instead of showing a bare boolean.
 const (
-	VerdictExact        = "exact"         // identical after canonicalization
-	VerdictVendorPrefix = "vendor_prefix" // differed only by a vendor/namespace prefix
-	VerdictRuntimeAlias = "runtime_alias" // vendor alias ↔ runtime build id (grok-4.5 ↔ grok-4.5-build)
-	VerdictSnapshotDate = "snapshot_date" // alias ↔ dated snapshot (gpt-5 ↔ gpt-5-2025-08-07)
-	VerdictRollingAlias = "rolling_alias" // "-latest" rolling alias resolving into the same family
-	VerdictPreviewAlias = "preview_alias" // "-preview" public name ↔ the bare id the upstream reports it as
-	VerdictNoModel      = "no_model"      // upstream declared no model at all
-	VerdictMismatch     = "mismatch"      // different model — the anomaly we exist to catch
+	VerdictExact         = "exact"           // identical after canonicalization
+	VerdictVendorPrefix  = "vendor_prefix"   // differed only by a vendor/namespace prefix
+	VerdictRuntimeAlias  = "runtime_alias"   // vendor alias ↔ runtime build id (grok-4.5 ↔ grok-4.5-build)
+	VerdictSnapshotDate  = "snapshot_date"   // sent alias, got dated snapshot (gpt-5 → gpt-5-2025-08-07)
+	VerdictVersionSuffix = "version_suffix"  // sent Gemini alias, got its -NNN build (gemini-2.0-flash → gemini-2.0-flash-001)
+	VerdictRollingAlias  = "rolling_alias"   // "-latest" rolling alias resolving into the same family and tier
+	VerdictPreviewAlias  = "preview_alias"   // "-preview" public name ↔ the bare id the upstream reports it as
+	VerdictNoModel       = "no_model"        // upstream declared no model at all
+	VerdictPinnedToAlias = "pinned_to_alias" // sent a pinned build, got the bare alias back — pin not honoured (mismatch)
+	VerdictMismatch      = "mismatch"        // different model — the anomaly we exist to catch
 )
+
+// VerdictIsMismatch reports whether a verdict is an anomaly. It is the only
+// place that decides which verdicts count as a mismatch.
+func VerdictIsMismatch(verdict string) bool {
+	return verdict == VerdictMismatch || verdict == VerdictPinnedToAlias
+}
 
 // ClassifyUpstreamModelMismatch returns the verdict for the pair, explaining
 // WHY it is (not) a mismatch. It is the single decision point: both the audit
@@ -118,8 +233,7 @@ func ClassifyUpstreamModelMismatch(sentModel, responseModel string) string {
 	if rawSent == "" || rawResp == "" {
 		return VerdictNoModel // never flag on missing data
 	}
-	sent := stripVendorPrefix(rawSent)
-	resp := stripVendorPrefix(rawResp)
+	sent, resp, _ := canonicalModelPair(rawSent, rawResp)
 	if strings.EqualFold(sent, resp) {
 		if !strings.EqualFold(rawSent, rawResp) {
 			return VerdictVendorPrefix
@@ -164,108 +278,190 @@ func previewAliasMatch(sent, resp string) bool {
 
 // UpstreamModelsMatchForAudit reports whether the upstream-declared model is
 // consistent with the model we sent. Case-insensitive; vendor/ prefixes, known
-// vendor runtime aliases and alias↔snapshot date suffixes are canonicalized
+// vendor runtime aliases and alias→snapshot date suffixes are canonicalized
 // before comparing.
 func UpstreamModelsMatchForAudit(sentModel, responseModel string) bool {
-	return ClassifyUpstreamModelMismatch(sentModel, responseModel) != VerdictMismatch
+	return !VerdictIsMismatch(ClassifyUpstreamModelMismatch(sentModel, responseModel))
 }
 
 // lowerTierTokens are the qualifier tokens vendors use for a cheaper, weaker
 // sibling of the same family. Compared as whole "-"-separated tokens, never as
-// substrings: "preview" contains "revie"—and more to the point, a dated preview
-// snapshot (gpt-5-preview-2025-08-07) is a normal vendor version pin, not a
-// downgrade, and substring matching would mislabel it.
+// substrings. "turbo" is deliberately absent: gpt-4 → gpt-4-turbo is a newer
+// build of the same grade, not a downgrade.
 var lowerTierTokens = map[string]bool{
 	"flash": true, "mini": true, "lite": true, "nano": true, "small": true,
-	"preview": true, "fast": true, "turbo": true, "air": true, "instant": true,
+	"preview": true, "fast": true, "air": true, "instant": true, "haiku": true,
 }
 
-// higherTierTokens are the mirror-image qualifiers: serving the base id when a
-// bigger tier was requested (gpt-5-pro → gpt-5) is also a downgrade.
-var higherTierTokens = map[string]bool{
-	"pro": true, "max": true, "ultra": true, "opus": true, "plus": true,
-	"thinking": true, "reasoning": true,
+// higherTierRank ranks the qualifiers that mark a bigger tier, so a
+// replacement can be told apart from an upgrade: qwen-max → qwen-plus and
+// claude-opus → claude-sonnet are downgrades, qwen-plus → qwen-max is not.
+var higherTierRank = map[string]int{
+	"ultra": 4, "max": 4, "opus": 4,
+	"pro":  3,
+	"plus": 2, "sonnet": 2,
+	"thinking": 1, "reasoning": 1,
+}
+
+// modelTokens splits a canonical (prefix-stripped, lowercased) model id into
+// its family word and the remaining tokens. The family is the leading letters
+// of the first token (gpt, claude, gemini, qwen from qwen3, o from o3); an id
+// that starts with a digit — the #57 case, where an upstream answered
+// "3.1-flash-lite-preview-03-2026" for gemini-3.7-flash — has no family, and
+// its tokens are compared against the sent model's non-family tokens.
+func modelTokens(m string) (family string, tokens []string) {
+	parts := strings.Split(m, "-")
+	first := parts[0]
+	i := 0
+	for i < len(first) && first[i] >= 'a' && first[i] <= 'z' {
+		i++
+	}
+	if i == 0 {
+		return "", parts
+	}
+	family = first[:i]
+	tokens = parts[1:]
+	if rest := first[i:]; rest != "" {
+		tokens = append([]string{rest}, tokens...)
+	}
+	return family, tokens
+}
+
+// sameModelFamily reports whether two canonical ids can be compared tier-wise:
+// same family word, or a response that carries no family word at all.
+func sameModelFamily(sent, resp string) (sentTokens, respTokens []string, ok bool) {
+	sentFamily, sentTokens := modelTokens(sent)
+	respFamily, respTokens := modelTokens(resp)
+	if respFamily != "" && sentFamily != respFamily {
+		return nil, nil, false
+	}
+	return sentTokens, respTokens, true
 }
 
 // UpstreamModelIsTierDowngrade reports whether the upstream served a weaker
 // sibling of the model family we asked for. It is a LABEL ONLY: it never feeds
-// the mismatch verdict (see appendUpstreamResponseAudit, where it is gated on
-// mismatch already being true), so a false positive here can mislabel a log but
-// can never change what is flagged.
+// the mismatch verdict (appendUpstreamResponseAudit gates it on mismatch), so a
+// false positive here can mislabel a log but can never change what is flagged.
 //
-// The rule separates two independent things that often appear together:
+// Recognised shapes, all within one family (or against a response that lost
+// its family word):
+//   - a lower-tier word appears that we did not send — additive (gpt-5 →
+//     gpt-5-mini) and replacement (pro → flash, flash → flash-lite,
+//     sonnet → haiku, 4o → 4o-mini) alike. A date riding along
+//     (gpt-5-preview-2025-08-07) does not upgrade the grade.
+//   - a higher-tier word we sent is gone and nothing ranked as high replaced
+//     it (gpt-5-pro → gpt-5, opus → sonnet, max → plus, x-thinking → x);
+//     plus → max is an upgrade and is not labelled.
 //
-//   - a TIER token (flash / mini / lite / preview / …) answers "is this the
-//     same grade?" — its presence means the grade changed, whatever else the
-//     id carries. gpt-5 → gpt-5-preview-2025-08-07 is still a preview build;
-//     the date does not upgrade it. deepseek-v4 → deepseek-v4-flash-0731 is
-//     still a flash downgrade.
-//   - a VERSION token (a 4+ digit run) only answers "is this a frozen build?"
-//     It changes nothing on its own, and is only consulted when NO tier token
-//     is present, to say "this is a same-grade dated snapshot, not a swap".
-//
-// So a dated suffix never suppresses a genuine tier downgrade; it only keeps a
-// bare date difference out of the downgrade label.
-//
-// Known boundary: additive (extra qualifier on the response) and subtractive
-// (response lacking one of our higher-tier qualifiers, gpt-5-pro → gpt-5) are
-// both recognised. A pure version change within the same grade (4-7 → 4-5) is a
-// different model and stays a plain mismatch, which is correct — telling
-// "older version served" from "different model served" would need a
-// vendor-maintained ranking of every id.
+// A pure version change is reported separately (UpstreamModelIsVersionDowngrade).
 func UpstreamModelIsTierDowngrade(sentModel, responseModel string) bool {
-	sent := strings.ToLower(stripVendorPrefix(strings.TrimSpace(sentModel)))
-	resp := strings.ToLower(stripVendorPrefix(strings.TrimSpace(responseModel)))
+	sent, resp, _ := canonicalModelPair(sentModel, responseModel)
+	sent, resp = strings.ToLower(sent), strings.ToLower(resp)
 	if sent == "" || resp == "" || sent == resp {
 		return false
 	}
 	// An alias/snapshot/namespace relationship is a naming difference, not a
 	// tier swap — never label those as downgrades.
-	if ClassifyUpstreamModelMismatch(sent, resp) != VerdictMismatch {
+	if !VerdictIsMismatch(ClassifyUpstreamModelMismatch(sentModel, responseModel)) {
 		return false
 	}
-	// additive: resp extends sent with further qualifier tokens
-	if strings.HasPrefix(resp, sent+"-") {
-		tokens := strings.Split(resp[len(sent)+1:], "-")
-		for _, tok := range tokens {
-			if lowerTierTokens[tok] {
-				return true // a grade change, date or no date
-			}
+	sentTokens, respTokens, ok := sameModelFamily(sent, resp)
+	if !ok {
+		return false
+	}
+	sentSet := make(map[string]bool, len(sentTokens))
+	for _, tok := range sentTokens {
+		sentSet[tok] = true
+	}
+	respSet := make(map[string]bool, len(respTokens))
+	newRank := 0 // best higher-tier word the response introduced
+	for _, tok := range respTokens {
+		if lowerTierTokens[tok] && !sentSet[tok] {
+			return true
 		}
-		// No tier token: a purely dated extension is a same-grade snapshot,
-		// which is not a downgrade.
-		return false
+		respSet[tok] = true
+		if !sentSet[tok] {
+			newRank = max(newRank, higherTierRank[tok])
+		}
 	}
-	// subtractive: resp is sent with one of sent's higher-tier qualifiers gone
-	if strings.HasPrefix(sent, resp+"-") {
-		for _, tok := range strings.Split(sent[len(resp)+1:], "-") {
-			if higherTierTokens[tok] {
-				return true
-			}
+	for _, tok := range sentTokens {
+		if rank := higherTierRank[tok]; rank > 0 && !respSet[tok] && newRank < rank {
+			return true // a higher-tier word we sent is gone and nothing as high replaced it
 		}
 	}
 	return false
 }
 
-// latestFamilyMatch accepts a vendor "-latest" rolling alias resolving to a
-// concrete version of the SAME family (gemini-pro-latest → gemini-3.1-pro-preview):
-// every non-version token of the alias (minus "latest") must appear in the
-// response id. gemini-flash-latest → gemini-3.1-pro-preview still flags
-// ("flash" missing), so tier swaps are not masked.
-func latestFamilyMatch(sentModel, responseModel string) bool {
-	sent := strings.ToLower(sentModel)
-	if !strings.HasSuffix(sent, "-latest") {
-		return false
-	}
-	respTokens := map[string]bool{}
-	for _, t := range strings.Split(strings.ToLower(responseModel), "-") {
-		respTokens[t] = true
-	}
-	for _, t := range strings.Split(strings.TrimSuffix(sent, "-latest"), "-") {
-		if t == "" {
+// modelVersion extracts the numeric model version (major, minor) from the
+// non-family tokens: the first token shaped like 3, 3.7, v4 or 4o, plus a
+// following 1–2 digit token as the minor (claude-sonnet-4-5 → 4.5). Tokens of
+// three or more digits are builds or dates, never versions.
+func modelVersion(tokens []string) (major, minor int, ok bool) {
+	for i, tok := range tokens {
+		m := modelVersionTokenRe.FindStringSubmatch(tok)
+		if m == nil {
 			continue
 		}
-		if !respTokens[t] {
+		major, _ = strconv.Atoi(m[1])
+		if m[2] != "" {
+			minor, _ = strconv.Atoi(m[2])
+		} else if i+1 < len(tokens) && len(tokens[i+1]) <= 2 && isAllDigits(tokens[i+1]) {
+			minor, _ = strconv.Atoi(tokens[i+1])
+		}
+		return major, minor, true
+	}
+	return 0, 0, false
+}
+
+var modelVersionTokenRe = regexp.MustCompile(`^v?(\d{1,2})(?:\.(\d{1,2}))?[a-z]*$`)
+
+// UpstreamModelIsVersionDowngrade reports whether the response declares an
+// older numeric version of the same family than we sent (gemini-3.7-flash →
+// 3.1-flash-lite-…, claude-opus-4-7 → claude-opus-4-5). Recorded separately
+// from the tier label and, like it, only meaningful on a mismatch.
+func UpstreamModelIsVersionDowngrade(sentModel, responseModel string) bool {
+	if !VerdictIsMismatch(ClassifyUpstreamModelMismatch(sentModel, responseModel)) {
+		return false
+	}
+	sent, resp, _ := canonicalModelPair(sentModel, responseModel)
+	sentTokens, respTokens, ok := sameModelFamily(strings.ToLower(sent), strings.ToLower(resp))
+	if !ok {
+		return false
+	}
+	sMajor, sMinor, sOk := modelVersion(sentTokens)
+	rMajor, rMinor, rOk := modelVersion(respTokens)
+	if !sOk || !rOk {
+		return false
+	}
+	return rMajor < sMajor || (rMajor == sMajor && rMinor < sMinor)
+}
+
+// latestFamilyMatch accepts a vendor "-latest" rolling alias resolving to a
+// concrete version of the SAME family and tier (gemini-flash-latest →
+// gemini-3.7-flash): every non-version token of the alias (minus "latest")
+// must appear in the response id, and the response must not carry a
+// lower-tier word the alias does not name. gemini-flash-latest →
+// gemini-3.1-pro still flags ("flash" missing), and gemini-flash-latest →
+// gemini-3.7-flash-lite flags ("lite" was never asked for).
+func latestFamilyMatch(sentModel, responseModel string) bool {
+	sent := strings.ToLower(sentModel)
+	alias, ok := strings.CutSuffix(sent, "-latest")
+	if !ok {
+		return false
+	}
+	aliasTokens := map[string]bool{}
+	for t := range strings.SplitSeq(alias, "-") {
+		aliasTokens[t] = true
+	}
+	respTokens := map[string]bool{}
+	for t := range strings.SplitSeq(strings.ToLower(responseModel), "-") {
+		if lowerTierTokens[t] && !aliasTokens[t] {
+			return false
+		}
+		respTokens[t] = true
+	}
+	for t := range aliasTokens {
+		if t != "" && !respTokens[t] {
 			return false
 		}
 	}
@@ -590,8 +786,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	// verdict is the single decision point: the boolean below and the label the
 	// UI renders both derive from it, so they can never disagree.
 	verdict := ClassifyUpstreamModelMismatch(sentModel, respModel)
-	mismatch := verdict == VerdictMismatch
+	mismatch := VerdictIsMismatch(verdict)
 	tierDowngrade := mismatch && UpstreamModelIsTierDowngrade(sentModel, respModel)
+	versionDowngrade := mismatch && UpstreamModelIsVersionDowngrade(sentModel, respModel)
+	_, _, respPrefix := canonicalModelPair(sentModel, respModel)
 
 	channelId, channelType := 0, 0
 	if relayInfo.ChannelMeta != nil {
@@ -628,6 +826,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		// the highest-signal adulteration shape: upstream served a weaker
 		// sibling of the same family (…-flash / …-mini / …-preview)
 		ursp["tier_downgrade"] = true
+	}
+	if versionDowngrade {
+		ursp["version_downgrade"] = true // older numeric version of the family (3.7 → 3.1)
+	}
+	if respPrefix != "" {
+		ursp["prefix"] = respPrefix // vendor namespace stripped before comparing (deepseek/, global.anthropic.)
 	}
 	// Channel TYPE only. The numeric channel id is deliberately NOT duplicated
 	// here: the log record already carries it (log.channel_id / channel_name),

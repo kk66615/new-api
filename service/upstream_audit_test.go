@@ -5,6 +5,8 @@ import (
 
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestUpstreamModelsMatchForAudit(t *testing.T) {
@@ -21,13 +23,13 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		// OpenAI alias ↔ snapshot
 		{"gpt-5", "gpt-5-2025-08-07", true},
 		{"gpt-5.2", "gpt-5.2-2025-12-11", true},
-		{"gpt-5-2025-08-07", "gpt-5", true}, // reversed
+		{"gpt-5-2025-08-07", "gpt-5", false}, // reversed: pin not honoured (pinned_to_alias)
 		// DeepSeek date build
 		{"deepseek-v4-flash", "deepseek-v4-flash-0731", true},
 		// -latest alias (suffix form)
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", true},
 		// -latest rolling alias resolving to a concrete same-family version (2026-09-03 #57 real traffic)
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", true},
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", false}, // A2: preview tier was never asked for
 		{"gemini-flash-latest", "gemini-3.7-flash", true},
 		{"gemini-flash-latest", "gemini-3.1-pro-preview", false}, // tier swap must still flag
 		{"gemini-pro-latest", "gemini-2.5-flash-lite", false},    // tier swap must still flag
@@ -92,7 +94,7 @@ func TestClassifyUpstreamModelMismatch(t *testing.T) {
 		{"gpt-5", "gpt-5-2025-08-07", VerdictSnapshotDate},
 		{"deepseek-v4-flash", "deepseek-v4-flash-0731", VerdictSnapshotDate},
 		// rolling -latest alias
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", VerdictRollingAlias},
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", VerdictMismatch}, // A2: lower-tier "preview" not in the alias
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", VerdictRollingAlias},
 		// real mismatches
 		{"gpt-5.5", "gpt-5-6-luna", VerdictMismatch},
@@ -144,11 +146,11 @@ func TestUpstreamModelIsTierDowngrade(t *testing.T) {
 		{"claude-sonnet-5", "claude-sonnet-5-20260101", false, "dated snapshot, same grade"},
 		{"gpt-5", "gpt-5-pro-2025-08-07", false, "no lower-tier word; a naming diff"},
 		// unrelated or sibling models
-		{"deepseek-v4-pro", "deepseek-v4-flash", false, "sibling, not a prefix downgrade"},
+		{"deepseek-v4-pro", "deepseek-v4-flash", true, "replacement: pro replaced by flash"},
 		{"claude-opus-4-7", "deepseek-v4-pro", false, "unrelated model"},
 		{"grok-4.5", "grok-4.5-build", false, "runtime alias, not a tier"},
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", false, "rolling alias"},
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", false, "alias resolution, same tier"},
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", true, "-latest resolved to a preview tier"},
 		// version-only change within the same tier: a different model, not a tier swap
 		{"claude-opus-4-7", "claude-opus-4-5", false, "version change, tier unknown"},
 		// degenerate input
@@ -181,11 +183,124 @@ func TestTierDowngradeNeverAffectsVerdict(t *testing.T) {
 			if !tier {
 				continue // only labelled pairs are under test
 			}
-			if verdict := ClassifyUpstreamModelMismatch(sent, resp); verdict != VerdictMismatch {
+			if verdict := ClassifyUpstreamModelMismatch(sent, resp); !VerdictIsMismatch(verdict) {
 				t.Fatalf("tier downgrade %q -> %q has verdict %q; the label must never stand alone",
 					sent, resp, verdict)
 			}
 		}
+	}
+}
+
+// TestVerdictHardening pins the stricter verdict rules (spec A1–A5), including
+// every reviewer counter-example: a pinned build is only accepted in the
+// alias→build direction, "dates" are range-checked, -latest cannot hide a
+// lower tier, and Bedrock build suffixes are compared when both sides carry one.
+func TestVerdictHardening(t *testing.T) {
+	cases := []struct {
+		name, sent, resp, want string
+	}{
+		// A1 strict date forms, alias → dated build
+		{"openai YYYY-MM-DD", "gpt-5", "gpt-5-2025-08-07", VerdictSnapshotDate},
+		{"anthropic YYYYMMDD", "claude-haiku-4-5", "claude-haiku-4-5-20251001", VerdictSnapshotDate},
+		{"deepseek MMDD", "deepseek-v4-flash", "deepseek-v4-flash-0731", VerdictSnapshotDate},
+		{"volcengine YYMMDD", "deepseek-v3-1", "deepseek-v3-1-250821", VerdictSnapshotDate},
+		{"google MM-DD", "gemini-2.5-flash-preview", "gemini-2.5-flash-preview-05-20", VerdictSnapshotDate},
+		// A1 counter-examples: numbers that are not dates
+		{"extra version segment", "deepseek-v3", "deepseek-v3-1-250821", VerdictMismatch},
+		{"day 34", "gpt-5", "gpt-5-1234", VerdictMismatch},
+		{"month 13", "gpt-5", "gpt-5-1301", VerdictMismatch},
+		{"month 00", "gpt-5", "gpt-5-0010", VerdictMismatch},
+		{"iso month 13", "gpt-5", "gpt-5-2025-13-01", VerdictMismatch},
+		{"compact day 40", "gpt-5", "gpt-5-20251340", VerdictMismatch},
+		{"nine digits", "gpt-5", "gpt-5-123456789", VerdictMismatch},
+		// A1 direction: pinned build sent, bare alias returned
+		{"pinned openai", "gpt-5-2025-08-07", "gpt-5", VerdictPinnedToAlias},
+		{"pinned anthropic", "claude-haiku-4-5-20251001", "claude-haiku-4-5", VerdictPinnedToAlias},
+		// A2 -latest must not hide a lower tier
+		{"latest same tier", "gemini-flash-latest", "gemini-3.7-flash", VerdictRollingAlias},
+		{"latest pro resolves pro", "gemini-pro-latest", "gemini-3.1-pro", VerdictRollingAlias},
+		{"latest flash to flash-lite", "gemini-flash-latest", "gemini-3.7-flash-lite", VerdictMismatch},
+		{"latest pro to preview", "gemini-pro-latest", "gemini-3.1-pro-preview", VerdictMismatch},
+		{"latest suffix form", "claude-sonnet-4-6", "claude-sonnet-4-6-latest", VerdictRollingAlias},
+		// A3 Bedrock build suffix
+		{"both builds differ", "anthropic.claude-haiku-4-5-20251001-v1:0", "anthropic.claude-haiku-4-5-20251001-v2:0", VerdictMismatch},
+		{"both builds equal", "anthropic.claude-haiku-4-5-20251001-v1:0", "us.anthropic.claude-haiku-4-5-20251001-v1:0", VerdictVendorPrefix},
+		{"wire id vs body model", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929", VerdictVendorPrefix},
+		{"bare sent, bedrock build back", "claude-sonnet-4-5", "global.anthropic.claude-sonnet-4-5-v1:0", VerdictVendorPrefix},
+		{"-vN kept on non-bedrock ids", "deepseek-v3", "deepseek-v3", VerdictExact},
+		{"non-bedrock -vN differs", "deepseek-v3", "deepseek-v2", VerdictMismatch},
+		// A5 Gemini -NNN build, alias → build only, gemini family only
+		{"gemini build", "gemini-2.0-flash", "gemini-2.0-flash-001", VerdictVersionSuffix},
+		{"gemini build reversed", "gemini-2.0-flash-001", "gemini-2.0-flash", VerdictPinnedToAlias},
+		{"non-gemini -NNN", "gpt-4o", "gpt-4o-001", VerdictMismatch},
+		{"gemini two digits", "gemini-2.0-flash", "gemini-2.0-flash-01", VerdictMismatch},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ClassifyUpstreamModelMismatch(c.sent, c.resp)
+			assert.Equal(t, c.want, got)
+			assert.Equal(t, VerdictIsMismatch(c.want), !UpstreamModelsMatchForAudit(c.sent, c.resp))
+		})
+	}
+}
+
+// TestCanonicalModelPairRecordsPrefix pins spec A4: the prefix is stripped for
+// the comparison but reported so the tracker and the log can see it.
+func TestCanonicalModelPairRecordsPrefix(t *testing.T) {
+	cases := []struct{ sent, resp, wantSent, wantResp, wantPrefix string }{
+		{"gpt-5", "openai/gpt-5", "gpt-5", "gpt-5", "openai"},
+		{"claude-sonnet-5", "global.anthropic.claude-sonnet-5", "claude-sonnet-5", "claude-sonnet-5", "global.anthropic"},
+		{"deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v4-flash", ""},
+		{"x", "openrouter/deepseek/deepseek-v4", "x", "deepseek-v4", "openrouter/deepseek"},
+	}
+	for _, c := range cases {
+		sent, resp, prefix := canonicalModelPair(c.sent, c.resp)
+		assert.Equal(t, c.wantSent, sent, c.resp)
+		assert.Equal(t, c.wantResp, resp, c.resp)
+		assert.Equal(t, c.wantPrefix, prefix, c.resp)
+	}
+}
+
+// TestTierAndVersionDowngradeReplacementForms pins spec A6: replacement forms,
+// responses that lost the family word (#57), "turbo" is not a downgrade, and
+// the version flag is independent of the tier flag.
+func TestTierAndVersionDowngradeReplacementForms(t *testing.T) {
+	cases := []struct {
+		sent, resp    string
+		tier, version bool
+	}{
+		// the #57 production case: no gemini- prefix, lower tier AND older version
+		{"gemini-3.7-flash", "3.1-flash-lite-preview-03-2026", true, true},
+		{"gemini-2.5-pro", "gemini-2.5-flash", true, false},
+		{"gemini-2.5-pro", "gemini-2.5-flash-lite", true, false},
+		{"gemini-2.5-flash", "gemini-2.5-flash-lite", true, false},
+		{"claude-opus-4-7", "claude-sonnet-4-7", true, false},
+		{"claude-opus-4-7", "claude-haiku-4-5", true, true},
+		{"claude-sonnet-4-6", "claude-haiku-4-5", true, true},
+		{"gpt-4o", "gpt-4o-mini", true, false},
+		{"qwen-max", "qwen-plus", true, false},
+		{"claude-opus-4-7", "claude-opus-4-5-20251101", false, true},
+		{"deepseek-v4", "deepseek-v3", false, true},
+		{"gpt-5", "gpt-4o", false, true},
+		// negatives
+		{"gpt-4", "gpt-4-turbo", false, false},
+		{"qwen-plus", "qwen-max", false, false},
+		{"claude-sonnet-4-6", "claude-opus-4-7", false, false},
+		{"claude-haiku-4-5", "claude-sonnet-4-6", false, false},
+		{"gemini-2.5-flash", "gemini-2.5-pro", false, false},
+		{"claude-opus-4-5", "claude-opus-4-7", false, false},
+		{"gpt-5.5", "gpt-5-6-luna", false, false},
+		{"claude-3-5-sonnet", "claude-sonnet-4-5", false, false},
+		{"claude-opus-4-7", "gpt-4o-mini", false, false}, // different family: not a sibling
+		{"claude-opus-4-7", "deepseek-v3", false, false},
+		{"gemini-3.7-flash", "3.7-flash", false, false},
+		// not a mismatch at all: flags never apply
+		{"gpt-5", "gpt-5-2025-08-07", false, false},
+		{"gemini-2.0-flash", "gemini-2.0-flash-001", false, false},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.tier, UpstreamModelIsTierDowngrade(c.sent, c.resp), "tier %s -> %s", c.sent, c.resp)
+		assert.Equal(t, c.version, UpstreamModelIsVersionDowngrade(c.sent, c.resp), "version %s -> %s", c.sent, c.resp)
 	}
 }
 
