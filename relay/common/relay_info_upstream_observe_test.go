@@ -231,3 +231,14 @@ func TestObserveUpstreamOutputNormalisesWhitespace(t *testing.T) {
 	c.ObserveUpstreamOutput("   ")
 	assert.Empty(t, c.UpstreamAudit.OutputSHA256)
 }
+
+// The prompt hash ignores key order and whitespace at every depth, covers the
+// system/tools fields, and is empty for a body without prompt fields.
+func TestCanonicalPromptSHA256(t *testing.T) {
+	a := []byte(`{"model":"x","system":"s","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"f","input_schema":{"b":1,"a":2}}]}`)
+	b := []byte(`{ "tools":[{"input_schema":{"a":2,"b":1},"name":"f"}], "messages":[ {"content":[{"text":"hi","type":"text"}],"role":"user"} ], "system":"s","model":"y"}`)
+	c := []byte(`{"model":"x","system":"other","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"f","input_schema":{"b":1,"a":2}}]}`)
+	assert.Equal(t, CanonicalPromptSHA256(a), CanonicalPromptSHA256(b))
+	assert.NotEqual(t, CanonicalPromptSHA256(a), CanonicalPromptSHA256(c), "the system prompt is part of the hash")
+	assert.Empty(t, CanonicalPromptSHA256([]byte(`{"model":"x"}`)))
+}

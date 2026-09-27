@@ -196,31 +196,33 @@ var promptHashFields = []string{
 	"tools",
 }
 
+// canonicalJSONModifier re-emits a JSON value with object keys sorted and all
+// insignificant whitespace removed, without decoding it into Go values.
+const canonicalJSONModifier = `@pretty:{"sortKeys":true}|@ugly`
+
 // CanonicalPromptSHA256 hashes the prompt-bearing fields of a request body in
-// canonical form (re-encoded with sorted object keys, so key order and
-// whitespace do not change the hash). Returns "" when the body carries none.
+// canonical form (object keys sorted, whitespace removed), so key order and
+// formatting do not change the hash. The canonical form is produced on the
+// raw bytes rather than by decoding into maps, keeping large prompts cheap.
+// Returns "" when the body carries none of the fields.
 func CanonicalPromptSHA256(body []byte) string {
-	canonical := make(map[string]any)
+	h := sha256.New()
+	found := false
 	for _, field := range promptHashFields {
-		v := gjson.GetBytes(body, field)
+		v := gjson.GetBytes(body, field+"|"+canonicalJSONModifier)
 		if !v.Exists() {
 			continue
 		}
-		var parsed any
-		if err := common.UnmarshalJsonStr(v.Raw, &parsed); err != nil {
-			parsed = v.Raw
-		}
-		canonical[field] = parsed
+		found = true
+		h.Write([]byte(field))
+		h.Write([]byte{':'})
+		h.Write([]byte(v.Raw))
+		h.Write([]byte{'\n'})
 	}
-	if len(canonical) == 0 {
+	if !found {
 		return ""
 	}
-	encoded, err := common.Marshal(canonical)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ResetUpstreamObservation clears everything observed from the previous
