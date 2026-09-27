@@ -119,12 +119,12 @@ describe('upstream response audit details', () => {
     expect(screen.getByText('1.25×')).toBeInTheDocument()
   })
 
-  test('labels a pinned build answered by the bare alias', () => {
+  test('labels a pinned build answered by the bare alias without a mismatch warning', () => {
     renderDetails(
       {
-        sent: 'gpt-5-2025-08-07',
-        model: 'gpt-5',
-        mismatch: true,
+        sent: 'deepseek-v4-pro-0813',
+        model: 'deepseek-v4-pro',
+        mismatch: false,
         kind: 'pinned_to_alias',
       },
       true
@@ -135,6 +135,11 @@ describe('upstream response audit details', () => {
         'Pinned build answered by the bare alias (pin not honoured)'
       )
     ).toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        'Upstream declared a different model than the one sent'
+      )
+    ).toBeNull()
   })
 
   test('shows a version downgrade next to the mismatch verdict', () => {

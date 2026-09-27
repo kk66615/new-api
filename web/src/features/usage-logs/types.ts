@@ -121,8 +121,9 @@ export interface UpstreamResponseAudit {
   sf?: string
   created?: number
   mismatch?: boolean
-  // Why the pair matched or mismatched. 'mismatch' and 'pinned_to_alias'
-  // (a pinned build answered by the bare alias) are anomalies; the other
+  // Why the pair matched or mismatched. Only 'mismatch' is an anomaly.
+  // 'pinned_to_alias' (a pinned build answered by the bare alias, e.g.
+  // official DeepSeek) is recorded and shown but not highlighted; the other
   // labels describe a benign canonical difference (vendor prefix, dated
   // snapshot, gemini -NNN build, rolling -latest alias, runtime alias, gemini
   // -preview public name reported bare) or an upstream that declared no model.

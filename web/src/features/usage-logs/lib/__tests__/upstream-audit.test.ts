@@ -33,6 +33,12 @@ describe('isUpstreamAuditAnomaly', () => {
     expect(isUpstreamAuditAnomaly(ursp)).toBe(true)
   })
 
+  test('does not highlight a pinned build answered by the bare alias', () => {
+    expect(
+      isUpstreamAuditAnomaly({ mismatch: false, kind: 'pinned_to_alias' })
+    ).toBe(false)
+  })
+
   test('leaves a clean row with only weak signals unhighlighted', () => {
     expect(
       isUpstreamAuditAnomaly({
