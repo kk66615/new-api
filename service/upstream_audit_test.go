@@ -492,16 +492,12 @@ func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
 
 func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
 	ch := isolatedAuditKey(t, 987653, "claude")
-	if _, f := trackBackendFlip(ch, "aws"); f {
-		t.Fatal("seed must not flip")
-	}
+	assert.Empty(t, trackBackendFlip(ch, "aws", BackendByIdShape).flip, "seed must not flip")
 	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
 		t.Fatal("source seed must not flip")
 	}
-	from, f := trackBackendFlip(ch, "claude_relay")
-	if !f || from != "aws" {
-		t.Fatalf("backend aws -> claude_relay must flip, got from=%q flipped=%v", from, f)
-	}
+	// msg_bdrk_ → msg_: the id shape is on every answer, so its change is real
+	assert.Equal(t, "aws->claude_relay", trackBackendFlip(ch, "claude_relay", BackendByFallback).flip)
 	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
 		t.Fatal("source unchanged must not flip when only backend moved")
 	}
@@ -944,11 +940,11 @@ func TestAuditTrackersKeyedByFamilyAndKey(t *testing.T) {
 	assert.Equal(t, "azure->newapi_relay", ursp["src_flip"])
 	assert.Equal(t, "provider_switch", ev.Kind)
 
-	// same key, same shape: a vendor prefix appearing or disappearing is the
-	// same backend; a different vendor between two prefixed answers is not
+	// a fresh key, same shape: a vendor prefix appearing or disappearing is
+	// the same backend; a different vendor between two prefixed answers is not
 	run := func(req, declared string) map[string]any {
 		ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "gpt-5", models: []string{declared},
-			id: "chatcmpl-" + req + "-000", headers: relay, multiKey: true, keyIndex: 1})
+			id: "chatcmpl-" + req + "-000", headers: relay, multiKey: true, keyIndex: 3})
 		return ursp
 	}
 	ursp = run("k-4", "vendorx/gpt-5")
@@ -976,8 +972,7 @@ func TestBackendSignatureComparesVendorSegmentOnly(t *testing.T) {
 	}
 	key := isolatedAuditKey(t, 987666, "claude")
 	for _, prefix := range []string{"us.anthropic", "", "global.anthropic", "apac.anthropic"} {
-		_, flipped := trackBackendFlip(key, backendSignature("aws", prefix))
-		assert.False(t, flipped, prefix)
+		assert.Empty(t, trackBackendFlip(key, backendSignature("aws", prefix), BackendByModelName).flip, prefix)
 	}
 }
 
@@ -1269,9 +1264,9 @@ func TestAuditNoteFormats(t *testing.T) {
 	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-2", models: []string{"gpt-5"}, id: "chatcmpl-note00001",
 		headers: relay, created: now - 30*86400, output: "fresh"})
 	assert.Equal(t, "provider_switch", ev.Kind)
-	// the tracker follows the decided backend (azure from headers, then the
-	// neutral fallback), so the backend part of the flip is noted too
-	assert.Equal(t, "azure -> newapi_relay; backend: azure -> gpt_relay", ev.Note)
+	// one row: the source flip; losing the Azure headers once is not a
+	// backend switch (hysteresis), so the note is the source flip alone
+	assert.Equal(t, "azure -> newapi_relay", ev.Note)
 
 	models := make([]string, 0, 8)
 	for i := range 8 {
@@ -1537,19 +1532,55 @@ func TestUpstreamBodyMarkersResetPerAttempt(t *testing.T) {
 	assert.Zero(t, info.UpstreamAudit.BodyMarkers)
 }
 
-// The tracker follows the decided backend: a healthy Azure channel stays
-// azure across requests (markers from every frame), and a channel whose Azure
-// fingerprints disappear is a backend switch.
+// The tracker follows the decided backend with hysteresis (review M3): a
+// healthy Azure channel whose answers sometimes lack the annotations records
+// nothing; 20 consecutive answers without evidence record ONE "evidence lost"
+// row, and the evidence coming back one "restored" row.
 func TestAuditBackendTrackerFollowsDecidedBackend(t *testing.T) {
 	const ch = 987687
 	isolatedAuditKey(t, ch, "gpt")
-	for range 3 {
-		ursp, _ := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders, azureChatStream, "")
-		assert.NotContains(t, ursp, "backend_flip")
+	plain := []string{`{"id":"chatcmpl-plain0002","object":"chat.completion","model":"gpt-4o-2024-11-20","choices":[{"message":{"content":"Hi"}}]}`}
+	var rows []*model.UpstreamEvidence
+	run := func(frames []string) map[string]any {
+		ursp, ev := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders, frames, "")
+		if ev != nil && ev.Kind == "provider_switch" {
+			rows = append(rows, ev)
+		}
+		return ursp
 	}
-	ursp, ev := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders,
-		[]string{`{"id":"chatcmpl-plain0002","object":"chat.completion","model":"gpt-4o-2024-11-20","choices":[{"message":{"content":"Hi"}}]}`}, "")
-	assert.Equal(t, "azure->gpt_relay", ursp["backend_flip"])
-	assert.Equal(t, "provider_switch", ev.Kind)
-	assert.Equal(t, "backend: azure -> gpt_relay", ev.Note)
+	for range 4 {
+		run(azureChatStream)
+		run(plain)
+	}
+	assert.Empty(t, rows, "alternating healthy / missing annotations is not a switch")
+	run(azureChatStream) // a healthy answer resets the count
+
+	for i := range backendEvidenceLostAfter {
+		ursp := run(plain)
+		if i < backendEvidenceLostAfter-1 {
+			assert.NotContains(t, ursp, "backend_flip")
+		} else {
+			assert.Equal(t, "azure->(none)", ursp["backend_flip"])
+		}
+	}
+	require.Len(t, rows, 1)
+	assert.Equal(t, "backend evidence lost: azure -> (none) after 20", rows[0].Note)
+	run(plain)
+	assert.Len(t, rows, 1, "the lost state does not repeat")
+
+	ursp := run(azureChatStream)
+	assert.Equal(t, "(none)->azure", ursp["backend_flip"])
+	require.Len(t, rows, 2)
+	assert.Equal(t, "backend evidence restored: (none) -> azure", rows[1].Note)
+}
+
+// A change between two POSITIVE backends is recorded immediately.
+func TestTrackBackendFlipPositiveChangeIsImmediate(t *testing.T) {
+	key := isolatedAuditKey(t, 987688, "gpt")
+	assert.Empty(t, trackBackendFlip(key, "azure", BackendByBody).flip)
+	assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback).flip, "one missing annotation is not a switch")
+	ev := trackBackendFlip(key, "aws", BackendByBody)
+	assert.Equal(t, "azure->aws", ev.flip)
+	assert.Equal(t, "backend: azure -> aws", ev.note)
+	assert.Equal(t, "aws->deepseek", trackBackendFlip(key, "deepseek", BackendByModelName).flip)
 }

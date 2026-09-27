@@ -763,7 +763,7 @@ type channelSrcState struct {
 }
 
 var srcTracker sync.Map     // flipTrackerKey -> *channelSrcState
-var backendTracker sync.Map // flipTrackerKey -> *channelSrcState (decided backend + vendor prefix segment)
+var backendTracker sync.Map // flipTrackerKey -> *backendTrackState (decided backend + vendor prefix segment)
 
 // auditTrackerKey derives the tracker key for one exchange.
 func auditTrackerKey(relayInfo *relaycommon.RelayInfo, sentModel string) flipTrackerKey {
@@ -799,29 +799,85 @@ func srcFamily(s string) string {
 	return s
 }
 
+// backendEvidenceLostAfter is how many consecutive responses without any
+// vendor evidence it takes before a backend identified by headers or body
+// fingerprints is reported as lost. Single misses are normal (an Azure
+// deployment with partial annotations, a relay stripping headers on some
+// paths) and must not create a provider_switch row each way.
+const backendEvidenceLostAfter = 20
+
+// backendTrackState is the per-key state of the backend tracker.
+type backendTrackState struct {
+	mu      sync.Mutex
+	last    string // last backend signature the key settled on
+	lastBy  string // evidence behind last (BackendBy*)
+	missing int    // consecutive answers without vendor evidence since then
+	lost    bool   // the evidence-lost event was recorded
+}
+
+// backendTrackEvent describes a recorded backend change: flip is the
+// "from->to" value for ursp.backend_flip, note the evidence-note text.
+type backendTrackEvent struct {
+	flip string
+	note string
+}
+
 // trackBackendFlip watches the decided backend behind a channel (see
 // decideUpstreamBackend) independently of the hop label, so a relay that
-// silently moves from Bedrock to a Claude relay, or whose Azure body
-// fingerprints disappear, is caught even though its own headers never change. The signature
-// includes the vendor prefix the response carried (gpt_relay/deepseek), so a
-// relay that starts answering through a different namespace is caught too.
+// silently moves from Bedrock to a Claude relay, or to another vendor, is
+// caught even though its own headers never change. The signature includes
+// the vendor prefix the response carried (gpt_relay/deepseek).
 //
-// Only a change of wire shape, or of vendor between two responses that both
-// carry one, is a flip: a relay alternating gpt-4o / openai/gpt-4o, or Bedrock
-// region prefixes (us. / global.), is the same backend. A response without a
-// vendor keeps the last vendor seen, so v1 → none → v2 is still caught.
-func trackBackendFlip(key flipTrackerKey, backend string) (from string, flipped bool) {
+//   - Two positive decisions that disagree are a flip, immediately. Only the
+//     wire shape, or the vendor between two responses that both carry one,
+//     counts: gpt-4o / openai/gpt-4o or Bedrock region prefixes are the same.
+//   - A decision without vendor evidence (fallback) after a backend known from
+//     its id / model shape is compared like any other: ids and model names are
+//     on every answer, so their change is real (msg_bdrk_ → msg_). A vendor
+//     prefix segment counts as (weak) evidence.
+//   - After a backend known from headers or body fingerprints, a fallback is
+//     "no evidence this time", not a switch: the last positive backend is
+//     kept. Only backendEvidenceLostAfter consecutive answers without
+//     evidence record one "evidence lost" event, and the first positive
+//     answer after that one "evidence restored" event.
+func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent {
 	if key.channelId == 0 || backend == "" || backend == "unknown" {
-		return "", false
+		return backendTrackEvent{}
 	}
-	v, _ := backendTracker.LoadOrStore(key, &channelSrcState{})
-	st := v.(*channelSrcState)
+	v, _ := backendTracker.LoadOrStore(key, &backendTrackState{})
+	st := v.(*backendTrackState)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	prev := st.last
+	// a vendor namespace prefix (gpt_relay/deepseek) is weak positive
+	// evidence even when the decision itself fell back to the format
+	_, prefixVendor, _ := strings.Cut(backend, "/")
+	positive := by != BackendByFallback || prefixVendor != ""
 	if prev == "" {
-		st.last = backend
-		return "", false
+		if positive {
+			st.last, st.lastBy = backend, by
+		}
+		return backendTrackEvent{}
+	}
+	if !positive && (st.lastBy == BackendByHeader || st.lastBy == BackendByBody || st.lastBy == BackendByChannelType) {
+		if st.lost {
+			return backendTrackEvent{}
+		}
+		st.missing++
+		if st.missing < backendEvidenceLostAfter {
+			return backendTrackEvent{}
+		}
+		st.lost = true
+		return backendTrackEvent{
+			flip: prev + "->(none)",
+			note: "backend evidence lost: " + prev + " -> (none) after " + strconv.Itoa(st.missing),
+		}
+	}
+	st.missing = 0
+	if st.lost && positive {
+		st.lost = false
+		st.last, st.lastBy = backend, by
+		return backendTrackEvent{flip: "(none)->" + backend, note: "backend evidence restored: (none) -> " + backend}
 	}
 	prevShape, prevVendor, _ := strings.Cut(prev, "/")
 	shape, vendor, _ := strings.Cut(backend, "/")
@@ -829,10 +885,11 @@ func trackBackendFlip(key flipTrackerKey, backend string) (from string, flipped 
 		if vendor != "" || prevVendor == "" {
 			st.last = backend
 		}
-		return "", false
+		st.lastBy = by
+		return backendTrackEvent{}
 	}
-	st.last = backend
-	return prev, true
+	st.last, st.lastBy = backend, by
+	return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend}
 }
 
 // trackSourceFlip watches the hop label (src) of a tracker key; a change
@@ -1160,33 +1217,35 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 
 	key := auditTrackerKey(relayInfo, sentModel)
-	var from, bfrom string
-	var flipped, bflipped bool
-	// the tracker follows the decided backend: a channel whose Azure body
-	// fingerprints disappear (azure -> gpt_relay) is a meaningful switch
+	var from string
+	var flipped bool
+	var backendEvent backendTrackEvent
+	// the tracker follows the decided backend, with hysteresis for answers
+	// that carry no vendor evidence (see trackBackendFlip)
 	backendSig := backendSignature(backend, respPrefix)
 	if feedTrackers {
 		from, flipped = trackSourceFlip(key, src)
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
 		}
-		bfrom, bflipped = trackBackendFlip(key, backendSig)
-		if bflipped {
-			// both sides are decided backends (with the vendor prefix segment)
-			ursp["backend_flip"] = bfrom + "->" + backendSig
+		backendEvent = trackBackendFlip(key, backendSig, decision.by)
+		if backendEvent.flip != "" {
+			ursp["backend_flip"] = backendEvent.flip
 		}
 	}
+	// one evidence row per exchange: a source flip and a backend event on the
+	// same answer share it, joined in one note
 	flipNote := ""
 	if flipped {
 		flipNote = from + " -> " + src
 	}
-	if bflipped {
+	if backendEvent.note != "" {
 		if flipNote != "" {
 			flipNote += "; "
 		}
-		flipNote += "backend: " + bfrom + " -> " + backendSig
+		flipNote += backendEvent.note
 	}
-	flipped = flipped || bflipped
+	flipped = flipped || backendEvent.flip != ""
 
 	requestId := ""
 	if ctx != nil {
