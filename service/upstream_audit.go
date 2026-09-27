@@ -522,11 +522,19 @@ func hasHeaderPrefix(h map[string]string, prefixes ...string) bool {
 // channel with prompt-injection evidence (see injectionDetected) and only
 // upgrades an Anthropic-shaped response from claude_relay to ccmax.
 func InferUpstreamSource(channelType int, headersJSON, respId, respModel string, ccmaxHint bool) string {
-	h := headerKeysLower(headersJSON)
-	id := strings.TrimSpace(respId)
-	modelLower := strings.ToLower(respModel)
+	if src := channelTypeBackend(channelType); src != "" {
+		return src
+	}
+	if src := upstreamHeaderSource(channelType, headerKeysLower(headersJSON)); src != "" {
+		return src
+	}
+	src, _ := inferBackendShape(channelType, strings.TrimSpace(respId), respModel, ccmaxHint)
+	return src
+}
 
-	// 1. channel protocol type — the wire protocol itself pins the backend family
+// channelTypeBackend is the backend pinned by the channel protocol itself
+// (AWS SigV4, Vertex, Azure deployments) — the strongest evidence there is.
+func channelTypeBackend(channelType int) string {
 	switch channelType {
 	case constant.ChannelTypeAws:
 		return "aws"
@@ -535,137 +543,198 @@ func InferUpstreamSource(channelType int, headersJSON, respId, respModel string,
 	case constant.ChannelTypeAzure:
 		return "azure"
 	}
-
-	// 2. official vendor headers (strongest response-side evidence)
-	if h != nil {
-		if _, ok := h["x-amzn-requestid"]; ok {
-			return "aws"
-		}
-		if hasHeaderPrefix(h, "x-amz-bedrock") {
-			return "aws"
-		}
-		if _, ok := h["apim-request-id"]; ok {
-			return "azure"
-		}
-		if hasHeaderPrefix(h, "x-ms-region", "x-ms-deployment") {
-			return "azure"
-		}
-		// Claude Max/Pro subscription relays pass through unified rate-limit headers
-		if hasHeaderPrefix(h, "anthropic-ratelimit-unified") {
-			return "ccmax"
-		}
-		if _, ok := h["anthropic-organization-id"]; ok {
-			return "anthropic"
-		}
-		if hasHeaderPrefix(h, "anthropic-ratelimit-") {
-			return "anthropic"
-		}
-		if _, ok := h["openai-organization"]; ok {
-			return "openai"
-		}
-		if _, ok := h["openai-processing-ms"]; ok {
-			return "openai"
-		}
-		if _, ok := h["openai-version"]; ok {
-			return "openai"
-		}
-		if hasHeaderPrefix(h, "msh-") { // Moonshot (Kimi) request headers
-			return "kimi"
-		}
-		if hasHeaderPrefix(h, "x-goog-", "x-google-") {
-			if channelType == constant.ChannelTypeGemini {
-				return "aistudio"
-			}
-			return "google"
-		}
-		// relay software fingerprints
-		if _, ok := h["x-new-api-version"]; ok {
-			return "newapi_relay"
-		}
-		if _, ok := h["x-oneapi-request-id"]; ok {
-			return "newapi_relay"
-		}
-		if hasHeaderPrefix(h, "x-or-", "x-openrouter") {
-			return "openrouter"
-		}
-		if hasHeaderPrefix(h, "cf-aig-") {
-			return "cf_gateway"
-		}
-	}
-
-	// 3. response id shape + model family (weak)
-	return inferBackendShape(channelType, id, modelLower, ccmaxHint)
+	return ""
 }
 
-// officialSources are labels InferUpstreamSource only assigns from the channel
-// protocol or from vendor response headers — evidence about who actually
-// served the response, not about the wire format.
+// upstreamHeaderSource reads the hop from response headers: official vendor
+// headers first (strongest response-side evidence), then relay software
+// fingerprints. "" when the headers say nothing.
+func upstreamHeaderSource(channelType int, h map[string]string) string {
+	if h == nil {
+		return ""
+	}
+	if _, ok := h["x-amzn-requestid"]; ok {
+		return "aws"
+	}
+	if hasHeaderPrefix(h, "x-amz-bedrock") {
+		return "aws"
+	}
+	if _, ok := h["apim-request-id"]; ok {
+		return "azure"
+	}
+	if hasHeaderPrefix(h, "x-ms-region", "x-ms-deployment") {
+		return "azure"
+	}
+	// Claude Max/Pro subscription relays pass through unified rate-limit headers
+	if hasHeaderPrefix(h, "anthropic-ratelimit-unified") {
+		return "ccmax"
+	}
+	if _, ok := h["anthropic-organization-id"]; ok {
+		return "anthropic"
+	}
+	if hasHeaderPrefix(h, "anthropic-ratelimit-") {
+		return "anthropic"
+	}
+	if _, ok := h["openai-organization"]; ok {
+		return "openai"
+	}
+	if _, ok := h["openai-processing-ms"]; ok {
+		return "openai"
+	}
+	if _, ok := h["openai-version"]; ok {
+		return "openai"
+	}
+	if hasHeaderPrefix(h, "msh-") { // Moonshot (Kimi) request headers
+		return "kimi"
+	}
+	if hasHeaderPrefix(h, "x-goog-", "x-google-") {
+		if channelType == constant.ChannelTypeGemini {
+			return "aistudio"
+		}
+		return "google"
+	}
+	// relay software fingerprints
+	if _, ok := h["x-new-api-version"]; ok {
+		return "newapi_relay"
+	}
+	if _, ok := h["x-oneapi-request-id"]; ok {
+		return "newapi_relay"
+	}
+	if hasHeaderPrefix(h, "x-or-", "x-openrouter") {
+		return "openrouter"
+	}
+	if hasHeaderPrefix(h, "cf-aig-") {
+		return "cf_gateway"
+	}
+	return ""
+}
+
+// officialSources are the header-derived sources that name the vendor that
+// actually served the response (not a relay in between).
 var officialSources = map[string]bool{
 	"aws": true, "vertex": true, "azure": true, "google": true, "aistudio": true,
 	"anthropic": true, "openai": true, "kimi": true,
 }
 
-// neutralShapes are the inferBackendShape fallbacks that carry no positive
-// evidence of a specific backend: an OpenAI- or Anthropic-shaped body could
-// have come from the vendor, from Azure, or from any relay.
-var neutralShapes = map[string]bool{"gpt_relay": true, "claude_relay": true, "unknown": true}
+// Backend provenance (ursp.backend_by) and confidence (ursp.backend_conf).
+const (
+	BackendByChannelType = "channel_type"
+	BackendByHeader      = "header"
+	BackendByBody        = "body"
+	BackendByIdShape     = "id_shape"
+	BackendByModelName   = "model_name"
+	BackendByFallback    = "fallback"
 
-// reconcileBackendWithSource returns the backend label to display. Positive
-// wire-shape evidence (msg_bdrk_, gen-, deepseek/glm/kimi naming, vertex ids)
-// always wins. When the shape is neutral but the source was established from
-// official vendor headers (e.g. Azure's apim-request-id / x-ms-region), the
-// backend follows the source instead of falling back to "gpt_relay", which
-// reads as an accusation the body never supported (user question 2026-09-20:
-// "src is azure, why is the backend gpt_relay?"). The flip tracker keeps
-// watching the raw shape so this never creates or hides a shape switch.
-func reconcileBackendWithSource(backendShape, src string) string {
-	if neutralShapes[backendShape] && officialSources[src] {
-		return src
+	BackendConfStrong = "strong"
+	BackendConfMedium = "medium"
+	BackendConfWeak   = "weak"
+	BackendConfNone   = "none"
+)
+
+// backendDecision is the backend behind the hop with where it came from.
+// conflict lists every distinct vendor claim ("vendor:by") when the
+// available evidence disagrees; the highest-priority claim wins.
+type backendDecision struct {
+	backend  string
+	by       string
+	conf     string
+	conflict []string
+}
+
+// bodyBackends lists the backends named by vendor-specific body fields, in
+// priority order (several at once only on a relay that mixes backends).
+func bodyBackends(markers relaycommon.UpstreamBodyMarkers) []string {
+	var out []string
+	if markers.Has(relaycommon.BodyMarkerAzureContentFilter) {
+		out = append(out, "azure")
 	}
-	return backendShape
+	if markers.Has(relaycommon.BodyMarkerBedrockMetrics) {
+		out = append(out, "aws")
+	}
+	if markers.Has(relaycommon.BodyMarkerDeepSeekCacheHit | relaycommon.BodyMarkerDeepSeekCacheMiss) {
+		out = append(out, "deepseek")
+	}
+	return out
+}
+
+// decideUpstreamBackend is the single place that decides the backend behind
+// the hop, by evidence priority: channel protocol type (strong) > official
+// vendor headers (medium) > vendor-specific body fields (medium) > positive
+// id / model shape (weak) > neutral protocol-format fallback (none).
+func decideUpstreamBackend(channelType int, headerSource string, markers relaycommon.UpstreamBodyMarkers, id, model string, ccmaxHint bool) backendDecision {
+	type claim struct{ vendor, by, conf string }
+	var claims []claim
+	if v := channelTypeBackend(channelType); v != "" {
+		claims = append(claims, claim{v, BackendByChannelType, BackendConfStrong})
+	}
+	if officialSources[headerSource] {
+		claims = append(claims, claim{headerSource, BackendByHeader, BackendConfMedium})
+	}
+	for _, v := range bodyBackends(markers) {
+		claims = append(claims, claim{v, BackendByBody, BackendConfMedium})
+	}
+	shape, shapeBy := inferBackendShape(channelType, strings.TrimSpace(id), model, ccmaxHint)
+	if shapeBy != BackendByFallback {
+		claims = append(claims, claim{shape, shapeBy, BackendConfWeak})
+	}
+	if len(claims) == 0 {
+		return backendDecision{backend: shape, by: BackendByFallback, conf: BackendConfNone}
+	}
+	d := backendDecision{backend: claims[0].vendor, by: claims[0].by, conf: claims[0].conf}
+	for _, c := range claims[1:] {
+		if srcFamily(c.vendor) != srcFamily(d.backend) {
+			for _, all := range claims {
+				d.conflict = append(d.conflict, all.vendor+":"+all.by)
+			}
+			break
+		}
+	}
+	return d
 }
 
 // inferBackendShape classifies a response by wire shape alone (id prefix +
-// model naming), ignoring headers and channel type. It is the "look through
-// the relay" view: a NewAPI relay that returns msg_bdrk_ ids or Bedrock model
-// names is fronting AWS Bedrock, whatever its own headers say.
-func inferBackendShape(channelType int, id, respModel string, ccmaxHint bool) string {
+// model naming), ignoring headers and channel type, and says which of the two
+// decided it (id_shape / model_name), or fallback when only the protocol
+// format is known (gpt_relay / claude_relay / unknown).
+func inferBackendShape(channelType int, id, respModel string, ccmaxHint bool) (backend, by string) {
 	modelLower := strings.ToLower(respModel)
 	switch {
-	case strings.HasPrefix(id, "msg_bdrk_"), isBedrockModelId(respModel):
-		return "aws"
+	case strings.HasPrefix(id, "msg_bdrk_"):
+		return "aws", BackendByIdShape
+	case isBedrockModelId(respModel):
+		return "aws", BackendByModelName
 	case strings.HasPrefix(id, "msg_vrtx_"), strings.HasPrefix(id, "req_vrtx_"):
-		return "vertex"
+		return "vertex", BackendByIdShape
 	case strings.HasPrefix(id, "msg_"):
 		if ccmaxHint {
-			return "ccmax" // anthropic wire shape + injected-prompt evidence = Max subscription relay
+			return "ccmax", BackendByIdShape // anthropic wire shape + injected-prompt evidence = Max subscription relay
 		}
-		return "claude_relay" // anthropic wire shape without official headers
+		return "claude_relay", BackendByFallback // anthropic wire shape without vendor evidence
 	case strings.HasPrefix(id, "gen-"):
-		return "openrouter"
+		return "openrouter", BackendByIdShape
 	case strings.HasPrefix(id, "chatcmpl-"), strings.HasPrefix(id, "resp_"):
-		// OpenAI chat / Responses API wire shape without official headers
+		// OpenAI chat / Responses API wire shape without vendor evidence
 		switch {
 		case strings.Contains(modelLower, "deepseek"):
-			return "deepseek"
+			return "deepseek", BackendByModelName
 		case strings.Contains(modelLower, "glm"):
-			return "glm"
+			return "glm", BackendByModelName
 		case strings.Contains(modelLower, "kimi") || strings.Contains(modelLower, "moonshot"):
-			return "kimi"
+			return "kimi", BackendByModelName
 		default:
-			return "gpt_relay"
+			return "gpt_relay", BackendByFallback
 		}
 	case uuidIdRe.MatchString(id):
 		if strings.Contains(modelLower, "deepseek") {
-			return "deepseek"
+			return "deepseek", BackendByModelName
 		}
-		return "unknown"
+		return "unknown", BackendByFallback
 	case numericIdRe.MatchString(id):
-		return "glm" // Zhipu-style timestamp ids
+		return "glm", BackendByIdShape // Zhipu-style timestamp ids
 	case channelType == constant.ChannelTypeGemini && id != "":
-		return "aistudio"
+		return "aistudio", BackendByModelName // Gemini channel answering with a modelVersion/responseId
 	}
-	return "unknown"
+	return "unknown", BackendByFallback
 }
 
 // ── source / backend flip tracking ──────────────────────────────────────────
@@ -694,7 +763,7 @@ type channelSrcState struct {
 }
 
 var srcTracker sync.Map     // flipTrackerKey -> *channelSrcState
-var backendTracker sync.Map // flipTrackerKey -> *channelSrcState (look-through backend shape + vendor prefix)
+var backendTracker sync.Map // flipTrackerKey -> *channelSrcState (decided backend + vendor prefix segment)
 
 // auditTrackerKey derives the tracker key for one exchange.
 func auditTrackerKey(relayInfo *relaycommon.RelayInfo, sentModel string) flipTrackerKey {
@@ -730,9 +799,10 @@ func srcFamily(s string) string {
 	return s
 }
 
-// trackBackendFlip watches the wire-shape backend behind a channel independently
-// of the hop label, so a relay that silently moves from Bedrock to a Claude
-// relay is caught even though its own headers never change. The signature
+// trackBackendFlip watches the decided backend behind a channel (see
+// decideUpstreamBackend) independently of the hop label, so a relay that
+// silently moves from Bedrock to a Claude relay, or whose Azure body
+// fingerprints disappear, is caught even though its own headers never change. The signature
 // includes the vendor prefix the response carried (gpt_relay/deepseek), so a
 // relay that starts answering through a different namespace is caught too.
 //
@@ -999,12 +1069,27 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	anthropicShape := strings.HasPrefix(relayInfo.UpstreamResponseId, "msg_")
 	injected := anthropicShape && injectionDetected(relayInfo.GetEstimatePromptTokens(), injectedTokens(relayInfo))
 	ccmaxHint := ccmaxObserve(channelId, injected, feedTrackers)
-	src := InferUpstreamSource(channelType, relayInfo.UpstreamResponseHeaders, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
-	// backendShape is the wire-shape-only view (what the flip tracker watches);
-	// backend is what gets displayed: when the shape is neutral and the source
-	// carries official-vendor evidence, the displayed backend follows the source
-	backendShape := inferBackendShape(channelType, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
-	backend := reconcileBackendWithSource(backendShape, src)
+	// body fingerprints of a failed attempt describe an error body, never the
+	// backend that would have answered
+	markers := audit.BodyMarkers
+	if failed {
+		markers = 0
+	}
+	headerSource := upstreamHeaderSource(channelType, headerKeysLower(relayInfo.UpstreamResponseHeaders))
+	// src is the direct hop: channel type, then headers; without either, a
+	// NewAPI usage field still identifies a NewAPI hop, else the wire shape
+	src := channelTypeBackend(channelType)
+	switch {
+	case src != "":
+	case headerSource != "":
+		src = headerSource
+	case markers.Has(relaycommon.BodyMarkerNewAPICacheSplit):
+		src = "newapi_relay"
+	default:
+		src, _ = inferBackendShape(channelType, strings.TrimSpace(relayInfo.UpstreamResponseId), respModel, ccmaxHint)
+	}
+	decision := decideUpstreamBackend(channelType, headerSource, markers, relayInfo.UpstreamResponseId, respModel, ccmaxHint)
+	backend := decision.backend
 
 	ursp["sent"] = sentModel
 	ursp["mismatch"] = mismatch
@@ -1044,8 +1129,13 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if relayInfo.ChannelMeta != nil && relayInfo.IsModelMapped {
 		ursp["mapped"] = true
 	}
+	ursp["backend_by"] = decision.by     // channel_type / header / body / id_shape / model_name / fallback
+	ursp["backend_conf"] = decision.conf // strong / medium / weak / none
+	if len(decision.conflict) > 0 {
+		ursp["backend_conflict"] = decision.conflict // e.g. ["openai:header", "azure:body"]
+	}
 	if backend != "unknown" {
-		ursp["backend"] = backend // wire-shape backend behind the hop (aws / vertex / claude_relay / ...)
+		ursp["backend"] = backend // backend behind the hop (aws / azure / vertex / gpt_relay fallback / ...)
 	}
 	if respModel != "" {
 		ursp["model"] = respModel
@@ -1072,7 +1162,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	key := auditTrackerKey(relayInfo, sentModel)
 	var from, bfrom string
 	var flipped, bflipped bool
-	backendSig := backendSignature(backendShape, respPrefix)
+	// the tracker follows the decided backend: a channel whose Azure body
+	// fingerprints disappear (azure -> gpt_relay) is a meaningful switch
+	backendSig := backendSignature(backend, respPrefix)
 	if feedTrackers {
 		from, flipped = trackSourceFlip(key, src)
 		if flipped {
@@ -1080,8 +1172,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		bfrom, bflipped = trackBackendFlip(key, backendSig)
 		if bflipped {
-			// both sides are raw shapes: the flip string describes the wire
-			// shape change only; the reconciled label lives in ursp.backend
+			// both sides are decided backends (with the vendor prefix segment)
 			ursp["backend_flip"] = bfrom + "->" + backendSig
 		}
 	}

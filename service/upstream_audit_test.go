@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/audit_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -480,12 +482,12 @@ func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
 	if got := InferUpstreamSource(14, hdr, "msg_bdrk_abc", "global.anthropic.claude-sonnet-5", false); got != "newapi_relay" {
 		t.Fatalf("hop label = %q, want newapi_relay", got)
 	}
-	if got := inferBackendShape(14, "msg_bdrk_abc", "global.anthropic.claude-sonnet-5", false); got != "aws" {
-		t.Fatalf("backend = %q, want aws", got)
-	}
-	if got := inferBackendShape(14, "msg_01abc", "claude-sonnet-5", false); got != "claude_relay" {
-		t.Fatalf("backend = %q, want claude_relay", got)
-	}
+	backend, by := inferBackendShape(14, "msg_bdrk_abc", "global.anthropic.claude-sonnet-5", false)
+	assert.Equal(t, "aws", backend)
+	assert.Equal(t, BackendByIdShape, by)
+	backend, by = inferBackendShape(14, "msg_01abc", "claude-sonnet-5", false)
+	assert.Equal(t, "claude_relay", backend)
+	assert.Equal(t, BackendByFallback, by)
 }
 
 func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
@@ -566,75 +568,55 @@ func TestAppendUpstreamResponseAuditForErrorLabelsAndSkipsFlip(t *testing.T) {
 	}
 }
 
-// The displayed backend must not contradict an officially-attested source when
-// the body shape is neutral; positive shape evidence still wins; relay
-// sources never get promoted.
-func TestReconcileBackendWithSource(t *testing.T) {
-	cases := []struct{ shape, src, want string }{
-		{"gpt_relay", "azure", "azure"},            // chatcmpl- body + Azure headers
-		{"gpt_relay", "openai", "openai"},          // chatcmpl- body + OpenAI org headers
-		{"claude_relay", "anthropic", "anthropic"}, // msg_ body + anthropic-ratelimit headers
-		{"unknown", "google", "google"},
-		{"gpt_relay", "newapi_relay", "gpt_relay"}, // relay headers say nothing about the backend
-		{"gpt_relay", "unknown", "gpt_relay"},
-		{"aws", "azure", "aws"},            // msg_bdrk_ behind Azure-looking headers: shape wins
-		{"deepseek", "openai", "deepseek"}, // positive model-family evidence wins
-		{"openrouter", "newapi_relay", "openrouter"},
+// decideUpstreamBackend: channel type (strong) > official headers (medium) >
+// body fingerprints (medium) > positive id/model shape (weak) > neutral
+// protocol-format fallback (none); disagreement is recorded, never hidden.
+func TestDecideUpstreamBackend(t *testing.T) {
+	azureBody := relaycommon.BodyMarkerAzureContentFilter
+	deepseekBody := relaycommon.BodyMarkerDeepSeekCacheHit | relaycommon.BodyMarkerDeepSeekCacheMiss
+	cases := []struct {
+		name         string
+		channelType  int
+		headerSource string
+		markers      relaycommon.UpstreamBodyMarkers
+		id, model    string
+		want         backendDecision
+	}{
+		{"azure channel type", constant.ChannelTypeAzure, "", 0, "chatcmpl-a1", "gpt-4o",
+			backendDecision{backend: "azure", by: BackendByChannelType, conf: BackendConfStrong}},
+		{"official azure headers", 1, "azure", 0, "chatcmpl-a1", "gpt-4o",
+			backendDecision{backend: "azure", by: BackendByHeader, conf: BackendConfMedium}},
+		{"relay headers + azure body", 1, "newapi_relay", azureBody, "resp_a1", "gpt-5.1",
+			backendDecision{backend: "azure", by: BackendByBody, conf: BackendConfMedium}},
+		{"bedrock metrics without msg_bdrk_", 14, "", relaycommon.BodyMarkerBedrockMetrics, "msg_01abc", "claude-sonnet-5",
+			backendDecision{backend: "aws", by: BackendByBody, conf: BackendConfMedium}},
+		{"deepseek usage fields", 1, "", deepseekBody, "chatcmpl-a1", "deepseek-v4",
+			backendDecision{backend: "deepseek", by: BackendByBody, conf: BackendConfMedium}},
+		{"header openai vs body azure", 1, "openai", azureBody, "chatcmpl-a1", "gpt-4o",
+			backendDecision{backend: "openai", by: BackendByHeader, conf: BackendConfMedium,
+				conflict: []string{"openai:header", "azure:body"}}},
+		{"azure headers vs bedrock id", 1, "azure", 0, "msg_bdrk_01abc", "claude-sonnet-5",
+			backendDecision{backend: "azure", by: BackendByHeader, conf: BackendConfMedium,
+				conflict: []string{"azure:header", "aws:id_shape"}}},
+		{"openrouter id", 1, "", 0, "gen-123", "gpt-5",
+			backendDecision{backend: "openrouter", by: BackendByIdShape, conf: BackendConfWeak}},
+		{"glm naming", 1, "", 0, "chatcmpl-a1", "glm-4.6",
+			backendDecision{backend: "glm", by: BackendByModelName, conf: BackendConfWeak}},
+		{"plain openai-shaped relay", 1, "newapi_relay", 0, "chatcmpl-a1", "gpt-5",
+			backendDecision{backend: "gpt_relay", by: BackendByFallback, conf: BackendConfNone}},
+		{"plain anthropic-shaped relay", 14, "", 0, "msg_01abc", "claude-sonnet-5",
+			backendDecision{backend: "claude_relay", by: BackendByFallback, conf: BackendConfNone}},
+		{"relay hop is never a backend", 1, "newapi_relay", relaycommon.BodyMarkerNewAPICacheSplit, "", "",
+			backendDecision{backend: "unknown", by: BackendByFallback, conf: BackendConfNone}},
 	}
-	for _, tc := range cases {
-		if got := reconcileBackendWithSource(tc.shape, tc.src); got != tc.want {
-			t.Errorf("reconcile(%q, %q) = %q, want %q", tc.shape, tc.src, got, tc.want)
-		}
-	}
-}
-
-// End to end through the audit: an Azure-attested response with a chatcmpl id
-// displays backend=azure, while the backend flip tracker still sees the raw
-// shape (gpt_relay) and does not flip.
-func TestAuditBackendFollowsOfficialSourceButTrackerSeesShape(t *testing.T) {
-	const ch = 987651
-	isolatedAuditKey(t, ch, "gpt")
-	azureHeaders := map[string][]string{"Apim-Request-Id": {"x"}, "X-Ms-Region": {"East US 2"}}
-	run := func(headers map[string][]string) map[string]interface{} {
-		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: ch, ChannelType: 1}}
-		info.ObserveUpstreamResponse("gpt-5-2025-08-07", "chatcmpl-abc", 1, "")
-		info.SetUpstreamResponseForensics(`{"id":"chatcmpl-abc"}`, headers)
-		other := model.NewLogOther()
-		appendUpstreamResponseAudit(nil, info, other, "")
-		root, _ := other.Snapshot()["root_info"].(map[string]interface{})
-		ursp, _ := root["ursp"].(map[string]interface{})
-		return ursp
-	}
-	first := run(azureHeaders)
-	if first["src"] != "azure" || first["backend"] != "azure" {
-		t.Fatalf("expected src=azure backend=azure, got %+v", first)
-	}
-	// same shape, relay headers only: displayed backend drops back to the shape,
-	// the backend tracker saw gpt_relay both times → no backend flip
-	second := run(map[string][]string{"X-New-Api-Version": {"v1"}})
-	if second["backend"] != "gpt_relay" {
-		t.Fatalf("expected backend=gpt_relay behind a relay, got %+v", second)
-	}
-	if _, flipped := second["backend_flip"]; flipped {
-		t.Fatalf("backend flip must follow the raw shape, not the reconciled label: %+v", second)
-	}
-	if _, flipped := second["src_flip"]; !flipped {
-		t.Fatalf("source flip azure->newapi_relay should still be reported: %+v", second)
-	}
-	// a real shape change (chatcmpl → msg_bdrk_) behind Azure-looking headers
-	// is reported shape→shape on both sides, never with the reconciled label
-	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5", ChannelId: ch, ChannelType: 1}}
-	info.ObserveUpstreamResponse("gpt-5", "msg_bdrk_01abc", 0, "")
-	info.SetUpstreamResponseForensics(`{"id":"msg_bdrk_01abc"}`, azureHeaders)
-	other := model.NewLogOther()
-	appendUpstreamResponseAudit(nil, info, other, "")
-	root, _ := other.Snapshot()["root_info"].(map[string]interface{})
-	third, _ := root["ursp"].(map[string]interface{})
-	if third["backend"] != "aws" {
-		t.Fatalf("positive shape evidence must win: %+v", third)
-	}
-	if third["backend_flip"] != "gpt_relay->aws" {
-		t.Fatalf("backend flip must be shape->shape, got %+v", third)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := decideUpstreamBackend(c.channelType, c.headerSource, c.markers, c.id, c.model, false)
+			if len(c.want.conflict) == 0 {
+				c.want.conflict = nil
+			}
+			assert.Equal(t, c.want, got)
+		})
 	}
 }
 
@@ -1287,7 +1269,9 @@ func TestAuditNoteFormats(t *testing.T) {
 	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-2", models: []string{"gpt-5"}, id: "chatcmpl-note00001",
 		headers: relay, created: now - 30*86400, output: "fresh"})
 	assert.Equal(t, "provider_switch", ev.Kind)
-	assert.Equal(t, "azure -> newapi_relay", ev.Note)
+	// the tracker follows the decided backend (azure from headers, then the
+	// neutral fallback), so the backend part of the flip is noted too
+	assert.Equal(t, "azure -> newapi_relay; backend: azure -> gpt_relay", ev.Note)
 
 	models := make([]string, 0, 8)
 	for i := range 8 {
@@ -1388,4 +1372,184 @@ func TestAuditExtraKeysAreBounded(t *testing.T) {
 		seen[k] = true
 	}
 	assert.True(t, seen[strings.Repeat("k", 64)], "the collapsed long key is kept once")
+}
+
+// auditFrames feeds real-shaped upstream frames through the observation layer
+// (every frame, as the stream handlers do; the last one is the excerpt) and
+// returns the ursp block and queued evidence of the resulting audit. The
+// sent model is the last model the frames declare (an honest echo), so these
+// cases isolate the backend decision from the model verdict.
+func auditFrames(t *testing.T, channelId, channelType int, headers map[string][]string, frames []string, errorType string) (map[string]any, *model.UpstreamEvidence) {
+	t.Helper()
+	var queued *model.UpstreamEvidence
+	original := enqueueUpstreamEvidence
+	enqueueUpstreamEvidence = func(e *model.UpstreamEvidence) bool { queued = e; return true }
+	t.Cleanup(func() { enqueueUpstreamEvidence = original })
+	sent := "gpt-5"
+	for _, f := range frames {
+		if m := gjson.Get(f, "model").String(); m != "" {
+			sent = m
+		}
+		if m := gjson.Get(f, "response.model").String(); m != "" {
+			sent = m
+		}
+		if m := gjson.Get(f, "message.model").String(); m != "" {
+			sent = m
+		}
+	}
+	info := &relaycommon.RelayInfo{StartTime: time.Now(), ChannelMeta: &relaycommon.ChannelMeta{
+		UpstreamModelName: sent, ChannelId: channelId, ChannelType: channelType,
+	}}
+	info.SnapshotUpstreamWire(sent, nil)
+	for _, f := range frames {
+		model := gjson.Get(f, "model").String()
+		id := gjson.Get(f, "id").String()
+		if r := gjson.Get(f, "response"); r.IsObject() {
+			model, id = r.Get("model").String(), r.Get("id").String()
+		}
+		if m := gjson.Get(f, "message"); m.IsObject() {
+			model, id = m.Get("model").String(), m.Get("id").String()
+		}
+		info.ObserveUpstreamResponseFrame(f, model, id, 0, "")
+	}
+	info.SetUpstreamResponseForensics(frames[len(frames)-1], headers)
+	other := model.NewLogOther()
+	appendUpstreamResponseAudit(nil, info, other, errorType)
+	return urspOf(t, other), queued
+}
+
+var (
+	relayOnlyHeaders = map[string][]string{"X-Oneapi-Request-Id": {"20260928000000000000000"}}
+
+	// Azure Responses API terminal event behind a NewAPI hop that strips the
+	// Azure headers (channel #66 since 2026-09-23)
+	azureResponsesCompleted = `{"type":"response.completed","response":{"id":"resp_0a1b2c3d4e5f","object":"response","created_at":1790000000,"status":"completed","model":"gpt-5.1","output":[{"type":"message","content":[{"type":"output_text","text":"Hello!"}]}],"content_filters":[{"blocked":false,"source_type":"completion","content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"sexual":{"filtered":false,"severity":"safe"},"violence":{"filtered":false,"severity":"safe"},"self_harm":{"filtered":false,"severity":"safe"},"protected_material_text":{"filtered":false,"detected":false}},"content_filter_offsets":{"start_offset":0,"end_offset":6,"check_offset":0}}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}}}`
+
+	// Azure chat stream: prompt_filter_results in the first chunk (empty
+	// choices, empty model), content_filter_results in content chunks, and
+	// a final usage chunk without any marker
+	azureChatStream = []string{
+		`{"choices":[],"created":0,"id":"","model":"","object":"","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"jailbreak":{"filtered":false,"detected":false}}}]}`,
+		`{"choices":[{"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}},"delta":{"content":"Hi"},"finish_reason":null,"index":0}],"created":1790000000,"id":"chatcmpl-AzUre0001","model":"gpt-4o-2024-11-20","object":"chat.completion.chunk","system_fingerprint":"fp_ee1d74bde0"}`,
+		`{"choices":[{"content_filter_results":{},"delta":{},"finish_reason":"stop","index":0}],"created":1790000000,"id":"chatcmpl-AzUre0001","model":"gpt-4o-2024-11-20","object":"chat.completion.chunk"}`,
+		`{"choices":[],"created":1790000000,"id":"chatcmpl-AzUre0001","model":"gpt-4o-2024-11-20","object":"chat.completion.chunk","usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}`,
+	}
+)
+
+// Channel #66: Azure behind a NewAPI hop without Azure headers is recognised
+// from the body; the hop stays newapi_relay.
+func TestAuditAzureResponsesBodyBehindRelay(t *testing.T) {
+	isolatedAuditKey(t, 987678, "gpt")
+	ursp, ev := auditFrames(t, 987678, constant.ChannelTypeOpenAI, relayOnlyHeaders, []string{azureResponsesCompleted}, "")
+	assert.Equal(t, "newapi_relay", ursp["src"])
+	assert.Equal(t, "azure", ursp["backend"])
+	assert.Equal(t, BackendByBody, ursp["backend_by"])
+	assert.Equal(t, BackendConfMedium, ursp["backend_conf"])
+	assert.NotContains(t, ursp, "backend_conflict")
+	require.NotNil(t, ev)
+	assert.Equal(t, "newapi_relay", ev.Source)
+}
+
+// Every frame is scanned: the Azure chat markers sit in the first and content
+// chunks, while the final usage chunk (the excerpt) carries none.
+func TestAuditAzureChatStreamMarkersInEarlierFrames(t *testing.T) {
+	isolatedAuditKey(t, 987679, "gpt")
+	ursp, _ := auditFrames(t, 987679, constant.ChannelTypeOpenAI, relayOnlyHeaders, azureChatStream, "")
+	assert.Equal(t, "azure", ursp["backend"])
+	assert.Equal(t, BackendByBody, ursp["backend_by"])
+	assert.Equal(t, "gpt-4o-2024-11-20", ursp["model"], "the empty-model first chunk does not count as a declaration")
+}
+
+func TestAuditPlainRelayHasNoBackendEvidence(t *testing.T) {
+	isolatedAuditKey(t, 987680, "gpt")
+	ursp, _ := auditFrames(t, 987680, constant.ChannelTypeOpenAI, relayOnlyHeaders,
+		[]string{`{"id":"chatcmpl-plain0001","object":"chat.completion","model":"gpt-5","choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`}, "")
+	assert.Equal(t, "gpt_relay", ursp["backend"])
+	assert.Equal(t, BackendByFallback, ursp["backend_by"])
+	assert.Equal(t, BackendConfNone, ursp["backend_conf"])
+}
+
+// Bedrock without msg_bdrk_ ids: amazon-bedrock-invocationMetrics on the
+// final event identifies it.
+func TestAuditBedrockMetricsIdentifyAWS(t *testing.T) {
+	isolatedAuditKey(t, 987681, "claude")
+	ursp, _ := auditFrames(t, 987681, constant.ChannelTypeAnthropic, nil, []string{
+		`{"type":"message_start","message":{"id":"msg_01XyZabc","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`,
+		`{"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":10,"outputTokenCount":2,"invocationLatency":512,"firstByteLatency":300}}`,
+	}, "")
+	assert.Equal(t, "aws", ursp["backend"])
+	assert.Equal(t, BackendByBody, ursp["backend_by"])
+}
+
+func TestAuditDeepSeekUsageFieldsIdentifyDeepSeek(t *testing.T) {
+	isolatedAuditKey(t, 987682, "deepseek")
+	ursp, _ := auditFrames(t, 987682, constant.ChannelTypeOpenAI, relayOnlyHeaders,
+		[]string{`{"id":"5f1c7c3e-0b4b-4f5e-9d61-3c2a1f0e9b7d","object":"chat.completion","model":"deepseek-chat","choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":12}}`}, "")
+	assert.Equal(t, "deepseek", ursp["backend"])
+	assert.Equal(t, BackendByBody, ursp["backend_by"])
+	assert.NotContains(t, ursp, "backend_conflict", "the deepseek model name agrees")
+}
+
+func TestAuditHeaderAndBodyConflictIsRecorded(t *testing.T) {
+	isolatedAuditKey(t, 987683, "gpt")
+	ursp, _ := auditFrames(t, 987683, constant.ChannelTypeOpenAI, map[string][]string{"Openai-Processing-Ms": {"120"}}, azureChatStream, "")
+	assert.Equal(t, "openai", ursp["backend"])
+	assert.Equal(t, BackendByHeader, ursp["backend_by"])
+	assert.Equal(t, []string{"openai:header", "azure:body"}, ursp["backend_conflict"])
+}
+
+func TestAuditAzureChannelTypeIsStrong(t *testing.T) {
+	isolatedAuditKey(t, 987684, "gpt")
+	ursp, _ := auditFrames(t, 987684, constant.ChannelTypeAzure, nil, azureChatStream, "")
+	assert.Equal(t, "azure", ursp["src"])
+	assert.Equal(t, "azure", ursp["backend"])
+	assert.Equal(t, BackendByChannelType, ursp["backend_by"])
+	assert.Equal(t, BackendConfStrong, ursp["backend_conf"])
+}
+
+// A NewAPI usage field identifies the hop when no header does, never the backend.
+func TestAuditNewAPIUsageFieldIdentifiesHopOnly(t *testing.T) {
+	isolatedAuditKey(t, 987685, "claude")
+	ursp, _ := auditFrames(t, 987685, constant.ChannelTypeOpenAI, nil,
+		[]string{`{"id":"chatcmpl-hop00001","object":"chat.completion","model":"claude-sonnet-4-5","choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"claude_cache_creation_5_m_tokens":0}}`}, "")
+	assert.Equal(t, "newapi_relay", ursp["src"])
+	assert.Equal(t, "gpt_relay", ursp["backend"])
+	assert.Equal(t, BackendByFallback, ursp["backend_by"])
+}
+
+// An error body's fingerprints never decide the backend (and error attempts
+// never feed the trackers).
+func TestAuditErrorBodyMarkersDoNotSetBackend(t *testing.T) {
+	isolatedAuditKey(t, 987686, "gpt")
+	ursp, _ := auditFrames(t, 987686, constant.ChannelTypeOpenAI, relayOnlyHeaders,
+		[]string{`{"error":{"code":"content_filter","message":"filtered","innererror":{"code":"ResponsibleAIPolicyViolation","content_filter_result":{"hate":{"filtered":true,"severity":"high"}}},"content_filter_results":{"hate":{"filtered":true}}}}`}, "upstream_error")
+	assert.NotEqual(t, "azure", ursp["backend"])
+	assert.Equal(t, BackendByFallback, ursp["backend_by"])
+}
+
+// Markers belong to one attempt: a retry on a plain relay starts clean.
+func TestUpstreamBodyMarkersResetPerAttempt(t *testing.T) {
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-5"}}
+	info.ObserveUpstreamResponseFrame(azureChatStream[0], "", "", 0, "")
+	require.True(t, info.UpstreamAudit.BodyMarkers.Has(relaycommon.BodyMarkerAzureContentFilter))
+	info.ResetUpstreamObservation()
+	assert.Zero(t, info.UpstreamAudit.BodyMarkers)
+}
+
+// The tracker follows the decided backend: a healthy Azure channel stays
+// azure across requests (markers from every frame), and a channel whose Azure
+// fingerprints disappear is a backend switch.
+func TestAuditBackendTrackerFollowsDecidedBackend(t *testing.T) {
+	const ch = 987687
+	isolatedAuditKey(t, ch, "gpt")
+	for range 3 {
+		ursp, _ := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders, azureChatStream, "")
+		assert.NotContains(t, ursp, "backend_flip")
+	}
+	ursp, ev := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders,
+		[]string{`{"id":"chatcmpl-plain0002","object":"chat.completion","model":"gpt-4o-2024-11-20","choices":[{"message":{"content":"Hi"}}]}`}, "")
+	assert.Equal(t, "azure->gpt_relay", ursp["backend_flip"])
+	assert.Equal(t, "provider_switch", ev.Kind)
+	assert.Equal(t, "backend: azure -> gpt_relay", ev.Note)
 }

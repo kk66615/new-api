@@ -95,3 +95,34 @@ func TestOaiStreamHandlerKeepsModelFrameBehindUsageOnlyFrame(t *testing.T) {
 	assert.Equal(t, "openai_chat_stream", info.UpstreamAudit.Handler)
 	assert.Equal(t, "full", info.UpstreamObservationLevel())
 }
+
+// The Azure content-safety fields sit in the first chunk (empty choices and
+// model) and the content chunks, not in the final usage chunk: the stream
+// handler must scan every frame.
+func TestOaiStreamHandlerScansEveryFrameForAzureMarkers(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	info := &relaycommon.RelayInfo{
+		RelayMode:   relayconstant.RelayModeChatCompletions,
+		RelayFormat: types.RelayFormatOpenAI,
+		IsStream:    true,
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"},
+	}
+	frames := []string{
+		`{"choices":[],"created":0,"id":"","model":"","object":"","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}]}`,
+		`{"choices":[{"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}},"delta":{"content":"Hi"},"index":0}],"created":1790000000,"id":"chatcmpl-AzUre0002","model":"gpt-4o-2024-11-20","object":"chat.completion.chunk"}`,
+		`{"choices":[],"created":1790000000,"id":"chatcmpl-AzUre0002","model":"gpt-4o-2024-11-20","object":"chat.completion.chunk","usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}`,
+	}
+	var sse strings.Builder
+	for _, f := range frames {
+		sse.WriteString("data: " + f + "\n\n")
+	}
+	sse.WriteString("data: [DONE]\n\n")
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Oneapi-Request-Id": {"x"}}, Body: io.NopCloser(strings.NewReader(sse.String()))}
+
+	_, apiErr := OaiStreamHandler(newAuditTestContext("/v1/chat/completions"), info, resp)
+	require.Nil(t, apiErr)
+	assert.True(t, info.UpstreamAudit.BodyMarkers.Has(relaycommon.BodyMarkerAzureContentFilter))
+	assert.NotContains(t, info.UpstreamResponseExcerpt, "content_filter", "the excerpt is the marker-free usage chunk")
+}

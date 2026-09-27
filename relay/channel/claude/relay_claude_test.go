@@ -427,3 +427,27 @@ func TestClaudeStreamErrorFrameKeepsMessageStartEvidence(t *testing.T) {
 	assert.Equal(t, "claude-sonnet-5", info.UpstreamSentModel, "sent model survives the message_start rewrite")
 	assert.Equal(t, "msg_01evidence", info.UpstreamResponseId)
 }
+
+// Bedrock attaches amazon-bedrock-invocationMetrics to the final event, which
+// is not the message_start frame the model is read from: every event is
+// scanned for vendor fingerprints.
+func TestClaudeStreamScansEveryEventForBedrockMetrics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	info := &relaycommon.RelayInfo{
+		RelayFormat:  types.RelayFormatClaude,
+		IsStream:     true,
+		StreamStatus: relaycommon.NewStreamStatus(),
+		ChannelMeta:  &relaycommon.ChannelMeta{UpstreamModelName: "claude-sonnet-4-5"},
+	}
+	claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{}}
+	for _, frame := range []string{
+		`{"type":"message_start","message":{"id":"msg_01NoBdrkId","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":3,"outputTokenCount":2,"invocationLatency":400,"firstByteLatency":200}}`,
+	} {
+		require.Nil(t, HandleStreamResponseData(c, info, claudeInfo, frame))
+	}
+	assert.True(t, info.UpstreamAudit.BodyMarkers.Has(relaycommon.BodyMarkerBedrockMetrics))
+}
