@@ -69,7 +69,7 @@ func snapshotAliasVerdict(sent, resp string) string {
 	switch {
 	case isSnapshotDateSuffix(suffix):
 		verdict = VerdictSnapshotDate
-	case strings.HasPrefix(alias, "gemini-") && isThreeDigitVersion(suffix):
+	case strings.HasPrefix(alias, "gemini-") && len(suffix) == 3 && isAllDigits(suffix):
 		verdict = VerdictVersionSuffix
 	default:
 		return ""
@@ -130,10 +130,6 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
-}
-
-func isThreeDigitVersion(s string) bool {
-	return len(s) == 3 && isAllDigits(s)
 }
 
 func validMonthDay(mm, dd string) bool {
@@ -734,10 +730,6 @@ func srcFamily(s string) string {
 	return s
 }
 
-func trackSourceFlip(key flipTrackerKey, src string) (from string, flipped bool) {
-	return trackFlip(&srcTracker, key, src)
-}
-
 // trackBackendFlip watches the wire-shape backend behind a channel independently
 // of the hop label, so a relay that silently moves from Bedrock to a Claude
 // relay is caught even though its own headers never change. The signature
@@ -773,11 +765,13 @@ func trackBackendFlip(key flipTrackerKey, backend string) (from string, flipped 
 	return prev, true
 }
 
-func trackFlip(tracker *sync.Map, key flipTrackerKey, src string) (from string, flipped bool) {
+// trackSourceFlip watches the hop label (src) of a tracker key; a change
+// between two known labels of different families is a flip.
+func trackSourceFlip(key flipTrackerKey, src string) (from string, flipped bool) {
 	if key.channelId == 0 || src == "" || src == "unknown" {
 		return "", false
 	}
-	v, _ := tracker.LoadOrStore(key, &channelSrcState{})
+	v, _ := srcTracker.LoadOrStore(key, &channelSrcState{})
 	st := v.(*channelSrcState)
 	st.mu.Lock()
 	defer st.mu.Unlock()

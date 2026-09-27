@@ -699,6 +699,7 @@ type auditExchange struct {
 	promptTok   int
 	estimate    int
 	elapsed     time.Duration
+	startedAt   time.Time // request start; defaults to now − elapsed
 	handler     string
 	useChannels []string
 	errorType   string
@@ -736,6 +737,9 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 			UpstreamModelName: x.sent, ChannelId: x.channelId, ChannelType: 1,
 			ChannelIsMultiKey: x.multiKey, ChannelMultiKeyIndex: x.keyIndex,
 		},
+	}
+	if !x.startedAt.IsZero() {
+		info.StartTime = x.startedAt
 	}
 	info.SetEstimatePromptTokens(x.estimate)
 	info.MarkUpstreamObserver(x.handler)
@@ -1288,4 +1292,49 @@ func TestAuditNoteFormats(t *testing.T) {
 	_, ev = runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-3", stream: true, models: models,
 		id: "chatcmpl-note00001", created: now - 30*86400})
 	assert.True(t, strings.HasPrefix(ev.Note, "signals: dup_id,stale_created"), ev.Note)
+}
+
+// A cache that hands the same originally-fresh answer back several times is a
+// replay every time: a replayed copy keeps the fresh answer's stamp and is
+// remembered as fresh (review round 6, LOW 1).
+func TestAuditRepeatedCacheReplaysAllCount(t *testing.T) {
+	const ch = 987670
+	isolatedAuditKey(t, ch, "gpt")
+	then := time.Now().Add(-22 * 24 * time.Hour)
+	answer := strings.Repeat("An answer cached by the relay and served again later. ", 5)
+	run := func(req, id string, started time.Time) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, models: []string{"gpt-5"}, id: id,
+			created: then.Unix(), output: answer, promptHash: strings.Repeat(req[len(req)-1:], 64), startedAt: started})
+	}
+	ursp, _ := run("req-a", "chatcmpl-cachedA01", then) // fresh when first produced
+	assert.NotContains(t, ursp, "stale_created")
+	for _, req := range []string{"req-b", "req-c", "req-d"} {
+		ursp, ev := run(req, "chatcmpl-"+req+"-x01", time.Time{})
+		assert.Equal(t, true, ursp["stale_created"], req)
+		assert.Equal(t, true, ursp["replay"], req)
+		assert.Equal(t, "replay_suspect", ev.Kind, req)
+	}
+}
+
+// A #109-shaped channel stamps every answer with one old constant and later
+// switches to another constant: an identical long answer across the switch is
+// not a replay, because the earlier copy was already stale (review round 6,
+// LOW 2).
+func TestAuditConstantStampSwitchIsNotReplay(t *testing.T) {
+	const ch = 987671
+	isolatedAuditKey(t, ch, "gpt")
+	stampX := time.Now().Unix() - 40*86400
+	stampY := stampX + 86400
+	long := strings.Repeat("A deterministic long answer that repeats word for word. ", 5)
+	run := func(req, id, output string, created int64) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, models: []string{"gpt-5"}, id: id,
+			created: created, output: output, promptHash: strings.Repeat("p", 64)})
+	}
+	run("req-1", "chatcmpl-stampX001", long, stampX)
+	run("req-2", "chatcmpl-stampX002", strings.Repeat("another answer ", 20), stampX)
+	ursp, ev := run("req-3", "chatcmpl-stampY003", long, stampY)
+	assert.Equal(t, true, ursp["dup_output"])
+	assert.Equal(t, true, ursp["stale_created"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
 }

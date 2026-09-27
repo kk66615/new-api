@@ -141,7 +141,10 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// corroborating stale created stamp. A different prompt or an explicit
 	// temperature are recorded as reasons, not proof.
 	// a stale created stamp only corroborates on channels whose created is not
-	// a constant (#109 stamps every answer with the same old value)
+	// a constant (#109 stamps every answer with the same old value). The
+	// tracker is fed stale answers only (the && short-circuits): fresh answers
+	// on a busy channel share one-second stamps all the time and would mark
+	// any channel constant-created.
 	staleCorroborates := s.staleCreated && !constantCreated.observe(channelId, created, current.outputHash, relayInfo.UpstreamResponseId, record)
 	// same id + same text: deterministic answers behind a constant-id
 	// upstream repeat honestly, so this needs one more fact —
@@ -162,8 +165,14 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// already carried this very stale stamp, the channel is stamping a
 	// constant old created (#109) — possibly before the constant-created
 	// tracker has seen two different answers (cold start) — so it is not proof.
-	earlierSameStale := outputPrev.stale && outputPrev.created == created
-	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates && !earlierSameStale)
+	//
+	// Only a fresh earlier answer counts: when the earlier copy was itself
+	// already stale (whatever its stamp), both may just be answers from a
+	// channel stamping an old constant created, including one that switched
+	// constants in between (the tracker resets on a new stamp). A cache
+	// replayed several times still counts every time, because a replayed copy
+	// of a fresh answer is remembered as fresh (see replayLRU.seen).
+	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates && !outputPrev.stale)
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -241,6 +250,11 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 				// computes no hash) must not erase the output to compare with
 				current.outputHash, current.created, current.stale = entry.outputHash, entry.created, entry.stale
 			}
+			if !entry.stale && entry.created == current.created {
+				// a replay of a fresh answer carries that answer's stamp: keep
+				// the entry marked fresh, so the next replay of it still counts
+				current.stale = false
+			}
 			*entry = current
 			l.order.MoveToFront(el)
 		}
@@ -257,8 +271,9 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 	return false, replayEntry{}
 }
 
-// constantCreatedTracker remembers, per channel, the last created stamp with
-// the id and output it came with. The same stamp on a different id with a
+// constantCreatedTracker remembers, per channel, the last STALE created stamp
+// with the id and output it came with (fresh answers are never fed: they share
+// one-second stamps honestly). The same stale stamp on a different id with a
 // different output marks the channel as stamping a constant created, which
 // makes stale_created meaningless there. One small entry per channel.
 type constantCreatedTracker struct {
