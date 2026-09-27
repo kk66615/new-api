@@ -19,25 +19,27 @@ func SanitizeAuditText(s string) string {
 }
 
 // TruncateAuditBytes returns a sanitized prefix of s no longer than maxBytes,
-// cut back to a rune boundary, and whether anything was dropped. Upstream
-// bodies are arbitrary bytes, so a plain s[:n] can split a multi-byte rune
-// and make the row unstorable.
+// cut back to a rune boundary, and whether anything was dropped. It sanitizes
+// FIRST and cuts afterwards: replacing an invalid byte with U+FFFD adds two
+// bytes, so cutting first could push the result past the cap (MySQL TEXT
+// rejects anything over 65535 bytes). A plain s[:n] could also split a
+// multi-byte rune and make the row unstorable.
 func TruncateAuditBytes(s string, maxBytes int) (string, bool) {
-	truncated := false
-	if len(s) > maxBytes {
-		cut := maxBytes
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = s[:cut]
-		truncated = true
+	s = SanitizeAuditText(s)
+	if len(s) <= maxBytes {
+		return s, false
 	}
-	return SanitizeAuditText(s), truncated
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
 }
 
 // TruncateAuditBytesTail is TruncateAuditBytes for the END of s: the last
-// maxBytes, advanced to a rune boundary.
+// maxBytes of the sanitized text, advanced to a rune boundary.
 func TruncateAuditBytesTail(s string, maxBytes int) string {
+	s = SanitizeAuditText(s)
 	if len(s) > maxBytes {
 		start := len(s) - maxBytes
 		for start < len(s) && !utf8.RuneStart(s[start]) {
@@ -45,7 +47,7 @@ func TruncateAuditBytesTail(s string, maxBytes int) string {
 		}
 		s = s[start:]
 	}
-	return SanitizeAuditText(s)
+	return s
 }
 
 // TruncateAuditRunes returns sanitized s limited to maxRunes characters, the

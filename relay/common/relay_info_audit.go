@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -21,8 +20,9 @@ import (
 // file may change what is forwarded, billed or returned to the client.
 
 const (
-	// UpstreamExcerptCap bounds the stored response excerpt.
-	UpstreamExcerptCap = 64 * 1024
+	// UpstreamExcerptCap bounds the stored response excerpt in bytes after
+	// sanitising: 65535 is the MySQL TEXT limit.
+	UpstreamExcerptCap = 65535
 	// UpstreamFrameCap bounds the stored model-bearing and error frames.
 	UpstreamFrameCap = 16 * 1024
 	// upstreamHeadersCap bounds the stored header JSON.
@@ -487,7 +487,7 @@ func EncodeUpstreamAuditHeaders(headers map[string][]string) (string, bool) {
 	for k := range headers {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	marker := `"` + HeadersTruncatedKey + `":"true"`
 	var b strings.Builder
 	b.WriteByte('{')

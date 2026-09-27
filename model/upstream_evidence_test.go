@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -86,15 +87,17 @@ func TestEvidenceWriterDropsWhenQueueIsFull(t *testing.T) {
 func TestEvidenceWriterWaitsForAMissingTable(t *testing.T) {
 	db := openEvidenceTestDB(t, false)
 	w := newEvidenceWriter(func() *gorm.DB { return db }, 4, 4, 10*time.Millisecond)
-	w.tableRetry = 5 * time.Millisecond
+	w.tableRetry = time.Hour // the background retry stays asleep; the test drives the retries
 	assert.False(t, w.enqueue(&UpstreamEvidence{Kind: "normal"}))
 	health := w.health()
 	assert.False(t, health.Enabled)
 	assert.Contains(t, health.DisabledReason, "retrying")
 	assert.Zero(t, health.DroppedTotal, "a paused writer is not a dropping writer")
+	assert.False(t, w.activateIfTableExists(), "still no table")
 
 	require.NoError(t, db.AutoMigrate(&UpstreamEvidence{}))
-	require.Eventually(t, func() bool { return w.health().Enabled }, 2*time.Second, 5*time.Millisecond)
+	require.True(t, w.activateIfTableExists())
+	assert.True(t, w.health().Enabled)
 	assert.Empty(t, w.health().DisabledReason)
 	require.True(t, w.enqueue(&UpstreamEvidence{Kind: "normal", ChannelId: 987653}))
 	w.flush(2 * time.Second)
@@ -229,4 +232,16 @@ func TestEvidenceIndexBuildIsOptIn(t *testing.T) {
 	enabled.maintenance = true
 	enabled.startOnce.Do(enabled.start)
 	assert.Equal(t, "pending", enabled.health().IndexState)
+}
+
+// Every text column fits MySQL TEXT (65535 bytes) as valid UTF-8, even when
+// invalid bytes grow on replacement after an upstream cap was applied.
+func TestEvidenceSanitizeCapsTextColumnsAfterReplacement(t *testing.T) {
+	invalid := strings.Repeat("\xff", 30_000)
+	e := &UpstreamEvidence{ResponseExcerpt: invalid, ResponseHeaders: invalid, ModelFrame: invalid, ErrorFrame: "海" + invalid}
+	e.sanitize()
+	for _, v := range []string{e.ResponseExcerpt, e.ResponseHeaders, e.ModelFrame, e.ErrorFrame} {
+		assert.LessOrEqual(t, len(v), 65535)
+		assert.True(t, utf8.ValidString(v))
+	}
 }

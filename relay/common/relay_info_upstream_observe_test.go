@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -308,4 +309,26 @@ func TestObserveUpstreamResponseCapsResponseId(t *testing.T) {
 	info := &RelayInfo{}
 	info.ObserveUpstreamResponse("gpt-5", strings.Repeat("i", 100_000), 0, "")
 	assert.Len(t, info.UpstreamResponseId, 255)
+}
+
+// A 70KB body mixing multibyte characters and invalid bytes still fits a
+// MySQL TEXT column (65535 bytes) as valid UTF-8: sanitising happens before
+// the cut, because each invalid byte grows into a 3-byte U+FFFD.
+func TestForensicsExcerptFitsMySQLTextAfterSanitising(t *testing.T) {
+	var b strings.Builder
+	for b.Len() < 70*1024 {
+		b.WriteString("海\xff\xfe")
+	}
+	info := &RelayInfo{}
+	info.SetUpstreamResponseForensicsBytes([]byte(b.String()), nil)
+	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), 65535)
+	assert.True(t, utf8.ValidString(info.UpstreamResponseExcerpt))
+	assert.True(t, info.UpstreamAudit.ExcerptTruncated)
+	assert.LessOrEqual(t, len(info.UpstreamAudit.ModelFrame), UpstreamFrameCap)
+	assert.True(t, utf8.ValidString(info.UpstreamAudit.ModelFrame))
+
+	info = &RelayInfo{}
+	info.SetUpstreamResponseForensics(strings.Repeat("\xff", 30_000), nil)
+	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), 65535, "30000 invalid bytes grow to 90000 before the cut")
+	assert.True(t, utf8.ValidString(info.UpstreamResponseExcerpt))
 }

@@ -71,9 +71,15 @@ type UpstreamEvidence struct {
 	OutputSha256 string `json:"output_sha256" gorm:"column:output_sha256;type:varchar(64)"`
 }
 
-// sanitize makes every column storable: varchar values are cut to their
-// declared length in characters, text values lose NUL bytes and invalid UTF-8
-// (PostgreSQL rejects both with SQLSTATE 22021 / 22P05).
+// evidenceTextMaxBytes is the largest value a text column takes on every
+// supported engine (MySQL TEXT: 65535 bytes).
+const evidenceTextMaxBytes = 65535
+
+// sanitize makes every column storable: values are sanitized first (NUL bytes
+// and invalid UTF-8 removed — PostgreSQL rejects both with SQLSTATE 22021 /
+// 22P05) and only then cut, varchar to its declared length in characters and
+// text to evidenceTextMaxBytes on a rune boundary, because the U+FFFD
+// replacement can lengthen text that was already cut.
 func (e *UpstreamEvidence) sanitize() {
 	e.Kind = common.TruncateAuditRunes(e.Kind, 32)
 	e.Note = common.TruncateAuditRunes(e.Note, 255)
@@ -86,10 +92,10 @@ func (e *UpstreamEvidence) sanitize() {
 	e.SystemFingerprint = common.TruncateAuditRunes(e.SystemFingerprint, 128)
 	e.PromptSha256 = common.TruncateAuditRunes(e.PromptSha256, 64)
 	e.OutputSha256 = common.TruncateAuditRunes(e.OutputSha256, 64)
-	e.ResponseExcerpt = common.SanitizeAuditText(e.ResponseExcerpt)
-	e.ResponseHeaders = common.SanitizeAuditText(e.ResponseHeaders)
-	e.ModelFrame = common.SanitizeAuditText(e.ModelFrame)
-	e.ErrorFrame = common.SanitizeAuditText(e.ErrorFrame)
+	e.ResponseExcerpt, _ = common.TruncateAuditBytes(e.ResponseExcerpt, evidenceTextMaxBytes)
+	e.ResponseHeaders, _ = common.TruncateAuditBytes(e.ResponseHeaders, evidenceTextMaxBytes)
+	e.ModelFrame, _ = common.TruncateAuditBytes(e.ModelFrame, evidenceTextMaxBytes)
+	e.ErrorFrame, _ = common.TruncateAuditBytes(e.ErrorFrame, evidenceTextMaxBytes)
 }
 
 // ── asynchronous evidence writer ─────────────────────────────────────────────
@@ -140,18 +146,19 @@ type evidenceWriter struct {
 	// the writer (the process-wide writer only).
 	maintenance bool
 
-	startOnce sync.Once
-	enabled   atomic.Bool
-	reason    atomic.Value // string
-	started   atomic.Int64
-	inserted  atomic.Int64
-	dropped   atomic.Int64
-	failed    atomic.Int64
-	queued    atomic.Int64 // bytes held by rows in the queue
-	lastErr   atomic.Value // string
-	lastErrAt atomic.Int64
-	lastLogAt atomic.Int64
-	index     atomic.Value // string
+	startOnce    sync.Once
+	activateOnce sync.Once
+	enabled      atomic.Bool
+	reason       atomic.Value // string
+	started      atomic.Int64
+	inserted     atomic.Int64
+	dropped      atomic.Int64
+	failed       atomic.Int64
+	queued       atomic.Int64 // bytes held by rows in the queue
+	lastErr      atomic.Value // string
+	lastErrAt    atomic.Int64
+	lastLogAt    atomic.Int64
+	index        atomic.Value // string
 
 	flushReq chan chan struct{}
 }
@@ -273,25 +280,42 @@ func (w *evidenceWriter) waitForTable() {
 	delay := w.tableRetry
 	for {
 		time.Sleep(delay)
-		if db := w.db(); db != nil && db.Migrator().HasTable(&UpstreamEvidence{}) {
-			common.SysLog("[upstream-audit] table upstream_evidences found; evidence persistence enabled")
-			w.activate()
+		if w.activateIfTableExists() {
 			return
 		}
 		delay = min(delay*2, evidenceTableRetryMax)
 	}
 }
 
-func (w *evidenceWriter) activate() {
-	w.reason.Store("")
-	w.enabled.Store(true)
-	go w.run()
-	if w.maintenance {
-		go w.pruneLoop()
-		if index, _ := w.index.Load().(string); index != "disabled" {
-			go w.buildIndexes(evidenceIndexDelay)
-		}
+// activateIfTableExists is one retry of the table check: it switches
+// persistence on when the table now exists and reports whether it is on.
+func (w *evidenceWriter) activateIfTableExists() bool {
+	if w.enabled.Load() {
+		return true
 	}
+	db := w.db()
+	if db == nil || !db.Migrator().HasTable(&UpstreamEvidence{}) {
+		return false
+	}
+	common.SysLog("[upstream-audit] table upstream_evidences found; evidence persistence enabled")
+	w.activate()
+	return true
+}
+
+// activate starts the writer (and, for the process-wide writer, its
+// maintenance jobs) exactly once.
+func (w *evidenceWriter) activate() {
+	w.activateOnce.Do(func() {
+		w.reason.Store("")
+		w.enabled.Store(true)
+		go w.run()
+		if w.maintenance {
+			go w.pruneLoop()
+			if index, _ := w.index.Load().(string); index != "disabled" {
+				go w.buildIndexes(evidenceIndexDelay)
+			}
+		}
+	})
 }
 
 func (w *evidenceWriter) run() {
