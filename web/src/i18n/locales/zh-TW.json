@@ -6777,6 +6777,27 @@
     "Zhipu": "智譜",
     "Zhipu GLM": "智譜GLM",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "Versioned build of the same Gemini model": "同一 Gemini 模型的版本構建",
+    "Pinned build answered by the bare alias (pin not honoured)": "指定版本被以裸別名應答（未遵守版本鎖定）",
+    "Not observed": "未觀測",
+    "Observed, no model declared": "已觀測，上游未聲明模型",
+    "Observed": "已觀測",
+    "Duplicate response ID": "重複的回應 ID",
+    "Duplicate output": "重複的輸出",
+    "Stale created timestamp": "created 時間戳異常",
+    "Implausible generation speed": "生成速度不合理",
+    "Suspected replay: this channel already returned the same response ID or output for a different request": "疑似重放：該渠道此前已為另一個請求返回過相同的回應 ID 或輸出",
+    "The upstream declared more than one model within this stream": "上游在同一個串流中聲明了多個模型",
+    "Observation": "觀測",
+    "Configured Model": "配置模型",
+    "Vendor Prefix": "廠商前綴",
+    "Declared Models": "聲明模型序列",
+    "Version Downgrade": "版本降級",
+    "Older model version than the one sent": "上游聲明的模型版本低於發出的版本",
+    "Retry Attempt": "重試序號",
+    "Authenticity Signals": "真實性信號",
+    "Extra Response Keys": "額外回應欄位",
+    "Prompt Token Ratio": "輸入 Token 比值"
   }
 }

@@ -97,11 +97,7 @@ import {
   isPerCallBilling,
   isTimingLogType,
 } from '../../lib/utils'
-import {
-  USAGE_BILLING_PATH,
-  type LogOtherData,
-  type UpstreamResponseAudit,
-} from '../../types'
+import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
@@ -225,19 +221,6 @@ const URSP_OBSERVATION_LABELS: Record<string, string> = {
   none: 'Not observed',
   partial: 'Observed, no model declared',
   full: 'Observed',
-}
-
-// Weak authenticity signals, shown as one row; only ursp.replay is a verdict.
-function urspSignalLabels(
-  ursp: UpstreamResponseAudit,
-  t: (key: string) => string
-): string[] {
-  const labels: string[] = []
-  if (ursp.dup_id) labels.push(t('Duplicate response ID'))
-  if (ursp.dup_output) labels.push(t('Duplicate output'))
-  if (ursp.stale_created) labels.push(t('Stale created timestamp'))
-  if (ursp.implausible_speed) labels.push(t('Implausible generation speed'))
-  return labels
 }
 
 function urspVerdictLabel(
@@ -593,7 +576,15 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const adminInfo = other?.admin_info
   // root-only audit block (root_info, with the pre-2026-09-20 admin_info fallback)
   const ursp = props.isRoot ? rootUpstreamResponseAudit(other) : undefined
-  const urspSignals = ursp ? urspSignalLabels(ursp, t) : []
+  // weak authenticity signals, shown as one row; only ursp.replay is a verdict
+  const urspSignals = ursp
+    ? [
+        ursp.dup_id && t('Duplicate response ID'),
+        ursp.dup_output && t('Duplicate output'),
+        ursp.stale_created && t('Stale created timestamp'),
+        ursp.implausible_speed && t('Implausible generation speed'),
+      ].filter((label): label is string => typeof label === 'string')
+    : []
   const mappedModel = mappedUpstreamModelName(other)
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo

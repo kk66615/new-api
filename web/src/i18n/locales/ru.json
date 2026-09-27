@@ -6777,6 +6777,27 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Versioned build of the same Gemini model": "Versioned build of the same Gemini model",
+    "Pinned build answered by the bare alias (pin not honoured)": "Pinned build answered by the bare alias (pin not honoured)",
+    "Not observed": "Not observed",
+    "Observed, no model declared": "Observed, no model declared",
+    "Observed": "Observed",
+    "Duplicate response ID": "Duplicate response ID",
+    "Duplicate output": "Duplicate output",
+    "Stale created timestamp": "Stale created timestamp",
+    "Implausible generation speed": "Implausible generation speed",
+    "Suspected replay: this channel already returned the same response ID or output for a different request": "Suspected replay: this channel already returned the same response ID or output for a different request",
+    "The upstream declared more than one model within this stream": "The upstream declared more than one model within this stream",
+    "Observation": "Observation",
+    "Configured Model": "Configured Model",
+    "Vendor Prefix": "Vendor Prefix",
+    "Declared Models": "Declared Models",
+    "Version Downgrade": "Version Downgrade",
+    "Older model version than the one sent": "Older model version than the one sent",
+    "Retry Attempt": "Retry Attempt",
+    "Authenticity Signals": "Authenticity Signals",
+    "Extra Response Keys": "Extra Response Keys",
+    "Prompt Token Ratio": "Prompt Token Ratio"
   }
 }

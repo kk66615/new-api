@@ -819,4 +819,11 @@ export const STATIC_I18N_KEYS = [
   'Vendor name and icon must not exceed 128 characters.',
   'Shown',
   'Not shown',
+  // Upstream response audit labels passed to t() from lookup tables
+  // (usage-logs details dialog: verdicts and observation levels).
+  'Versioned build of the same Gemini model',
+  'Pinned build answered by the bare alias (pin not honoured)',
+  'Not observed',
+  'Observed, no model declared',
+  'Observed',
 ] as const
