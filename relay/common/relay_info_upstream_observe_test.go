@@ -371,6 +371,8 @@ func TestBodyMarkersRequireProtocolPosition(t *testing.T) {
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"amazon-bedrock-invocationMetrics and \"amazon-bedrock-invocationMetrics\": {}"}}`, 0},
 		{"Azure chat first chunk",
 			`{"choices":[],"created":0,"id":"","model":"","object":"","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}]}`, BodyMarkerAzureContentFilter},
+		{"Azure chat first chunk, Asynchronous Filter mode",
+			`{"id":"","object":"","created":0,"model":"","prompt_annotations":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}],"choices":[],"usage":null}`, BodyMarkerAzureContentFilter},
 		{"Azure chat content chunk",
 			`{"choices":[{"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}},"delta":{"content":"Hi"},"index":0}],"id":"chatcmpl-a","model":"gpt-4o"}`, BodyMarkerAzureContentFilter},
 		{"Azure Responses completed event",

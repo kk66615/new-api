@@ -134,10 +134,12 @@ var upstreamBodyMarkerNeedles = []struct {
 	{[]byte(`"prompt_filter_results"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
 		return gjson.GetBytes(f, "prompt_filter_results").IsArray()
 	}},
-	// chat choices, or entries of the Responses content_filters array
+	// chat choices, chat prompt annotations (prompt_annotations is the first
+	// chunk's key in Asynchronous Filter mode), or entries of the Responses
+	// content_filters array
 	{[]byte(`"content_filter_results"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
-		return anyGJSONMatch(f, "choices.#.content_filter_results", "content_filters.#.content_filter_results",
-			"response.content_filters.#.content_filter_results")
+		return anyGJSONMatch(f, "choices.#.content_filter_results", "prompt_annotations.#.content_filter_results",
+			"content_filters.#.content_filter_results", "response.content_filters.#.content_filter_results")
 	}},
 	// Responses object (non-stream) or event (stream): top-level of the response only
 	{[]byte(`"content_filters"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
