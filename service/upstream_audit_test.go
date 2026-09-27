@@ -492,12 +492,12 @@ func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
 
 func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
 	ch := isolatedAuditKey(t, 987653, "claude")
-	assert.Empty(t, trackBackendFlip(ch, "aws", BackendByIdShape).flip, "seed must not flip")
+	assert.Empty(t, trackBackendFlip(ch, "aws", BackendByIdShape, nil).flip, "seed must not flip")
 	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
 		t.Fatal("source seed must not flip")
 	}
 	// msg_bdrk_ → msg_: the id shape is on every answer, so its change is real
-	assert.Equal(t, "aws->claude_relay", trackBackendFlip(ch, "claude_relay", BackendByFallback).flip)
+	assert.Equal(t, "aws->claude_relay", trackBackendFlip(ch, "claude_relay", BackendByFallback, nil).flip)
 	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
 		t.Fatal("source unchanged must not flip when only backend moved")
 	}
@@ -972,7 +972,7 @@ func TestBackendSignatureComparesVendorSegmentOnly(t *testing.T) {
 	}
 	key := isolatedAuditKey(t, 987666, "claude")
 	for _, prefix := range []string{"us.anthropic", "", "global.anthropic", "apac.anthropic"} {
-		assert.Empty(t, trackBackendFlip(key, backendSignature("aws", prefix), BackendByModelName).flip, prefix)
+		assert.Empty(t, trackBackendFlip(key, backendSignature("aws", prefix), BackendByModelName, nil).flip, prefix)
 	}
 }
 
@@ -1577,12 +1577,12 @@ func TestAuditBackendTrackerFollowsDecidedBackend(t *testing.T) {
 // A change between two POSITIVE backends is recorded immediately.
 func TestTrackBackendFlipPositiveChangeIsImmediate(t *testing.T) {
 	key := isolatedAuditKey(t, 987688, "gpt")
-	assert.Empty(t, trackBackendFlip(key, "azure", BackendByBody).flip)
-	assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback).flip, "one missing annotation is not a switch")
-	ev := trackBackendFlip(key, "aws", BackendByBody)
+	assert.Empty(t, trackBackendFlip(key, "azure", BackendByBody, nil).flip)
+	assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback, nil).flip, "one missing annotation is not a switch")
+	ev := trackBackendFlip(key, "aws", BackendByBody, nil)
 	assert.Equal(t, "azure->aws", ev.flip)
 	assert.Equal(t, "backend: azure -> aws", ev.note)
-	assert.Equal(t, "aws->deepseek", trackBackendFlip(key, "deepseek", BackendByModelName).flip)
+	assert.Equal(t, "aws->deepseek", trackBackendFlip(key, "deepseek", BackendByModelName, nil).flip)
 }
 
 // A vendor prefix never turns an answer without vendor evidence into
@@ -1593,7 +1593,7 @@ func TestTrackBackendFlipPrefixDoesNotBypassHysteresis(t *testing.T) {
 	key := isolatedAuditKey(t, 987689, "gpt")
 	var events []backendTrackEvent
 	track := func(backend, by string) {
-		if ev := trackBackendFlip(key, backend, by); ev.flip != "" {
+		if ev := trackBackendFlip(key, backend, by, nil); ev.flip != "" {
 			events = append(events, ev)
 		}
 	}
@@ -1622,16 +1622,80 @@ func TestTrackBackendFlipPrefixDoesNotBypassHysteresis(t *testing.T) {
 func TestTrackBackendFlipSeedsFromFallback(t *testing.T) {
 	key := isolatedAuditKey(t, 987690, "gpt")
 	for range 5 {
-		assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback).flip)
+		assert.Empty(t, trackBackendFlip(key, "gpt_relay", BackendByFallback, nil).flip)
 	}
-	assert.Equal(t, "gpt_relay->openrouter", trackBackendFlip(key, "openrouter", BackendByIdShape).flip)
+	assert.Equal(t, "gpt_relay->openrouter", trackBackendFlip(key, "openrouter", BackendByIdShape, nil).flip)
 
 	claude := isolatedAuditKey(t, 987691, "claude")
-	assert.Empty(t, trackBackendFlip(claude, "claude_relay", BackendByFallback).flip)
-	assert.Equal(t, "claude_relay->aws", trackBackendFlip(claude, "aws", BackendByIdShape).flip, "msg_ -> msg_bdrk_")
+	assert.Empty(t, trackBackendFlip(claude, "claude_relay", BackendByFallback, nil).flip)
+	assert.Equal(t, "claude_relay->aws", trackBackendFlip(claude, "aws", BackendByIdShape, nil).flip, "msg_ -> msg_bdrk_")
 
 	prefixed := isolatedAuditKey(t, 987692, "gpt")
-	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback).flip)
-	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay", BackendByFallback).flip, "prefix absent is the same backend")
-	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback).flip, "prefix present again")
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback, nil).flip)
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay", BackendByFallback, nil).flip, "prefix absent is the same backend")
+	assert.Empty(t, trackBackendFlip(prefixed, "gpt_relay/vendorx", BackendByFallback, nil).flip, "prefix present again")
+}
+
+// Azure-hosted DeepSeek-R1 behind a relay with partial Azure annotations:
+// annotated replies decide azure (body) with deepseek (model name) next to
+// it, unannotated ones only deepseek (model name). The body proves the
+// platform and the name the model; they do not contradict, so alternation
+// records nothing; 20 unannotated replies record one "lost" row; a reply
+// from another vendor (gen- id) still flips immediately.
+func TestAuditAzureHostedDeepSeekAlternationIsNotASwitch(t *testing.T) {
+	const ch = 987693
+	isolatedAuditKey(t, ch, "deepseek")
+	annotated := []string{`{"id":"chatcmpl-r1az0001","object":"chat.completion","model":"DeepSeek-R1","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}],"choices":[{"index":0,"message":{"content":"Hi"},"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}]}`}
+	unannotated := []string{`{"id":"chatcmpl-r1az0002","object":"chat.completion","model":"DeepSeek-R1","choices":[{"index":0,"message":{"content":"Hi"}}]}`}
+	var rows []*model.UpstreamEvidence
+	run := func(frames []string) map[string]any {
+		ursp, ev := auditFrames(t, ch, constant.ChannelTypeOpenAI, relayOnlyHeaders, frames, "")
+		if ev != nil && ev.Kind == "provider_switch" {
+			rows = append(rows, ev)
+		}
+		return ursp
+	}
+	ursp := run(annotated)
+	assert.Equal(t, "azure", ursp["backend"])
+	assert.Equal(t, []string{"azure:body", "deepseek:model_name"}, ursp["backend_conflict"])
+	for range 5 {
+		run(unannotated)
+		run(annotated)
+	}
+	assert.Empty(t, rows, "platform evidence and model naming alternating is not a switch")
+
+	for range backendEvidenceLostAfter {
+		run(unannotated)
+	}
+	require.Len(t, rows, 1)
+	assert.Equal(t, "backend evidence lost: azure -> (none) after 20", rows[0].Note)
+
+	ursp = run([]string{`{"id":"gen-1790000000-AbCdEf","object":"chat.completion","model":"DeepSeek-R1","choices":[{"index":0,"message":{"content":"Hi"}}]}`})
+	assert.Equal(t, "azure->openrouter", ursp["backend_flip"])
+	require.Len(t, rows, 2)
+}
+
+// A same-vendor answer never downgrades the provenance: aws known from the
+// body stays body-backed after an aws id-shape answer, so a later fallback
+// still goes through hysteresis (review LOW 1).
+func TestTrackBackendFlipKeepsStrongestProvenance(t *testing.T) {
+	key := isolatedAuditKey(t, 987694, "claude")
+	assert.Empty(t, trackBackendFlip(key, "aws", BackendByBody, nil).flip)
+	assert.Empty(t, trackBackendFlip(key, "aws", BackendByIdShape, nil).flip)
+	assert.Empty(t, trackBackendFlip(key, "claude_relay", BackendByFallback, nil).flip, "one answer without evidence")
+}
+
+// After "lost", a same-vendor weak answer stays under the lost state (no
+// row); only header/body/channel-type evidence records "restored" (LOW 2).
+func TestTrackBackendFlipLostNeedsRealEvidenceToRestore(t *testing.T) {
+	key := isolatedAuditKey(t, 987695, "claude")
+	trackBackendFlip(key, "aws", BackendByBody, nil)
+	var lost backendTrackEvent
+	for range backendEvidenceLostAfter {
+		lost = trackBackendFlip(key, "claude_relay", BackendByFallback, nil)
+	}
+	require.Equal(t, "aws->(none)", lost.flip)
+	assert.Empty(t, trackBackendFlip(key, "aws", BackendByIdShape, nil).flip, "weak same-vendor evidence does not restore")
+	assert.Empty(t, trackBackendFlip(key, "claude_relay", BackendByFallback, nil).flip, "still lost")
+	assert.Equal(t, "(none)->aws", trackBackendFlip(key, "aws", BackendByBody, nil).flip)
 }

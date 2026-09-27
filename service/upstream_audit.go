@@ -2,6 +2,7 @@ package service
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -641,6 +642,19 @@ type backendDecision struct {
 	conflict []string
 }
 
+// weakVendors lists the vendors named by weak evidence (model name, id shape)
+// that lost to the decided backend on this reply.
+func (d backendDecision) weakVendors() []string {
+	var out []string
+	for _, c := range d.conflict {
+		vendor, by, _ := strings.Cut(c, ":")
+		if vendor != d.backend && backendEvidenceStrength(by) == 1 {
+			out = append(out, vendor)
+		}
+	}
+	return out
+}
+
 // bodyBackends lists the backends named by vendor-specific body fields, in
 // priority order (several at once only on a relay that mixes backends).
 func bodyBackends(markers relaycommon.UpstreamBodyMarkers) []string {
@@ -813,6 +827,29 @@ type backendTrackState struct {
 	lastBy  string // evidence behind last (BackendBy*)
 	missing int    // consecutive answers without vendor evidence since then
 	lost    bool   // the evidence-lost event was recorded
+	// companions are the vendors named by weak evidence (model name, id
+	// shape) on the same replies as the header/body/channel-type evidence
+	// behind last: Azure body fields prove the platform while the model
+	// name names the model (Azure-hosted DeepSeek-R1), so a later reply
+	// carrying only such a weak claim is "no evidence", not a switch.
+	companions []string
+}
+
+// maxBackendCompanions bounds backendTrackState.companions.
+const maxBackendCompanions = 4
+
+// backendEvidenceStrength orders provenance: a same-vendor answer never
+// downgrades the evidence a key's backend is known from.
+func backendEvidenceStrength(by string) int {
+	switch by {
+	case BackendByChannelType:
+		return 3
+	case BackendByHeader, BackendByBody:
+		return 2
+	case BackendByIdShape, BackendByModelName:
+		return 1
+	}
+	return 0
 }
 
 // backendTrackEvent describes a recorded backend change: flip is the
@@ -845,7 +882,7 @@ type backendTrackEvent struct {
 //     evidence records one "evidence restored" event.
 //   - The vendor prefix only takes part in comparing two answers' vendor
 //     segments (present ↔ absent is the same backend).
-func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent {
+func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []string) backendTrackEvent {
 	if key.channelId == 0 || backend == "" || backend == "unknown" {
 		return backendTrackEvent{}
 	}
@@ -854,16 +891,21 @@ func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent 
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	prev := st.last
+	evidence := isEvidenceBackedBy(by)
 	if prev == "" {
 		// seed from any decision, a fallback included: a key that starts
 		// without vendor evidence must still see its first real switch
 		st.last, st.lastBy = backend, by
+		if evidence {
+			st.companions = boundedCompanions(nil, weakVendors)
+		}
 		return backendTrackEvent{}
 	}
-	// "no evidence" is decided by the decision alone, never by a vendor
-	// prefix: an Azure relay answering openai/gpt-4o without annotations is
-	// still an answer without vendor evidence
-	noEvidence := by == BackendByFallback
+	shape, vendor, _ := strings.Cut(backend, "/")
+	// "no evidence": a fallback (whatever vendor prefix it carries), or only
+	// a weak claim for a vendor that was seen next to the evidence before
+	noEvidence := by == BackendByFallback ||
+		(backendEvidenceStrength(by) == 1 && slices.Contains(st.companions, shape))
 	if noEvidence && isEvidenceBackedBy(st.lastBy) {
 		if st.lost {
 			return backendTrackEvent{}
@@ -878,26 +920,53 @@ func trackBackendFlip(key flipTrackerKey, backend, by string) backendTrackEvent 
 			note: "backend evidence lost: " + prev + " -> (none) after " + strconv.Itoa(st.missing),
 		}
 	}
-	st.missing = 0
+	prevShape, prevVendor, _ := strings.Cut(prev, "/")
+	sameBackend := srcFamily(prevShape) == srcFamily(shape) && (vendor == "" || prevVendor == "" || vendor == prevVendor)
 	if st.lost {
-		st.lost = false
-		if isEvidenceBackedBy(by) {
+		if evidence {
+			st.lost, st.missing = false, 0
 			st.last, st.lastBy = backend, by
+			st.companions = boundedCompanions(nil, weakVendors)
 			return backendTrackEvent{flip: "(none)->" + backend, note: "backend evidence restored: (none) -> " + backend}
 		}
-		// weaker evidence after a loss: compared like any other answer below
+		if sameBackend {
+			return backendTrackEvent{} // weak evidence for the same vendor does not restore
+		}
+		st.lost = false // weak evidence for another vendor: a switch, recorded below
 	}
-	prevShape, prevVendor, _ := strings.Cut(prev, "/")
-	shape, vendor, _ := strings.Cut(backend, "/")
-	if srcFamily(prevShape) == srcFamily(shape) && (vendor == "" || prevVendor == "" || vendor == prevVendor) {
+	st.missing = 0
+	if sameBackend {
 		if vendor != "" || prevVendor == "" {
 			st.last = backend
 		}
-		st.lastBy = by
+		if backendEvidenceStrength(by) >= backendEvidenceStrength(st.lastBy) {
+			st.lastBy = by
+		}
+		if evidence {
+			st.companions = boundedCompanions(st.companions, weakVendors)
+		}
 		return backendTrackEvent{}
 	}
 	st.last, st.lastBy = backend, by
+	st.companions = nil
+	if evidence {
+		st.companions = boundedCompanions(nil, weakVendors)
+	}
 	return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend}
+}
+
+// boundedCompanions merges vendors into companions without duplicates, up to
+// maxBackendCompanions.
+func boundedCompanions(companions, vendors []string) []string {
+	for _, v := range vendors {
+		if len(companions) >= maxBackendCompanions {
+			break
+		}
+		if v != "" && !slices.Contains(companions, v) {
+			companions = append(companions, v)
+		}
+	}
+	return companions
 }
 
 // isEvidenceBackedBy reports whether a backend decision came from evidence
@@ -1244,7 +1313,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
 		}
-		backendEvent = trackBackendFlip(key, backendSig, decision.by)
+		backendEvent = trackBackendFlip(key, backendSig, decision.by, decision.weakVendors())
 		if backendEvent.flip != "" {
 			ursp["backend_flip"] = backendEvent.flip
 		}
