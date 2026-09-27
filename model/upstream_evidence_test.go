@@ -168,3 +168,33 @@ func TestEnsureUpstreamEvidenceIndexesIsIdempotent(t *testing.T) {
 		assert.True(t, db.Migrator().HasIndex(&UpstreamEvidence{}, idx.name), idx.name)
 	}
 }
+
+// The queue is bounded by memory as well as by rows: large rows beyond the
+// byte budget are dropped and counted even with free slots.
+func TestEvidenceWriterDropsBeyondByteBudget(t *testing.T) {
+	db := openEvidenceTestDB(t, true)
+	w := newEvidenceWriter(func() *gorm.DB { return db }, 16, 4, time.Hour)
+	w.byteBudget = 10_000
+	w.startOnce.Do(func() {})
+	w.enabled.Store(true)
+
+	big := strings.Repeat("x", 6_000)
+	assert.True(t, w.enqueue(&UpstreamEvidence{Kind: "normal", ResponseExcerpt: big}))
+	assert.False(t, w.enqueue(&UpstreamEvidence{Kind: "normal", ResponseExcerpt: big}))
+	health := w.health()
+	assert.Equal(t, int64(1), health.DroppedTotal)
+	assert.Equal(t, 1, health.QueueLen)
+	assert.Equal(t, int64(6_512), health.QueueBytes)
+
+	w.dequeued(<-w.queue)
+	assert.Zero(t, w.health().QueueBytes, "a dequeued row releases its budget")
+}
+
+func TestRedactDatabaseAddress(t *testing.T) {
+	msg := `failed to connect to host=10.0.0.5 user=newapi database=logs: dial tcp 10.0.0.5:5432: connect: connection refused; dsn postgres://newapi:secret@db.internal:5432/logs`
+	redacted := redactDatabaseAddress(msg)
+	for _, secret := range []string{"10.0.0.5", "5432", "secret", "db.internal", "user=newapi"} {
+		assert.NotContains(t, redacted, secret)
+	}
+	assert.Contains(t, redacted, "connection refused")
+}

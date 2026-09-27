@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -94,9 +95,13 @@ func (e *UpstreamEvidence) sanitize() {
 // row (counted) instead of blocking the relay or spawning goroutines.
 
 const (
-	evidenceQueueCap      = 4096
-	evidenceBatchMax      = 200
-	evidenceFlushInterval = time.Second
+	evidenceQueueCap = 4096
+	// evidenceQueueByteBudget bounds the memory held by queued rows (a row
+	// can carry ~100KB of excerpt, frames and headers): beyond it rows are
+	// dropped and counted even if the queue has free slots.
+	evidenceQueueByteBudget = 64 << 20
+	evidenceBatchMax        = 200
+	evidenceFlushInterval   = time.Second
 	// evidenceIndexDelay keeps the background index build well clear of
 	// startup and the first burst of traffic.
 	evidenceIndexDelay = 2 * time.Minute
@@ -113,15 +118,17 @@ type UpstreamEvidenceHealth struct {
 	LastErrorAt    int64  `json:"last_error_at"`
 	QueueLen       int    `json:"queue_len"`
 	QueueCap       int    `json:"queue_cap"`
+	QueueBytes     int64  `json:"queue_bytes"`
 	StartedAt      int64  `json:"started_at"`
 	IndexState     string `json:"index_state"`
 }
 
 type evidenceWriter struct {
-	db       func() *gorm.DB
-	queue    chan *UpstreamEvidence
-	batchMax int
-	interval time.Duration
+	db         func() *gorm.DB
+	queue      chan *UpstreamEvidence
+	batchMax   int
+	interval   time.Duration
+	byteBudget int64
 	// maintenance starts the pruner and the background index build with
 	// the writer (the process-wide writer only).
 	maintenance bool
@@ -133,6 +140,7 @@ type evidenceWriter struct {
 	inserted  atomic.Int64
 	dropped   atomic.Int64
 	failed    atomic.Int64
+	queued    atomic.Int64 // bytes held by rows in the queue
 	lastErr   atomic.Value // string
 	lastErrAt atomic.Int64
 	lastLogAt atomic.Int64
@@ -143,11 +151,12 @@ type evidenceWriter struct {
 
 func newEvidenceWriter(db func() *gorm.DB, queueCap, batchMax int, interval time.Duration) *evidenceWriter {
 	return &evidenceWriter{
-		db:       db,
-		queue:    make(chan *UpstreamEvidence, queueCap),
-		batchMax: batchMax,
-		interval: interval,
-		flushReq: make(chan chan struct{}),
+		db:         db,
+		queue:      make(chan *UpstreamEvidence, queueCap),
+		batchMax:   batchMax,
+		interval:   interval,
+		byteBudget: evidenceQueueByteBudget,
+		flushReq:   make(chan chan struct{}),
 	}
 }
 
@@ -180,13 +189,33 @@ func (w *evidenceWriter) enqueue(e *UpstreamEvidence) bool {
 	if e == nil || !w.enabled.Load() {
 		return false
 	}
+	size := e.approxBytes()
+	if w.queued.Add(size) > w.byteBudget {
+		w.queued.Add(-size)
+		w.dropped.Add(1)
+		return false
+	}
 	select {
 	case w.queue <- e:
 		return true
 	default:
+		w.queued.Add(-size)
 		w.dropped.Add(1)
 		return false
 	}
+}
+
+// approxBytes estimates the memory a queued row holds. Computed before the
+// writer sanitizes the row, so enqueue and dequeue agree on the value.
+func (e *UpstreamEvidence) approxBytes() int64 {
+	return int64(512 + len(e.ResponseExcerpt) + len(e.ResponseHeaders) + len(e.ModelFrame) + len(e.ErrorFrame) +
+		len(e.Note) + len(e.RequestModel) + len(e.SentModel) + len(e.ResponseModel) + len(e.ResponseId))
+}
+
+// dequeued releases a row's share of the byte budget.
+func (w *evidenceWriter) dequeued(e *UpstreamEvidence) *UpstreamEvidence {
+	w.queued.Add(-e.approxBytes())
+	return e
 }
 
 // start decides once whether persistence is possible (E6): a missing log
@@ -226,7 +255,7 @@ func (w *evidenceWriter) run() {
 	for {
 		select {
 		case e := <-w.queue:
-			batch = append(batch, e)
+			batch = append(batch, w.dequeued(e))
 			if len(batch) >= w.batchMax {
 				batch = w.write(batch)
 			}
@@ -236,7 +265,7 @@ func (w *evidenceWriter) run() {
 			for drained := false; !drained; {
 				select {
 				case e := <-w.queue:
-					batch = append(batch, e)
+					batch = append(batch, w.dequeued(e))
 					if len(batch) >= w.batchMax {
 						batch = w.write(batch)
 					}
@@ -285,6 +314,7 @@ func (w *evidenceWriter) write(batch []*UpstreamEvidence) []*UpstreamEvidence {
 // recordError keeps the last error for the health endpoint and logs at most
 // once a minute, so an unreachable database cannot flood the system log.
 func (w *evidenceWriter) recordError(msg string) {
+	msg = redactDatabaseAddress(msg)
 	now := time.Now().Unix()
 	w.lastErr.Store(common.TruncateAuditRunes(msg, 500))
 	w.lastErrAt.Store(now)
@@ -327,9 +357,20 @@ func (w *evidenceWriter) health() UpstreamEvidenceHealth {
 		LastErrorAt:    w.lastErrAt.Load(),
 		QueueLen:       len(w.queue),
 		QueueCap:       cap(w.queue),
+		QueueBytes:     w.queued.Load(),
 		StartedAt:      w.started.Load(),
 		IndexState:     index,
 	}
+}
+
+// databaseAddressRe matches DSNs, host=/user=/password= parameters and
+// host:port pairs that driver errors may embed.
+var databaseAddressRe = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://\S+|\b(?:host|hostaddr|user|password|dbname)=\S+|@?\[?[a-z0-9.-]+\]?:\d{2,5}\b`)
+
+// redactDatabaseAddress keeps error text useful for the health endpoint
+// without exposing where the log database lives or how to log in.
+func redactDatabaseAddress(msg string) string {
+	return databaseAddressRe.ReplaceAllString(msg, "[redacted]")
 }
 
 // ── pruning ──────────────────────────────────────────────────────────────────
@@ -365,7 +406,7 @@ func (w *evidenceWriter) pruneOnce(cutoff int64) (deleted int64) {
 		var ids []int
 		if err := db.Model(&UpstreamEvidence{}).
 			Where("kind = ? AND created_at < ?", "normal", cutoff).
-			Order("created_at").Limit(evidencePruneBatch).
+			Order("id").Limit(evidencePruneBatch).
 			Pluck("id", &ids).Error; err != nil {
 			common.SysError("[upstream-audit] evidence prune select failed: " + err.Error())
 			return deleted
@@ -428,30 +469,18 @@ func (w *evidenceWriter) buildIndexes(delay time.Duration) {
 	w.index.Store("ready")
 }
 
+// upstreamEvidenceIndexLockKey is the PostgreSQL advisory lock that keeps
+// several gateway instances from building (or dropping) the indexes at once.
+const upstreamEvidenceIndexLockKey = 7423190417
+
 func ensureUpstreamEvidenceIndexes(db *gorm.DB) error {
+	if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+		// one pinned session: the advisory lock belongs to the connection
+		return db.Connection(ensureUpstreamEvidenceIndexesPostgres)
+	}
 	table := "upstream_evidences"
 	for _, idx := range upstreamEvidenceIndexes {
-		switch {
-		case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
-			var valid []bool
-			if err := db.Raw("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = ?", idx.name).
-				Scan(&valid).Error; err != nil {
-				return err
-			}
-			if len(valid) > 0 && valid[0] {
-				continue
-			}
-			if len(valid) > 0 {
-				common.SysLog("[upstream-audit] dropping invalid index " + idx.name + " left by an interrupted build")
-				if err := db.Exec("DROP INDEX CONCURRENTLY IF EXISTS " + idx.name).Error; err != nil {
-					return err
-				}
-			}
-			common.SysLog("[upstream-audit] building index " + idx.name + " concurrently")
-			if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS " + idx.name + " ON " + table + " (" + idx.columns + ")").Error; err != nil {
-				return err
-			}
-		case common.UsingLogDatabase(common.DatabaseTypeMySQL):
+		if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
 			if db.Migrator().HasIndex(&UpstreamEvidence{}, idx.name) {
 				continue
 			}
@@ -459,10 +488,56 @@ func ensureUpstreamEvidenceIndexes(db *gorm.DB) error {
 			if err := db.Exec("CREATE INDEX " + idx.name + " ON " + table + " (" + idx.columns + ") ALGORITHM=INPLACE LOCK=NONE").Error; err != nil {
 				return err
 			}
-		default:
-			if err := db.Exec("CREATE INDEX IF NOT EXISTS " + idx.name + " ON " + table + " (" + idx.columns + ")").Error; err != nil {
+			continue
+		}
+		if err := db.Exec("CREATE INDEX IF NOT EXISTS " + idx.name + " ON " + table + " (" + idx.columns + ")").Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureUpstreamEvidenceIndexesPostgres builds the indexes with CREATE INDEX
+// CONCURRENTLY under an advisory lock. An INVALID index is only dropped and
+// rebuilt when no build of it is in progress anywhere (an instance without
+// the lock, e.g. an older release, may still be building it).
+func ensureUpstreamEvidenceIndexesPostgres(conn *gorm.DB) error {
+	var locked bool
+	if err := conn.Raw("SELECT pg_try_advisory_lock(?)", upstreamEvidenceIndexLockKey).Scan(&locked).Error; err != nil {
+		return err
+	}
+	if !locked {
+		common.SysLog("[upstream-audit] another instance holds the evidence index lock; skipping index build")
+		return nil
+	}
+	defer conn.Exec("SELECT pg_advisory_unlock(?)", upstreamEvidenceIndexLockKey)
+	for _, idx := range upstreamEvidenceIndexes {
+		var valid []bool
+		if err := conn.Raw("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = ?", idx.name).
+			Scan(&valid).Error; err != nil {
+			return err
+		}
+		if len(valid) > 0 && valid[0] {
+			continue
+		}
+		if len(valid) > 0 {
+			var building []int64
+			if err := conn.Raw("SELECT p.pid FROM pg_stat_progress_create_index p JOIN pg_class c ON c.oid = p.index_relid WHERE c.relname = ?", idx.name).
+				Scan(&building).Error; err != nil {
+				return err // cannot tell whether a build is running (PostgreSQL < 12): leave it alone
+			}
+			if len(building) > 0 {
+				common.SysLog("[upstream-audit] index " + idx.name + " is being built by another session; not touching it")
+				continue
+			}
+			common.SysLog("[upstream-audit] dropping invalid index " + idx.name + " left by an interrupted build")
+			if err := conn.Exec("DROP INDEX CONCURRENTLY IF EXISTS " + idx.name).Error; err != nil {
 				return err
 			}
+		}
+		common.SysLog("[upstream-audit] building index " + idx.name + " concurrently")
+		if err := conn.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS " + idx.name + " ON upstream_evidences (" + idx.columns + ")").Error; err != nil {
+			return err
 		}
 	}
 	return nil
