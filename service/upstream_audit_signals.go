@@ -117,7 +117,7 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	if created > 1e12 {
 		created /= 1000
 	}
-	current := replayEntry{requestId: requestId, promptHash: audit.PromptSHA256, outputHash: audit.OutputSHA256, created: created}
+	current := replayEntry{requestId: requestId, promptHash: audit.PromptSHA256, outputHash: audit.OutputSHA256, created: created, stale: s.staleCreated}
 	// H2: the same response id on this channel for a different request
 	var idPrev, outputPrev replayEntry
 	if id := strings.TrimSpace(relayInfo.UpstreamResponseId); channelId != 0 && !isPlaceholderResponseId(id) {
@@ -137,9 +137,9 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// such turn). Any non-empty text counts here — a cache replaying a short
 	// greeting under the same id is the #148 case, while a constant-id
 	// generator produces different text. Only the cross-id duplicate-output
-	// rule needs a distinctive (≥200 char) output. A duplicate output counts only together with the same id
-	// on that same earlier row, or a stale created stamp. A different prompt
-	// or an explicit temperature are recorded as reasons, not proof.
+	// rule needs a distinctive (≥200 char) output, and it counts only with a
+	// corroborating stale created stamp. A different prompt or an explicit
+	// temperature are recorded as reasons, not proof.
 	// a stale created stamp only corroborates on channels whose created is not
 	// a constant (#109 stamps every answer with the same old value)
 	staleCorroborates := s.staleCreated && !constantCreated.observe(channelId, created, current.outputHash, relayInfo.UpstreamResponseId, record)
@@ -157,8 +157,13 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 		(staleCorroborates || sameStaleCreated || (audit.OutputChars >= replayMinOutputChars && !samePrompt))
 	// a duplicate output with the same id on the same earlier row is the
 	// same-id case above (including its same-prompt guard); across ids a
-	// duplicate output needs a corroborating stale created
-	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates)
+	// duplicate output needs a corroborating stale created. A cache hands back
+	// an answer that was fresh when first produced; when the earlier answer
+	// already carried this very stale stamp, the channel is stamping a
+	// constant old created (#109) — possibly before the constant-created
+	// tracker has seen two different answers (cold start) — so it is not proof.
+	earlierSameStale := outputPrev.stale && outputPrev.created == created
+	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates && !earlierSameStale)
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -209,6 +214,7 @@ type replayEntry struct {
 	promptHash string
 	outputHash string
 	created    int64
+	stale      bool // created was already stale when this answer arrived
 }
 
 func newReplayLRU(limit int) *replayLRU {
@@ -233,7 +239,7 @@ func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool
 			if current.outputHash == "" {
 				// an output-less turn (tool calls only, or a handler that
 				// computes no hash) must not erase the output to compare with
-				current.outputHash, current.created = entry.outputHash, entry.created
+				current.outputHash, current.created, current.stale = entry.outputHash, entry.created, entry.stale
 			}
 			*entry = current
 			l.order.MoveToFront(el)

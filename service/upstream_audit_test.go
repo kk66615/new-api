@@ -1212,6 +1212,60 @@ func TestAuditConstantCreatedDoesNotCorroborate(t *testing.T) {
 	assert.Equal(t, "normal", ev.Kind)
 }
 
+// Cold start on a #109-shaped channel (constant old created, fresh distinct
+// ids): before the constant-created tracker has seen two different answers,
+// the first repeated long answer must not become a replay (review round 5).
+func TestAuditConstantCreatedColdStartNoReplay(t *testing.T) {
+	const ch = 987670
+	isolatedAuditKey(t, ch, "gpt")
+	constantOld := time.Now().Unix() - 30*86400
+	long := strings.Repeat("A long deterministic answer that repeats word for word. ", 5)
+	for _, prompt := range []string{strings.Repeat("d", 64), strings.Repeat("e", 64)} {
+		ursp, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "cold-2-" + prompt[:1], models: []string{"gpt-5"},
+			id: "chatcmpl-x1090000" + prompt[:1], created: constantOld, output: long, promptHash: prompt})
+		if prompt[0] == 'd' {
+			continue // first answer: nothing to compare with
+		}
+		assert.Equal(t, true, ursp["stale_created"])
+		assert.Equal(t, true, ursp["dup_output"])
+		assert.NotContains(t, ursp, "replay")
+		assert.Equal(t, "normal", ev.Kind)
+	}
+
+	// a real cross-id cache replay still counts: the original answer was fresh
+	const ch2 = 987671
+	isolatedAuditKey(t, ch2, "gpt")
+	now := time.Now().Unix()
+	runAuditExchange(t, auditExchange{channelId: ch2, requestId: "cache-1", models: []string{"gpt-5"},
+		id: "chatcmpl-orig00001", created: now, output: long, promptHash: strings.Repeat("f", 64)})
+	ursp, ev := runAuditExchange(t, auditExchange{channelId: ch2, requestId: "cache-2", models: []string{"gpt-5"},
+		id: "chatcmpl-copy00001", created: now - 22*86400, output: long, promptHash: strings.Repeat("g", 64)})
+	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+}
+
+// Rule (b): the same stale created remembered for the same id corroborates a
+// same-id replay even on a channel already known to stamp a constant created.
+func TestAuditSameStaleCreatedOnConstantCreatedChannel(t *testing.T) {
+	const ch = 987672
+	isolatedAuditKey(t, ch, "gpt")
+	old := time.Now().Unix() - 22*86400
+	prompt := func(c string) string { return strings.Repeat(c, 64) }
+	run := func(req, id, output, p string) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, models: []string{"gpt-5"},
+			id: id, created: old, output: output, promptHash: p})
+	}
+	// mark the channel constant-created: same stamp, two ids, two outputs
+	run("m-1", "chatcmpl-mark00001", "first distinct answer", prompt("h"))
+	run("m-2", "chatcmpl-mark00002", "second distinct answer", prompt("i"))
+	// the #148 shape on that channel
+	greeting := "Hello! How can I help you with it today?"
+	run("g-1", "chatcmpl-greet0148", greeting, prompt("j"))
+	ursp, ev := run("g-2", "chatcmpl-greet0148", greeting, prompt("k"))
+	assert.Equal(t, true, ursp["replay"])
+	assert.Equal(t, "replay_suspect", ev.Kind)
+}
+
 // provider_switch notes keep exactly the flip text the watchdog groups on;
 // other kinds put the signals first so the 255-char cut never drops them
 // (spec review L-3, L-4).
