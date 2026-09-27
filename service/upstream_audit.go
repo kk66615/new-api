@@ -875,11 +875,23 @@ type backendTrackEvent struct {
 //     another fallback, is compared like any other answer: ids and model
 //     names are on every answer, so their change is real (msg_bdrk_ → msg_).
 //   - After a backend known from the channel type, headers or body
-//     fingerprints, a fallback (by == fallback, whatever vendor prefix it
-//     carries) is "no evidence this time", not a switch: the last backend is
-//     kept. Only backendEvidenceLostAfter consecutive such answers record one
-//     "evidence lost" event, and only the return of header/body/channel-type
-//     evidence records one "evidence restored" event.
+//     fingerprints, an answer without vendor evidence is "no evidence this
+//     time", not a switch: the last backend is kept. That covers a fallback
+//     (by == fallback, whatever vendor prefix it carries) and an answer whose
+//     only evidence is a weak claim for a vendor seen next to that evidence
+//     before (its companions: Azure body fields prove the platform, the
+//     DeepSeek model name names the model). Only backendEvidenceLostAfter
+//     consecutive such answers record one "evidence lost" event.
+//   - "Lost" is cleared only by channel-type/header/body evidence: for the
+//     same vendor it records "evidence restored", for another vendor a switch
+//     "backend: a -> b (after evidence lost)". Weak evidence for the same
+//     vendor stays under the lost state; weak evidence for another vendor is
+//     a normal switch.
+//   - A same-vendor answer never downgrades the provenance the backend is
+//     known from (aws by body, then aws by id shape, stays body-backed).
+//   - A weak-only backend (e.g. the first reply after a restart, deepseek by
+//     model name) followed by evidence that names it as a companion is
+//     adopted silently: the platform became known, nothing switched.
 //   - The vendor prefix only takes part in comparing two answers' vendor
 //     segments (present ↔ absent is the same backend).
 func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []string) backendTrackEvent {
@@ -927,6 +939,10 @@ func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []stri
 			st.lost, st.missing = false, 0
 			st.last, st.lastBy = backend, by
 			st.companions = boundedCompanions(nil, weakVendors)
+			if !sameBackend {
+				// evidence came back for another vendor: that is a switch
+				return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend + " (after evidence lost)"}
+			}
 			return backendTrackEvent{flip: "(none)->" + backend, note: "backend evidence restored: (none) -> " + backend}
 		}
 		if sameBackend {
@@ -947,10 +963,17 @@ func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []stri
 		}
 		return backendTrackEvent{}
 	}
+	adopt := evidence && !isEvidenceBackedBy(st.lastBy) && slices.Contains(weakVendors, prevShape)
 	st.last, st.lastBy = backend, by
 	st.companions = nil
 	if evidence {
 		st.companions = boundedCompanions(nil, weakVendors)
+	}
+	if adopt {
+		// the weak vendor held so far (e.g. deepseek by model name, the first
+		// reply after a restart) co-occurs with this evidence: the platform
+		// is now known, nothing switched
+		return backendTrackEvent{}
 	}
 	return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend}
 }

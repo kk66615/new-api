@@ -1699,3 +1699,31 @@ func TestTrackBackendFlipLostNeedsRealEvidenceToRestore(t *testing.T) {
 	assert.Empty(t, trackBackendFlip(key, "claude_relay", BackendByFallback, nil).flip, "still lost")
 	assert.Equal(t, "(none)->aws", trackBackendFlip(key, "aws", BackendByBody, nil).flip)
 }
+
+// After a restart the first reply may carry only the model name (deepseek);
+// the next reply's Azure body evidence names deepseek as its companion, so
+// the platform becoming known is adopted silently. Evidence without that
+// companion is still a switch.
+func TestTrackBackendFlipAdoptsEvidenceForAWeakStart(t *testing.T) {
+	key := isolatedAuditKey(t, 987696, "deepseek")
+	assert.Empty(t, trackBackendFlip(key, "deepseek", BackendByModelName, nil).flip)
+	assert.Empty(t, trackBackendFlip(key, "azure", BackendByBody, []string{"deepseek"}).flip)
+	assert.Empty(t, trackBackendFlip(key, "deepseek", BackendByModelName, nil).flip, "now a companion: no evidence this time")
+
+	other := isolatedAuditKey(t, 987697, "deepseek")
+	trackBackendFlip(other, "deepseek", BackendByModelName, nil)
+	assert.Equal(t, "deepseek->aws", trackBackendFlip(other, "aws", BackendByBody, nil).flip)
+}
+
+// Evidence returning for a different vendor after "lost" is a switch, not a
+// restoration.
+func TestTrackBackendFlipEvidenceForAnotherVendorAfterLost(t *testing.T) {
+	key := isolatedAuditKey(t, 987698, "gpt")
+	trackBackendFlip(key, "azure", BackendByBody, nil)
+	for range backendEvidenceLostAfter {
+		trackBackendFlip(key, "gpt_relay", BackendByFallback, nil)
+	}
+	ev := trackBackendFlip(key, "aws", BackendByBody, nil)
+	assert.Equal(t, "azure->aws", ev.flip)
+	assert.Equal(t, "backend: azure -> aws (after evidence lost)", ev.note)
+}
