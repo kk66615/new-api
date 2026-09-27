@@ -889,9 +889,12 @@ type backendTrackEvent struct {
 //     a normal switch.
 //   - A same-vendor answer never downgrades the provenance the backend is
 //     known from (aws by body, then aws by id shape, stays body-backed).
-//   - A weak-only backend (e.g. the first reply after a restart, deepseek by
-//     model name) followed by evidence that names it as a companion is
-//     adopted silently: the platform became known, nothing switched.
+//   - A backend known only from weak evidence (deepseek by model name) that
+//     is followed by header/body/channel-type evidence for another vendor is
+//     a switch, even when that evidence names the weak vendor as a companion:
+//     "model name unchanged, backend swapped" is exactly what this tracker
+//     is for. After a restart this records at most one row per key when the
+//     first reply happened to carry only weak evidence (accepted trade-off).
 //   - The vendor prefix only takes part in comparing two answers' vendor
 //     segments (present ↔ absent is the same backend).
 func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []string) backendTrackEvent {
@@ -963,17 +966,10 @@ func trackBackendFlip(key flipTrackerKey, backend, by string, weakVendors []stri
 		}
 		return backendTrackEvent{}
 	}
-	adopt := evidence && !isEvidenceBackedBy(st.lastBy) && slices.Contains(weakVendors, prevShape)
 	st.last, st.lastBy = backend, by
 	st.companions = nil
 	if evidence {
 		st.companions = boundedCompanions(nil, weakVendors)
-	}
-	if adopt {
-		// the weak vendor held so far (e.g. deepseek by model name, the first
-		// reply after a restart) co-occurs with this evidence: the platform
-		// is now known, nothing switched
-		return backendTrackEvent{}
 	}
 	return backendTrackEvent{flip: prev + "->" + backend, note: "backend: " + prev + " -> " + backend}
 }

@@ -1700,19 +1700,24 @@ func TestTrackBackendFlipLostNeedsRealEvidenceToRestore(t *testing.T) {
 	assert.Equal(t, "(none)->aws", trackBackendFlip(key, "aws", BackendByBody, nil).flip)
 }
 
-// After a restart the first reply may carry only the model name (deepseek);
-// the next reply's Azure body evidence names deepseek as its companion, so
-// the platform becoming known is adopted silently. Evidence without that
-// companion is still a switch.
-func TestTrackBackendFlipAdoptsEvidenceForAWeakStart(t *testing.T) {
-	key := isolatedAuditKey(t, 987696, "deepseek")
-	assert.Empty(t, trackBackendFlip(key, "deepseek", BackendByModelName, nil).flip)
-	assert.Empty(t, trackBackendFlip(key, "azure", BackendByBody, []string{"deepseek"}).flip)
-	assert.Empty(t, trackBackendFlip(key, "deepseek", BackendByModelName, nil).flip, "now a companion: no evidence this time")
+// A backend known only from its model name (deepseek) followed by Azure body
+// evidence is recorded as a switch even though that evidence names deepseek
+// as a companion: "model name unchanged, backend swapped" must surface.
+// After a restart whose first reply was weak-only this is the accepted one
+// row per key.
+func TestTrackBackendFlipWeakBackendThenEvidenceIsASwitch(t *testing.T) {
+	established := isolatedAuditKey(t, 987696, "deepseek")
+	for range 500 {
+		assert.Empty(t, trackBackendFlip(established, "deepseek", BackendByModelName, nil).flip)
+	}
+	assert.Equal(t, "deepseek->azure", trackBackendFlip(established, "azure", BackendByBody, []string{"deepseek"}).flip)
 
-	other := isolatedAuditKey(t, 987697, "deepseek")
-	trackBackendFlip(other, "deepseek", BackendByModelName, nil)
-	assert.Equal(t, "deepseek->aws", trackBackendFlip(other, "aws", BackendByBody, nil).flip)
+	restarted := isolatedAuditKey(t, 987697, "deepseek")
+	assert.Empty(t, trackBackendFlip(restarted, "deepseek", BackendByModelName, nil).flip)
+	ev := trackBackendFlip(restarted, "azure", BackendByBody, []string{"deepseek"})
+	assert.Equal(t, "deepseek->azure", ev.flip)
+	assert.Equal(t, "backend: deepseek -> azure", ev.note)
+	assert.Empty(t, trackBackendFlip(restarted, "deepseek", BackendByModelName, nil).flip, "afterwards deepseek is a companion: no evidence this time")
 }
 
 // Evidence returning for a different vendor after "lost" is a switch, not a
