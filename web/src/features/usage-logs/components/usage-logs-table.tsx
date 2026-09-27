@@ -44,7 +44,11 @@ import {
 } from '../constants'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
-import { parseLogOther, rootUpstreamResponseAudit } from '../lib/format'
+import {
+  isUpstreamAuditAnomaly,
+  parseLogOther,
+  rootUpstreamResponseAudit,
+} from '../lib/format'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
@@ -272,11 +276,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           if (other?.admin_info?.quota_saturation) {
             tintClass = quotaSaturationRowTint
           }
-          // upstream anomaly wins: model mismatch or source flip → yellow row.
-          // root-only: the resolver reads root_info (plus the legacy admin_info
-          // scope of rows written before 2026-09-20), gated on the root view
+          // upstream anomaly wins: model mismatch, suspected replay, mid-stream
+          // model change or source flip → yellow row. root-only: the resolver
+          // reads root_info (plus the legacy admin_info scope of rows written
+          // before 2026-09-20), gated on the root view
           const ursp = isRoot ? rootUpstreamResponseAudit(other) : undefined
-          if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
+          if (isUpstreamAuditAnomaly(ursp)) {
             tintClass = urspAnomalyRowTint
           }
         }

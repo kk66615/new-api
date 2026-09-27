@@ -64,12 +64,20 @@ import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { PolicyDecisionRecord } from '@/features/system-settings/request-policies/decision-record'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import {
+  formatLogQuota,
+  formatNumber,
+  formatTokens,
+  formatUseTime,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
 import {
+  isUpstreamAuditAnomaly,
+  mappedUpstreamModelName,
   parseLogOther,
   rootUpstreamResponseAudit,
   getParamOverrideActionLabel,
@@ -89,7 +97,11 @@ import {
   isPerCallBilling,
   isTimingLogType,
 } from '../../lib/utils'
-import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
+import {
+  USAGE_BILLING_PATH,
+  type LogOtherData,
+  type UpstreamResponseAudit,
+} from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
@@ -201,10 +213,31 @@ const URSP_VERDICT_LABELS: Record<string, string> = {
   vendor_prefix: 'Vendor namespace prefix only',
   runtime_alias: 'Vendor runtime alias',
   snapshot_date: 'Dated snapshot of the same model',
+  version_suffix: 'Versioned build of the same Gemini model',
   rolling_alias: 'Rolling "-latest" alias of the same family',
   preview_alias: 'Public "-preview" name reported without the suffix',
   no_model: 'Upstream declared no model',
+  pinned_to_alias: 'Pinned build answered by the bare alias (pin not honoured)',
   mismatch: 'Different model',
+}
+
+const URSP_OBSERVATION_LABELS: Record<string, string> = {
+  none: 'Not observed',
+  partial: 'Observed, no model declared',
+  full: 'Observed',
+}
+
+// Weak authenticity signals, shown as one row; only ursp.replay is a verdict.
+function urspSignalLabels(
+  ursp: UpstreamResponseAudit,
+  t: (key: string) => string
+): string[] {
+  const labels: string[] = []
+  if (ursp.dup_id) labels.push(t('Duplicate response ID'))
+  if (ursp.dup_output) labels.push(t('Duplicate output'))
+  if (ursp.stale_created) labels.push(t('Stale created timestamp'))
+  if (ursp.implausible_speed) labels.push(t('Implausible generation speed'))
+  return labels
 }
 
 function urspVerdictLabel(
@@ -529,7 +562,8 @@ interface DetailsDialogProps {
 }
 
 export function DetailsDialog(props: DetailsDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
   const typeConfig = getLogTypeConfig(props.log.type)
@@ -559,6 +593,8 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const adminInfo = other?.admin_info
   // root-only audit block (root_info, with the pre-2026-09-20 admin_info fallback)
   const ursp = props.isRoot ? rootUpstreamResponseAudit(other) : undefined
+  const urspSignals = ursp ? urspSignalLabels(ursp, t) : []
+  const mappedModel = mappedUpstreamModelName(other)
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo
       ? ([
@@ -893,7 +929,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
             label={t('Upstream Response Model')}
-            variant={ursp.mismatch ? 'danger' : 'default'}
+            variant={isUpstreamAuditAnomaly(ursp) ? 'danger' : 'default'}
           >
             {ursp.mismatch && (
               <p className='mb-1 text-xs wrap-break-word'>
@@ -904,20 +940,63 @@ export function DetailsDialog(props: DetailsDialogProps) {
                   : t('Upstream declared a different model than the one sent')}
               </p>
             )}
+            {ursp.replay && (
+              <p className='mb-1 text-xs wrap-break-word'>
+                {t(
+                  'Suspected replay: this channel already returned the same response ID or output for a different request'
+                )}
+              </p>
+            )}
+            {ursp.mid_stream_change && (
+              <p className='mb-1 text-xs wrap-break-word'>
+                {t(
+                  'The upstream declared more than one model within this stream'
+                )}
+              </p>
+            )}
+            {ursp.obs && (
+              <DetailRow
+                label={t('Observation')}
+                value={`${t(URSP_OBSERVATION_LABELS[ursp.obs] ?? ursp.obs)}${ursp.h ? ` · ${ursp.h}` : ''}`}
+              />
+            )}
             <DetailRow
               label={t('Sent Model')}
               value={ursp.sent || '-'}
               mono
             />
+            {ursp.sent_field && (
+              <DetailRow
+                label={t('Configured Model')}
+                value={ursp.sent_field}
+                mono
+              />
+            )}
             <DetailRow
               label={t('Declared Model')}
               value={ursp.model || t('Not declared by upstream')}
               mono
             />
+            {ursp.prefix && (
+              <DetailRow label={t('Vendor Prefix')} value={ursp.prefix} mono />
+            )}
+            {ursp.models && ursp.models.length > 1 && (
+              <DetailRow
+                label={t('Declared Models')}
+                value={ursp.models.join(' → ')}
+                mono
+              />
+            )}
             {ursp.kind && (
               <DetailRow
                 label={t('Comparison Verdict')}
                 value={urspVerdictLabel(ursp.kind, t)}
+              />
+            )}
+            {ursp.version_downgrade && (
+              <DetailRow
+                label={t('Version Downgrade')}
+                value={t('Older model version than the one sent')}
               />
             )}
             {ursp.err && (
@@ -974,6 +1053,31 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 label={t('System Fingerprint')}
                 value={ursp.sf}
                 mono
+              />
+            )}
+            {ursp.retry !== undefined && (
+              <DetailRow
+                label={t('Retry Attempt')}
+                value={formatNumber(ursp.retry, locale)}
+              />
+            )}
+            {urspSignals.length > 0 && (
+              <DetailRow
+                label={t('Authenticity Signals')}
+                value={urspSignals.join(', ')}
+              />
+            )}
+            {ursp.extra_keys && ursp.extra_keys.length > 0 && (
+              <DetailRow
+                label={t('Extra Response Keys')}
+                value={ursp.extra_keys.join(', ')}
+                mono
+              />
+            )}
+            {ursp.pt_ratio !== undefined && (
+              <DetailRow
+                label={t('Prompt Token Ratio')}
+                value={`${formatNumber(ursp.pt_ratio, locale)}×`}
               />
             )}
           </DetailSection>
@@ -1281,22 +1385,16 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
         {/* Model mapping for logs without response observations */}
-        {!other?.response_model &&
-          other?.is_model_mapped &&
-          other?.upstream_model_name && (
-            <DetailSection label={t('Model Mapping')}>
-              <DetailRow
-                label={t('Request Model')}
-                value={props.log.model_name}
-                mono
-              />
-              <DetailRow
-                label={t('Actual Model')}
-                value={other.upstream_model_name}
-                mono
-              />
-            </DetailSection>
-          )}
+        {!other?.response_model && other?.is_model_mapped && mappedModel && (
+          <DetailSection label={t('Model Mapping')}>
+            <DetailRow
+              label={t('Request Model')}
+              value={props.log.model_name}
+              mono
+            />
+            <DetailRow label={t('Actual Model')} value={mappedModel} mono />
+          </DetailSection>
+        )}
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (

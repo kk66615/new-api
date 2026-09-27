@@ -121,23 +121,52 @@ export interface UpstreamResponseAudit {
   sf?: string
   created?: number
   mismatch?: boolean
-  // Why the pair matched or mismatched. Only 'mismatch' is an anomaly; the
-  // other labels describe a benign canonical difference (vendor prefix,
-  // dated snapshot, rolling -latest alias, runtime alias, gemini -preview
-  // public name reported bare) or an upstream
-  // that declared no model at all.
+  // Why the pair matched or mismatched. 'mismatch' and 'pinned_to_alias'
+  // (a pinned build answered by the bare alias) are anomalies; the other
+  // labels describe a benign canonical difference (vendor prefix, dated
+  // snapshot, gemini -NNN build, rolling -latest alias, runtime alias, gemini
+  // -preview public name reported bare) or an upstream that declared no model.
   kind?:
     | 'exact'
     | 'vendor_prefix'
     | 'runtime_alias'
     | 'snapshot_date'
+    | 'version_suffix'
     | 'rolling_alias'
     | 'preview_alias'
     | 'no_model'
+    | 'pinned_to_alias'
     | 'mismatch'
   // Upstream served a weaker sibling of the same family (…-flash/-mini/
   // -lite/-nano/-preview): the highest-signal adulteration shape
   tier_downgrade?: boolean
+  // Upstream declared an older numeric version of the family (3.7 → 3.1)
+  version_downgrade?: boolean
+  // Observation coverage: none = no handler looked at the response,
+  // partial = observed but no model declared, full = model declared
+  obs?: 'none' | 'partial' | 'full'
+  // Response handler (or relay path) that produced the observation
+  h?: string
+  // Channel-configured model name when the wire carried a different one
+  sent_field?: string
+  // Vendor namespace stripped from the declared model before comparing
+  prefix?: string
+  // One stream declared more than one model (models lists them in order)
+  mid_stream_change?: boolean
+  models?: string[]
+  // Replay / authenticity signals. Only replay is a verdict; the rest are
+  // weak labels (stale_created alone is common on some relays).
+  stale_created?: boolean
+  dup_id?: boolean
+  dup_output?: boolean
+  replay?: boolean
+  implausible_speed?: boolean
+  // Top-level response keys outside the protocol's standard set
+  extra_keys?: string[]
+  // Upstream prompt tokens / local estimate (no flag)
+  pt_ratio?: number
+  // Retry index of the attempt (absent on the first attempt)
+  retry?: number
   src?: string
   src_flip?: string
   backend?: string
@@ -189,6 +218,9 @@ export interface LogOtherData {
     }
     // Reject / intercept reason (admin only)
     reject_reason?: string
+    // Model the channel mapped the request to (admin only since the Claude
+    // stream path could rewrite it to the upstream-declared model)
+    upstream_model_name?: string
     task_plugin?: TaskPluginInfo
     // Rows written before the audit became root-only (2026-09-20) still carry
     // ursp here; the root view falls back to it. Never written any more.
@@ -246,6 +278,7 @@ export interface LogOtherData {
   cache_creation_ratio_5m?: number
   cache_creation_ratio_1h?: number
   is_model_mapped?: boolean
+  // Legacy top-level copy on rows written before it moved to admin_info
   upstream_model_name?: string
   // Diagnostic only. Whether the names disagree is derived in the UI via
   // isResponseModelMismatch so old rows follow the current comparison rule.

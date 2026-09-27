@@ -6804,6 +6804,27 @@
     "Inferred Backend": "最终后端（推断）",
     "Backend Flip": "后端切换",
     "Not declared by upstream": "上游未声明",
-    "Unknown Source": "未知"
+    "Unknown Source": "未知",
+    "Versioned build of the same Gemini model": "同一 Gemini 模型的版本构建",
+    "Pinned build answered by the bare alias (pin not honoured)": "指定版本被以裸别名应答（未遵守版本锁定）",
+    "Not observed": "未观测",
+    "Observed, no model declared": "已观测，上游未声明模型",
+    "Observed": "已观测",
+    "Duplicate response ID": "重复的响应 ID",
+    "Duplicate output": "重复的输出",
+    "Stale created timestamp": "created 时间戳异常",
+    "Implausible generation speed": "生成速度不合理",
+    "Suspected replay: this channel already returned the same response ID or output for a different request": "疑似重放：该渠道此前已为另一个请求返回过相同的响应 ID 或输出",
+    "The upstream declared more than one model within this stream": "上游在同一个流中声明了多个模型",
+    "Observation": "观测",
+    "Configured Model": "配置模型",
+    "Vendor Prefix": "厂商前缀",
+    "Declared Models": "声明模型序列",
+    "Version Downgrade": "版本降级",
+    "Older model version than the one sent": "上游声明的模型版本低于发出的版本",
+    "Retry Attempt": "重试序号",
+    "Authenticity Signals": "真实性信号",
+    "Extra Response Keys": "额外响应字段",
+    "Prompt Token Ratio": "输入 Token 比值"
   }
 }

@@ -32,7 +32,11 @@ import { cn } from '@/lib/utils'
 
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
-import { parseLogOther, rootUpstreamResponseAudit } from '../lib/format'
+import {
+  isUpstreamAuditAnomaly,
+  parseLogOther,
+  rootUpstreamResponseAudit,
+} from '../lib/format'
 import { TASK_MOBILE_SUMMARY_FIELDS } from '../lib/task-mobile-layout'
 import type { LogCategory } from '../types'
 import { CommonLogMobileCard } from './common-log-mobile-card'
@@ -292,7 +296,8 @@ export function UsageLogsMobileList<TData>({
           | number
           | undefined
         let tintClass = logType != null ? (logTypeRowTint[logType] ?? '') : ''
-        // upstream anomaly (model mismatch / source flip) → yellow card. Root-only:
+        // upstream anomaly (model mismatch / suspected replay / mid-stream model
+        // change / source flip) → yellow card. Root-only:
         // the resolver reads root_info (plus the legacy admin_info scope of rows
         // written before 2026-09-20); both are stripped server-side below root
         const ursp = isRoot
@@ -302,7 +307,7 @@ export function UsageLogsMobileList<TData>({
               )
             )
           : undefined
-        if (ursp && (ursp.mismatch || ursp.src_flip || ursp.backend_flip)) {
+        if (isUpstreamAuditAnomaly(ursp)) {
           tintClass = 'bg-yellow-100/80 dark:bg-yellow-900/35'
         }
 

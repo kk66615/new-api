@@ -169,6 +169,39 @@ export function rootUpstreamResponseAudit(
 }
 
 /**
+ * Whether an upstream response audit block describes an anomaly worth
+ * highlighting the log row for: a model mismatch (incl. a pinned build
+ * answered by the bare alias), a suspected replay, a model change inside one
+ * stream, or a source/backend flip.
+ */
+export function isUpstreamAuditAnomaly(
+  ursp: UpstreamResponseAudit | null | undefined
+): boolean {
+  return !!(
+    ursp &&
+    (ursp.mismatch ||
+      ursp.replay ||
+      ursp.mid_stream_change ||
+      ursp.src_flip ||
+      ursp.backend_flip)
+  )
+}
+
+/**
+ * Model the channel mapped the request to. Written to admin_info; older rows
+ * carry it at the top level. Non-admin projections receive neither.
+ */
+export function mappedUpstreamModelName(
+  other: LogOtherData | null | undefined
+): string | undefined {
+  return (
+    other?.admin_info?.upstream_model_name ||
+    other?.upstream_model_name ||
+    undefined
+  )
+}
+
+/**
  * Parse the 'other' field from JSON string to object
  */
 export function parseLogOther(other: string): LogOtherData | null {
@@ -255,16 +288,13 @@ export function formatModelName(log: UsageLog): {
   responseModel?: LogOtherData['response_model']
 } {
   const other = parseLogOther(log.other)
-  const isMapped = !!(
-    other?.is_model_mapped &&
-    other?.upstream_model_name &&
-    other.upstream_model_name !== ''
-  )
+  const mappedModel = mappedUpstreamModelName(other)
+  const isMapped = !!(other?.is_model_mapped && mappedModel)
 
   return {
     name: log.model_name,
     isMapped,
-    actualModel: isMapped ? other.upstream_model_name : undefined,
+    actualModel: isMapped ? mappedModel : undefined,
     responseModel: other?.response_model,
   }
 }
