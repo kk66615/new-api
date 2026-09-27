@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -90,6 +91,64 @@ type UpstreamAuditObservation struct {
 	PromptTokens     int
 	CompletionTokens int
 	TokensLocal      bool
+
+	// BodyMarkers accumulates vendor-specific response body fields seen in
+	// ANY observed frame of this attempt (Azure puts prompt_filter_results in
+	// the first chat chunk and content_filter_results in content chunks, so
+	// the last frame alone is not enough).
+	BodyMarkers UpstreamBodyMarkers
+}
+
+// UpstreamBodyMarkers is a bitset of vendor fingerprints found in response
+// bodies. Only fields with documented or production evidence are listed.
+type UpstreamBodyMarkers uint8
+
+const (
+	// BodyMarkerAzureContentFilter: Azure content-safety annotations
+	// (prompt_filter_results / content_filter_results / Responses
+	// content_filters). Azure-platform specific, whatever the model.
+	BodyMarkerAzureContentFilter UpstreamBodyMarkers = 1 << iota
+	// BodyMarkerBedrockMetrics: amazon-bedrock-invocationMetrics, attached
+	// by Bedrock to the final stream event.
+	BodyMarkerBedrockMetrics
+	// BodyMarkerDeepSeekCacheHit / Miss: the official DeepSeek API reports
+	// prompt_cache_hit_tokens and prompt_cache_miss_tokens; both are needed.
+	BodyMarkerDeepSeekCacheHit
+	BodyMarkerDeepSeekCacheMiss
+	// BodyMarkerNewAPICacheSplit: claude_cache_creation_5_m_tokens, written
+	// into usage by a NewAPI hop. Evidence about the hop, never the backend.
+	BodyMarkerNewAPICacheSplit
+)
+
+var upstreamBodyMarkerNeedles = []struct {
+	needle []byte
+	marker UpstreamBodyMarkers
+}{
+	{[]byte(`"prompt_filter_results"`), BodyMarkerAzureContentFilter},
+	{[]byte(`"content_filter_results"`), BodyMarkerAzureContentFilter},
+	{[]byte(`"content_filters"`), BodyMarkerAzureContentFilter},
+	{[]byte(`amazon-bedrock-invocationMetrics`), BodyMarkerBedrockMetrics},
+	{[]byte(`"prompt_cache_hit_tokens"`), BodyMarkerDeepSeekCacheHit},
+	{[]byte(`"prompt_cache_miss_tokens"`), BodyMarkerDeepSeekCacheMiss},
+	{[]byte(`"claude_cache_creation_5_m_tokens"`), BodyMarkerNewAPICacheSplit},
+}
+
+// Has reports whether every marker in want is present.
+func (m UpstreamBodyMarkers) Has(want UpstreamBodyMarkers) bool {
+	return m&want == want
+}
+
+// ObserveUpstreamBodyMarkers scans one raw response frame or body (before any
+// truncation) for vendor fingerprints; a handful of bytes.Contains per frame.
+func (info *RelayInfo) ObserveUpstreamBodyMarkers(frame []byte) {
+	if info == nil || len(frame) == 0 {
+		return
+	}
+	for _, n := range upstreamBodyMarkerNeedles {
+		if info.UpstreamAudit.BodyMarkers&n.marker == 0 && bytes.Contains(frame, n.needle) {
+			info.UpstreamAudit.BodyMarkers |= n.marker
+		}
+	}
 }
 
 // SnapshotUpstreamSentModel freezes UpstreamModelName as the sent model. It is
@@ -326,6 +385,7 @@ func (info *RelayInfo) ObserveUpstreamResponseFrame(frame, model, responseId str
 		return
 	}
 	info.ObserveUpstreamResponse(model, responseId, created, systemFingerprint)
+	info.ObserveUpstreamBodyMarkers(common.StringToByteSlice(frame))
 	if strings.TrimSpace(model) != "" && info.UpstreamAudit.ModelFrame == "" {
 		info.UpstreamAudit.ModelFrame, _ = common.TruncateAuditBytes(frame, UpstreamFrameCap)
 	}
@@ -436,6 +496,7 @@ func (info *RelayInfo) SetUpstreamResponseForensics(excerpt string, headers map[
 	}
 	if excerpt != "" {
 		info.UpstreamAudit.Observed = true
+		info.ObserveUpstreamBodyMarkers(common.StringToByteSlice(excerpt))
 		full := len(excerpt)
 		info.UpstreamResponseExcerpt, info.UpstreamAudit.ExcerptTruncated = common.TruncateAuditBytes(excerpt, UpstreamExcerptCap)
 		info.UpstreamAudit.ExcerptFullLen = full
@@ -456,6 +517,7 @@ func (info *RelayInfo) SetUpstreamResponseForensicsBytes(body []byte, headers ma
 	}
 	if len(body) > 0 {
 		info.UpstreamAudit.Observed = true
+		info.ObserveUpstreamBodyMarkers(body) // the whole body, not just the stored prefix
 		head := body[:min(len(body), UpstreamExcerptCap+utf8.UTFMax)]
 		var cut bool
 		info.UpstreamResponseExcerpt, cut = common.TruncateAuditBytes(string(head), UpstreamExcerptCap)

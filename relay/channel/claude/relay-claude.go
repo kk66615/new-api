@@ -102,6 +102,9 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		info.ObserveUpstreamErrorFrame(data)
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
+	// vendor fingerprints can sit in any event (Bedrock attaches
+	// amazon-bedrock-invocationMetrics to the final one)
+	info.ObserveUpstreamBodyMarkers(common.StringToByteSlice(data))
 	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
 		info.ObserveResponseModel(claudeResponse.Message.Model)
 	}

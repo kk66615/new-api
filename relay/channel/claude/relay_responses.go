@@ -109,6 +109,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			sr.Stop(streamErr)
 			return
 		}
+		// vendor fingerprints can sit in any event (Bedrock attaches
+		// amazon-bedrock-invocationMetrics to the final one)
+		info.ObserveUpstreamBodyMarkers(common.StringToByteSlice(data))
 
 		if claudeResponse.StopReason != "" {
 			maybeMarkClaudeRefusal(c, info, claudeResponse.StopReason)
