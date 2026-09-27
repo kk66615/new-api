@@ -67,6 +67,10 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 
 		openaiResponse := streamResponseXAI2OpenAI(xAIResp, usage)
+		for _, choice := range openaiResponse.Choices {
+			info.AppendUpstreamOutputText(choice.Delta.GetContentString())
+			info.AppendUpstreamOutputText(choice.Delta.GetReasoningContent())
+		}
 		_ = openai.ProcessStreamResponse(*openaiResponse, &responseTextBuilder, &toolCount)
 		if err := helper.ObjectData(c, openaiResponse); err != nil {
 			common.SysLog(err.Error())
@@ -75,7 +79,7 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	})
 
 	info.SetUpstreamResponseForensics(lastStreamData, nil)
-	info.ObserveUpstreamOutput(responseTextBuilder.String())
+	info.FinishUpstreamOutput()
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7

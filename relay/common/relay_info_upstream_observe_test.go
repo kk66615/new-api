@@ -1,6 +1,9 @@
 package common
 
 import (
+	"bytes"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -241,4 +244,60 @@ func TestCanonicalPromptSHA256(t *testing.T) {
 	assert.Equal(t, CanonicalPromptSHA256(a), CanonicalPromptSHA256(b))
 	assert.NotEqual(t, CanonicalPromptSHA256(a), CanonicalPromptSHA256(c), "the system prompt is part of the hash")
 	assert.Empty(t, CanonicalPromptSHA256([]byte(`{"model":"x"}`)))
+}
+
+type countingReadCloser struct {
+	r    io.Reader
+	read *int
+}
+
+func (c countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	*c.read += n
+	return n, err
+}
+
+func (c countingReadCloser) Close() error { return nil }
+
+// A large outgoing body is never read back in full at the send boundary: the
+// model comes from a bounded prefix and no prompt hash is computed.
+func TestSnapshotUpstreamRequestReadsLargeBodiesBoundedly(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"` + strings.Repeat("x", 2<<20) + `"}]}`)
+	read := 0
+	req, err := http.NewRequest(http.MethodPost, "http://upstream/v1/chat/completions", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return countingReadCloser{r: bytes.NewReader(body), read: &read}, nil
+	}
+	info := &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "gpt-5-mapped"}}
+	info.SnapshotUpstreamRequest(req)
+
+	assert.Equal(t, "gpt-5", info.UpstreamSentModel)
+	assert.Empty(t, info.UpstreamAudit.PromptSHA256)
+	assert.LessOrEqual(t, read, wireModelPrefixBytes+1)
+
+	small := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	req, err = http.NewRequest(http.MethodPost, "http://upstream/v1/chat/completions", bytes.NewReader(small))
+	require.NoError(t, err)
+	info = &RelayInfo{ChannelMeta: &ChannelMeta{UpstreamModelName: "gpt-5"}}
+	info.SnapshotUpstreamRequest(req)
+	assert.Equal(t, CanonicalPromptSHA256(small), info.UpstreamAudit.PromptSHA256)
+}
+
+// The output hash covers natural-language text only: an agent that repeats an
+// identical tool call for different prompts must not look like a replay.
+func TestOutputHashExcludesToolCalls(t *testing.T) {
+	toolOnly := &RelayInfo{}
+	toolOnly.ObserveUpstreamOutputJSON([]byte(`{"choices":[{"message":{"content":null,"tool_calls":[{"function":{"name":"bash","arguments":"{\"command\":\"npm test -- --watch=false --reporter=verbose\"}"}}]}}]}`))
+	assert.Empty(t, toolOnly.UpstreamAudit.OutputSHA256)
+
+	claude := &RelayInfo{}
+	claude.ObserveUpstreamOutputJSON([]byte(`{"content":[{"type":"text","text":"Running tests."},{"type":"tool_use","name":"bash","input":{"command":"npm test"}}]}`))
+	streamed := &RelayInfo{}
+	streamed.AppendUpstreamOutputText("Running ")
+	streamed.AppendUpstreamOutputText("tests.")
+	streamed.FinishUpstreamOutput()
+	assert.Equal(t, streamed.UpstreamAudit.OutputSHA256, claude.UpstreamAudit.OutputSHA256)
+	assert.Equal(t, 14, claude.UpstreamAudit.OutputChars)
 }

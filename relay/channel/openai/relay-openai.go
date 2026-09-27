@@ -153,10 +153,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
 	// forensic material: last frame + response headers; the first model-bearing
-	// frame was kept by processTokenData, and the output hash covers content,
-	// reasoning and tool calls
+	// frame was kept by processTokenData, which also gathered the output text
+	// (content and reasoning) for the output hash
 	info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
-	info.ObserveUpstreamOutput(responseTextBuilder.String())
+	info.FinishUpstreamOutput()
 
 	// 部分兼容网关把完整的累计usage附在倒数第二个事件上，随后发送一个空的最后事件。
 	// 仅当最后一个事件没有有效usage时，回退到倒数第二个事件的完整快照。

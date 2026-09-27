@@ -93,20 +93,25 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 		return s
 	}
 
+	current := replayEntry{requestId: requestId, promptHash: audit.PromptSHA256, outputHash: audit.OutputSHA256}
 	// H2: the same response id on this channel for a different request
-	var prevPrompt string
+	var idPrev, outputPrev replayEntry
 	if id := strings.TrimSpace(relayInfo.UpstreamResponseId); channelId != 0 && !isPlaceholderResponseId(id) {
-		s.dupId, _ = replayMemory.seen("i|"+strconv.Itoa(channelId)+"|"+id, requestId, audit.PromptSHA256, record)
+		s.dupId, idPrev = replayMemory.seen("i|"+strconv.Itoa(channelId)+"|"+id, current, record)
 	}
-	// H3: the same (normalised) output on this channel for a different request
+	// H3: the same (normalised) output text on this channel for a different
+	// request; short outputs are not distinctive
 	if channelId != 0 && audit.OutputSHA256 != "" && audit.OutputChars >= replayMinOutputChars {
-		s.dupOutput, prevPrompt = replayMemory.seen("o|"+strconv.Itoa(channelId)+"|"+audit.OutputSHA256, requestId, audit.PromptSHA256, record)
+		s.dupOutput, outputPrev = replayMemory.seen("o|"+strconv.Itoa(channelId)+"|"+audit.OutputSHA256, current, record)
 	}
-	// H4: a duplicate id is enough; a duplicate output needs a second reason
-	// that rules out an honest deterministic repeat
-	promptDiffers := s.dupOutput && prevPrompt != "" && audit.PromptSHA256 != "" && prevPrompt != audit.PromptSHA256
+	// H4: a duplicate id is a replay when the output is the same too (or one
+	// side has no output to compare) — a relay that recycles ids over fresh
+	// answers only earns the dup_id flag. A duplicate output needs a second
+	// reason that rules out an honest deterministic repeat.
+	sameOutputBehindId := s.dupId && (idPrev.outputHash == "" || current.outputHash == "" || idPrev.outputHash == current.outputHash)
+	promptDiffers := s.dupOutput && outputPrev.promptHash != "" && current.promptHash != "" && outputPrev.promptHash != current.promptHash
 	sampled := audit.Temperature != nil && *audit.Temperature > 0
-	s.replay = s.dupId || (s.dupOutput && (s.staleCreated || promptDiffers || sampled))
+	s.replay = sameOutputBehindId || (s.dupOutput && (s.staleCreated || promptDiffers || sampled))
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -155,6 +160,7 @@ type replayEntry struct {
 	key        string
 	requestId  string
 	promptHash string
+	outputHash string
 }
 
 func newReplayLRU(limit int) *replayLRU {
@@ -164,31 +170,32 @@ func newReplayLRU(limit int) *replayLRU {
 var replayMemory = newReplayLRU(replayCacheEntries)
 
 // seen reports whether key was last recorded by a different request (a retry
-// of the same request repeating an id is not a duplicate) and returns that
-// request's prompt hash. With record set, the entry is (re)written for this
-// request.
-func (l *replayLRU) seen(key, requestId, promptHash string, record bool) (dup bool, prevPrompt string) {
+// of the same request repeating an id is not a duplicate) and returns what
+// that request recorded. With record set, the entry is (re)written for the
+// current request.
+func (l *replayLRU) seen(key string, current replayEntry, record bool) (dup bool, prev replayEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	current.key = key
 	if el, ok := l.entries[key]; ok {
 		entry := el.Value.(*replayEntry)
-		dup = requestId == "" || entry.requestId != requestId
-		prevPrompt = entry.promptHash
+		dup = current.requestId == "" || entry.requestId != current.requestId
+		prev = *entry
 		if record {
-			entry.requestId, entry.promptHash = requestId, promptHash
+			*entry = current
 			l.order.MoveToFront(el)
 		}
-		return dup, prevPrompt
+		return dup, prev
 	}
 	if record {
-		l.entries[key] = l.order.PushFront(&replayEntry{key: key, requestId: requestId, promptHash: promptHash})
+		l.entries[key] = l.order.PushFront(&current)
 		for l.order.Len() > l.limit {
 			oldest := l.order.Back()
 			l.order.Remove(oldest)
 			delete(l.entries, oldest.Value.(*replayEntry).key)
 		}
 	}
-	return false, ""
+	return false, replayEntry{}
 }
 
 // knownResponseKeys are the standard top-level keys of each protocol's

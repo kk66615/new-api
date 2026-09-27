@@ -27,10 +27,13 @@ const (
 	UpstreamFrameCap = 16 * 1024
 	// upstreamHeadersCap bounds the stored header JSON.
 	upstreamHeadersCap = 8 * 1024
-	// wireInspectMaxBytes bounds how much of an outgoing body the send-boundary
-	// snapshot reads. Larger bodies (image-heavy prompts) still yield their
-	// model when it precedes the cut, but get no prompt hash.
-	wireInspectMaxBytes = 8 << 20
+	// promptHashMaxBytes: bodies up to this size are read in full at the send
+	// boundary and get a prompt hash. Larger bodies (long contexts, inline
+	// images, possibly disk-backed) are never read back in full.
+	promptHashMaxBytes = 1 << 20
+	// wireModelPrefixBytes: for larger or unknown-size bodies only this
+	// prefix is read, to find the "model" field.
+	wireModelPrefixBytes = 64 << 10
 	// maxObservedModels bounds the distinct-model set kept for one stream.
 	maxObservedModels = 8
 	// HeadersTruncatedKey marks header JSON that hit upstreamHeadersCap.
@@ -74,10 +77,14 @@ type UpstreamAuditObservation struct {
 	ExcerptFullLen   int
 	HeadersTruncated bool
 
-	// OutputSHA256 / OutputChars describe the normalised output text
-	// (content + reasoning + tool calls); no text kept.
+	// OutputSHA256 / OutputChars describe the normalised natural-language
+	// output (content + reasoning, no tool calls: agents legitimately repeat
+	// identical tool calls); only the hash is kept.
 	OutputSHA256 string
 	OutputChars  int
+	// outputText accumulates streamed output text until FinishUpstreamOutput
+	// (a byte slice, not a strings.Builder, so RelayInfo stays copyable).
+	outputText []byte
 
 	// Token counts as settled, for the speed and prompt-ratio signals.
 	PromptTokens     int
@@ -113,17 +120,26 @@ func (info *RelayInfo) SnapshotUpstreamSentModel() {
 // when present, otherwise the model segment of a Gemini/Vertex/Bedrock URL,
 // otherwise UpstreamModelName. This covers pass-through bodies with model
 // mapping and param overrides that rewrite "model", where UpstreamModelName
-// is not what the upstream received. It also hashes the sent prompt and
-// records an explicit temperature. Write-once per attempt.
+// is not what the upstream received. Bodies of known size up to
+// promptHashMaxBytes are read in full and also yield the prompt hash and an
+// explicit temperature; anything larger (or of unknown size) is inspected
+// through a 64KB prefix only, so the extra memory per attempt stays bounded.
+// Write-once per attempt.
 func (info *RelayInfo) SnapshotUpstreamRequest(req *http.Request) {
 	if info == nil || info.UpstreamSentModel != "" {
 		return
 	}
 	var body []byte
+	complete := false
 	if req != nil && req.GetBody != nil && !strings.HasPrefix(strings.ToLower(req.Header.Get("Content-Type")), "multipart/") {
 		if rc, err := req.GetBody(); err == nil && rc != nil {
-			body, _ = io.ReadAll(io.LimitReader(rc, wireInspectMaxBytes+1))
+			limit := int64(wireModelPrefixBytes)
+			if req.ContentLength > 0 && req.ContentLength <= promptHashMaxBytes {
+				limit = req.ContentLength
+			}
+			body, _ = io.ReadAll(io.LimitReader(rc, limit+1))
 			_ = rc.Close()
+			complete = int64(len(body)) <= limit && req.ContentLength > 0 && int64(len(body)) == req.ContentLength
 		}
 	}
 	wire := ""
@@ -133,8 +149,8 @@ func (info *RelayInfo) SnapshotUpstreamRequest(req *http.Request) {
 	if wire == "" && req != nil && req.URL != nil {
 		wire = modelFromUpstreamPath(req.URL.Path)
 	}
-	if len(body) > wireInspectMaxBytes {
-		body = nil // incomplete: never hash a partial prompt
+	if !complete {
+		body = nil // never hash a partial prompt
 	}
 	info.SnapshotUpstreamWire(wire, body)
 }
@@ -158,8 +174,8 @@ func (info *RelayInfo) SnapshotUpstreamWire(wireModel string, body []byte) {
 	if field != "" && field != wireModel {
 		info.UpstreamAudit.SentField = common.TruncateAuditRunes(field, 255)
 	}
-	if len(body) == 0 {
-		return
+	if len(body) == 0 || len(body) > promptHashMaxBytes {
+		return // hashing re-encodes the prompt; keep that bounded
 	}
 	info.UpstreamAudit.PromptSHA256 = CanonicalPromptSHA256(body)
 	for _, path := range []string{"temperature", "generationConfig.temperature", "generation_config.temperature"} {
@@ -343,8 +359,10 @@ func (info *RelayInfo) ObserveUpstreamUsage(inputTokens, cacheCreation, cacheRea
 	}
 }
 
-// ObserveUpstreamOutput records a hash of the normalised output (whitespace
-// collapsed) and its length in characters. The text itself is not kept.
+// ObserveUpstreamOutput records a hash of the normalised output text
+// (whitespace collapsed) and its length in characters. Callers pass
+// natural-language output only — content and reasoning, never tool calls.
+// The text itself is not kept.
 func (info *RelayInfo) ObserveUpstreamOutput(text string) {
 	if info == nil {
 		return
@@ -356,6 +374,27 @@ func (info *RelayInfo) ObserveUpstreamOutput(text string) {
 	sum := sha256.Sum256([]byte(normalized))
 	info.UpstreamAudit.OutputSHA256 = hex.EncodeToString(sum[:])
 	info.UpstreamAudit.OutputChars = utf8.RuneCountInString(normalized)
+}
+
+// upstreamOutputTextCap bounds the streamed output text kept for hashing.
+const upstreamOutputTextCap = 1 << 20
+
+// AppendUpstreamOutputText accumulates streamed output text (content and
+// reasoning only) for the output hash; FinishUpstreamOutput hashes it.
+func (info *RelayInfo) AppendUpstreamOutputText(text string) {
+	if info == nil || text == "" || len(info.UpstreamAudit.outputText) >= upstreamOutputTextCap {
+		return
+	}
+	info.UpstreamAudit.outputText = append(info.UpstreamAudit.outputText, text[:min(len(text), upstreamOutputTextCap-len(info.UpstreamAudit.outputText))]...)
+}
+
+// FinishUpstreamOutput hashes the text gathered by AppendUpstreamOutputText.
+func (info *RelayInfo) FinishUpstreamOutput() {
+	if info == nil {
+		return
+	}
+	info.ObserveUpstreamOutput(string(info.UpstreamAudit.outputText))
+	info.UpstreamAudit.outputText = nil
 }
 
 // ObserveUpstreamTokenCounts records the settled prompt (all input incl.
@@ -491,16 +530,16 @@ func EncodeUpstreamAuditHeaders(headers map[string][]string) (string, bool) {
 	return b.String(), truncated
 }
 
-// upstreamOutputPaths locate the generated output in the non-stream response
-// shapes of OpenAI chat/completions, Responses, Claude and Gemini. The paths
-// do not collide across protocols, so one list serves all of them.
+// upstreamOutputPaths locate the generated natural-language output (text and
+// reasoning, not tool calls) in the non-stream response shapes of OpenAI
+// chat/completions, Responses, Claude and Gemini. The paths do not collide
+// across protocols, so one list serves all of them.
 var upstreamOutputPaths = []string{
 	"choices.#.message.content", "choices.#.message.reasoning_content", "choices.#.message.reasoning",
-	"choices.#.message.tool_calls.#.function.name", "choices.#.message.tool_calls.#.function.arguments",
 	"choices.#.text",
-	"output.#.content.#.text", "output.#.summary.#.text", "output.#.name", "output.#.arguments",
-	"content.#.text", "content.#.thinking", "content.#.name", "content.#.input",
-	"candidates.#.content.parts.#.text", "candidates.#.content.parts.#.functionCall",
+	"output.#.content.#.text", "output.#.summary.#.text",
+	"content.#.text", "content.#.thinking",
+	"candidates.#.content.parts.#.text",
 }
 
 // ObserveUpstreamOutputJSON records the output hash of a complete JSON

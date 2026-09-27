@@ -150,6 +150,10 @@ func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuil
 		// own model; observed here so a mismatch is caught even when the relay
 		// never reaches the final-frame path (aborted streams included).
 		info.ObserveUpstreamResponseFrame(data, streamResponse.Model, streamResponse.Id, streamResponse.Created, streamResponse.GetSystemFingerprint())
+		for _, choice := range streamResponse.Choices {
+			info.AppendUpstreamOutputText(choice.Delta.GetContentString())
+			info.AppendUpstreamOutputText(choice.Delta.GetReasoningContent())
+		}
 		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
 	case relayconstant.RelayModeCompletions:
 		var streamResponse dto.CompletionsStreamResponse
@@ -157,6 +161,9 @@ func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuil
 			return err
 		}
 		info.ObserveUpstreamResponseFrame(data, gjson.Get(data, "model").String(), gjson.Get(data, "id").String(), gjson.Get(data, "created").Int(), "")
+		for _, choice := range streamResponse.Choices {
+			info.AppendUpstreamOutputText(choice.Text)
+		}
 		processCompletionsStreamResponse(streamResponse, responseTextBuilder)
 	}
 	return nil

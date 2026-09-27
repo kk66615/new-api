@@ -101,10 +101,10 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		AppendTaskPluginContextAuditInfo(c, other)
 		// Upstream response audit on the failure path. A failed attempt can
 		// still carry an upstream response worth keeping — a channel that
-		// fails is the one an audit most wants evidence on. No-op when nothing
-		// was observed (e.g. the request never left). Coverage is partial:
-		// only 200-with-error-body and Claude in-stream error frames observe;
-		// non-200 responses go through RelayErrorHandler, which does not.
+		// fails is the one an audit most wants evidence on. Non-2xx bodies are
+		// observed by RelayErrorHandlerWithAudit, 200-with-error bodies and
+		// in-stream error frames by the response handlers. When nothing was
+		// observed (e.g. the request never left) only ursp.obs=none is written.
 		AppendUpstreamResponseAuditForError(c, relayInfo, other, string(err.GetErrorType()))
 		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 		if startTime.IsZero() {
