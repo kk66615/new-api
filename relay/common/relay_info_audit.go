@@ -313,7 +313,7 @@ func (info *RelayInfo) ObserveUpstreamResponse(model, responseId string, created
 		info.UpstreamResponseCreated = created
 	}
 	if systemFingerprint != "" {
-		info.UpstreamSystemFingerprint = systemFingerprint
+		info.UpstreamSystemFingerprint = common.TruncateAuditRunes(systemFingerprint, 128) // bounded like the DB column
 	}
 }
 
@@ -457,8 +457,10 @@ func (info *RelayInfo) SetUpstreamResponseForensicsBytes(body []byte, headers ma
 	if len(body) > 0 {
 		info.UpstreamAudit.Observed = true
 		head := body[:min(len(body), UpstreamExcerptCap+utf8.UTFMax)]
-		info.UpstreamResponseExcerpt, _ = common.TruncateAuditBytes(string(head), UpstreamExcerptCap)
-		info.UpstreamAudit.ExcerptTruncated = len(body) > UpstreamExcerptCap
+		var cut bool
+		info.UpstreamResponseExcerpt, cut = common.TruncateAuditBytes(string(head), UpstreamExcerptCap)
+		// a short body can still be cut: invalid bytes grow on replacement
+		info.UpstreamAudit.ExcerptTruncated = cut || len(body) > UpstreamExcerptCap
 		info.UpstreamAudit.ExcerptFullLen = len(body)
 		if len(body) > UpstreamExcerptCap && info.UpstreamAudit.ModelFrame == "" {
 			tail := body[max(0, len(body)-UpstreamFrameCap-utf8.UTFMax):]
@@ -604,8 +606,9 @@ func (info *RelayInfo) ObserveUpstreamMediaResponse(handler string, body []byte,
 	head := body[:min(len(body), upstreamMediaExcerptCap+utf8.UTFMax)]
 	info.SetUpstreamResponseForensicsBytes(head, headers)
 	if len(body) > 0 {
-		info.UpstreamResponseExcerpt, _ = common.TruncateAuditBytes(info.UpstreamResponseExcerpt, upstreamMediaExcerptCap)
-		info.UpstreamAudit.ExcerptTruncated = len(body) > upstreamMediaExcerptCap
+		var cut bool
+		info.UpstreamResponseExcerpt, cut = common.TruncateAuditBytes(info.UpstreamResponseExcerpt, upstreamMediaExcerptCap)
+		info.UpstreamAudit.ExcerptTruncated = cut || len(body) > upstreamMediaExcerptCap
 		info.UpstreamAudit.ExcerptFullLen = len(body)
 	}
 	info.ObserveUpstreamResponse("", "", gjson.GetBytes(head, "created").Int(), "")

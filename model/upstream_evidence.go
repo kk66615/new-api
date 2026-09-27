@@ -24,7 +24,8 @@ const NormalEvidenceRetentionDays = 30
 // kind=provider_switch   — the inferred upstream source/backend flipped
 // kind=mid_stream_change — one stream declared more than one model
 // kind=replay_suspect    — the response looks replayed (duplicate id/output)
-// The response excerpt is capped at 64KB, frames at 16KB, headers at 8KB.
+// The response excerpt is capped at 65535 bytes (the MySQL TEXT limit),
+// frames at 16KB, headers at 8KB.
 //
 // Every column added after the table reached production size is nullable
 // with no default, so AutoMigrate adds it without rewriting the table. Its

@@ -328,7 +328,26 @@ func TestForensicsExcerptFitsMySQLTextAfterSanitising(t *testing.T) {
 	assert.True(t, utf8.ValidString(info.UpstreamAudit.ModelFrame))
 
 	info = &RelayInfo{}
-	info.SetUpstreamResponseForensics(strings.Repeat("\xff", 30_000), nil)
-	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), 65535, "30000 invalid bytes grow to 90000 before the cut")
+	info.SetUpstreamResponseForensics(strings.Repeat("a\xff", 30_000), nil)
+	// 60 KB of isolated invalid bytes grows to 120 KB and is cut near the cap
+	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), 65535)
+	assert.Greater(t, len(info.UpstreamResponseExcerpt), 65530)
+	assert.True(t, info.UpstreamAudit.ExcerptTruncated)
 	assert.True(t, utf8.ValidString(info.UpstreamResponseExcerpt))
+}
+
+// A body under the cap whose invalid bytes grow past it on replacement is
+// reported as truncated, and the system fingerprint is bounded like its column.
+func TestForensicsTruncationFlagAndFingerprintBound(t *testing.T) {
+	info := &RelayInfo{}
+	// each isolated invalid byte becomes a 3-byte U+FFFD: 60 KB grows to 120 KB
+	body := []byte(strings.Repeat("a\xff", 30_000))
+	require.Less(t, len(body), UpstreamExcerptCap)
+	info.SetUpstreamResponseForensicsBytes(body, nil)
+	assert.True(t, info.UpstreamAudit.ExcerptTruncated)
+	assert.Equal(t, 60_000, info.UpstreamAudit.ExcerptFullLen)
+	assert.LessOrEqual(t, len(info.UpstreamResponseExcerpt), UpstreamExcerptCap)
+
+	info.ObserveUpstreamResponse("gpt-5", "chatcmpl-x", 0, strings.Repeat("f", 1000))
+	assert.Len(t, info.UpstreamSystemFingerprint, 128)
 }

@@ -892,11 +892,14 @@ func TestAuditReplaySignals(t *testing.T) {
 	assert.Equal(t, "replay_suspect", ev.Kind)
 	assert.True(t, strings.HasPrefix(ev.Note, "signals: dup_id,stale_created"), ev.Note)
 
-	// the same long output with a stale created stamp: replay
+	// the same long output under another id with a stale stamp that is NOT
+	// the earlier answer's stamp: a skewed backend, not a cache (a cache
+	// hands back the original stamp; see TestAuditRepeatedCacheReplaysAllCount)
 	ursp, ev = run("req-s", "chatcmpl-stale0001", answerX, promptB, now-23*86400, nil)
 	assert.Equal(t, true, ursp["stale_created"])
-	assert.Equal(t, true, ursp["replay"])
-	assert.Equal(t, "replay_suspect", ev.Kind)
+	assert.Equal(t, true, ursp["dup_output"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
 
 	// stale created alone is only a flag (a constant created on fresh ids)
 	ursp, ev = run("req-t", "chatcmpl-seven0001", strings.Repeat("unique ", 40), promptA, now-86400, nil)
@@ -1239,11 +1242,12 @@ func TestAuditConstantCreatedColdStartNoReplay(t *testing.T) {
 	// a real cross-id cache replay still counts: the original answer was fresh
 	const ch2 = 987671
 	isolatedAuditKey(t, ch2, "gpt")
-	now := time.Now().Unix()
+	// (the original was fresh 22 days ago; the copy hands back its stamp)
+	then := time.Now().Add(-22 * 24 * time.Hour)
 	runAuditExchange(t, auditExchange{channelId: ch2, requestId: "cache-1", models: []string{"gpt-5"},
-		id: "chatcmpl-orig00001", created: now, output: long, promptHash: strings.Repeat("f", 64)})
+		id: "chatcmpl-orig00001", created: then.Unix(), output: long, promptHash: strings.Repeat("f", 64), startedAt: then})
 	ursp, ev := runAuditExchange(t, auditExchange{channelId: ch2, requestId: "cache-2", models: []string{"gpt-5"},
-		id: "chatcmpl-copy00001", created: now - 22*86400, output: long, promptHash: strings.Repeat("g", 64)})
+		id: "chatcmpl-copy00001", created: then.Unix(), output: long, promptHash: strings.Repeat("g", 64)})
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
 }
@@ -1298,7 +1302,7 @@ func TestAuditNoteFormats(t *testing.T) {
 // replay every time: a replayed copy keeps the fresh answer's stamp and is
 // remembered as fresh (review round 6, LOW 1).
 func TestAuditRepeatedCacheReplaysAllCount(t *testing.T) {
-	const ch = 987670
+	const ch = 987674
 	isolatedAuditKey(t, ch, "gpt")
 	then := time.Now().Add(-22 * 24 * time.Hour)
 	answer := strings.Repeat("An answer cached by the relay and served again later. ", 5)
@@ -1321,7 +1325,7 @@ func TestAuditRepeatedCacheReplaysAllCount(t *testing.T) {
 // not a replay, because the earlier copy was already stale (review round 6,
 // LOW 2).
 func TestAuditConstantStampSwitchIsNotReplay(t *testing.T) {
-	const ch = 987671
+	const ch = 987675
 	isolatedAuditKey(t, ch, "gpt")
 	stampX := time.Now().Unix() - 40*86400
 	stampY := stampX + 86400
@@ -1337,4 +1341,44 @@ func TestAuditConstantStampSwitchIsNotReplay(t *testing.T) {
 	assert.Equal(t, true, ursp["stale_created"])
 	assert.NotContains(t, ursp, "replay")
 	assert.Equal(t, "normal", ev.Kind)
+}
+
+// One backend of a multi-backend channel with a clock skewed by more than
+// 120 s answers a prompt identically after a fresh answer from a healthy
+// backend: its own stamp differs from the earlier answer's, so it is not a
+// replay — a real cache hands back the original stamp (review round 7).
+func TestAuditSkewedBackendIdenticalAnswerIsNotReplay(t *testing.T) {
+	const ch = 987676
+	isolatedAuditKey(t, ch, "gpt")
+	now := time.Now().Unix()
+	answer := strings.Repeat("A deterministic long answer both backends produce alike. ", 5)
+	run := func(req, id string, created int64) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, models: []string{"gpt-5"}, id: id,
+			created: created, output: answer, promptHash: strings.Repeat("s", 64)})
+	}
+	run("req-healthy", "chatcmpl-healthy01", now)
+	ursp, ev := run("req-skewed", "chatcmpl-skewed001", now-300)
+	assert.Equal(t, true, ursp["dup_output"])
+	assert.Equal(t, true, ursp["stale_created"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+}
+
+// ursp.extra_keys is bounded in count and key length: an upstream controls both.
+func TestAuditExtraKeysAreBounded(t *testing.T) {
+	isolatedAuditKey(t, 987677, "gpt")
+	var b strings.Builder
+	b.WriteString(`{"id":"chatcmpl-extra0001","object":"chat.completion","model":"gpt-5","choices":[]`)
+	for i := range 30 {
+		b.WriteString(`,"` + strings.Repeat("k", 200) + strconv.Itoa(i) + `":1`)
+	}
+	b.WriteString(`}`)
+	ursp, _ := runAuditExchange(t, auditExchange{channelId: 987677, requestId: "x-1", models: []string{"gpt-5"},
+		id: "chatcmpl-extra0001", excerpt: b.String()})
+	keys, ok := ursp["extra_keys"].([]string)
+	require.True(t, ok)
+	assert.Len(t, keys, 20)
+	for _, k := range keys {
+		assert.LessOrEqual(t, len([]rune(k)), 64)
+	}
 }

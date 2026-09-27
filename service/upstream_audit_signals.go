@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 
 	"github.com/tidwall/gjson"
@@ -33,6 +34,9 @@ const (
 	// a cached answer.
 	implausibleSpeedMinTokens    = 200
 	implausibleSpeedTokensPerSec = 400
+	// maxExtraKeys / maxExtraKeyRunes bound ursp.extra_keys.
+	maxExtraKeys     = 20
+	maxExtraKeyRunes = 64
 )
 
 type replaySignals struct {
@@ -172,7 +176,11 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 	// constants in between (the tracker resets on a new stamp). A cache
 	// replayed several times still counts every time, because a replayed copy
 	// of a fresh answer is remembered as fresh (see replayLRU.seen).
-	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates && !outputPrev.stale)
+	//
+	// And a cache hands back the ORIGINAL stamp: the replayed copy must carry
+	// the very created of the earlier answer. A backend with a skewed clock
+	// answering a prompt identically produces its own (stale-looking) stamp.
+	s.replay = sameIdSameOutput || (s.dupOutput && staleCorroborates && !outputPrev.stale && outputPrev.created == created)
 
 	// H5: generation speed. Streams are timed from the first byte; a
 	// non-stream response has no first-token time, so its whole duration
@@ -377,12 +385,13 @@ func unknownResponseKeys(handler string, relayInfo *relaycommon.RelayInfo) []str
 	if !object.IsObject() {
 		return nil
 	}
+	// bounded: an upstream controls both the number and the length of keys
 	var extra []string
 	object.ForEach(func(k, _ gjson.Result) bool {
 		if !slices.Contains(known, k.String()) {
-			extra = append(extra, k.String())
+			extra = append(extra, common.TruncateAuditRunes(k.String(), maxExtraKeyRunes))
 		}
-		return len(extra) < 16
+		return len(extra) < maxExtraKeys
 	})
 	slices.Sort(extra)
 	return extra

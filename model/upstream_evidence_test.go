@@ -237,7 +237,7 @@ func TestEvidenceIndexBuildIsOptIn(t *testing.T) {
 // Every text column fits MySQL TEXT (65535 bytes) as valid UTF-8, even when
 // invalid bytes grow on replacement after an upstream cap was applied.
 func TestEvidenceSanitizeCapsTextColumnsAfterReplacement(t *testing.T) {
-	invalid := strings.Repeat("\xff", 30_000)
+	invalid := strings.Repeat("a\xff", 30_000) // isolated invalid bytes each grow to 3 bytes: 120 KB
 	e := &UpstreamEvidence{ResponseExcerpt: invalid, ResponseHeaders: invalid, ModelFrame: invalid, ErrorFrame: "海" + invalid}
 	e.sanitize()
 	for _, v := range []string{e.ResponseExcerpt, e.ResponseHeaders, e.ModelFrame, e.ErrorFrame} {
