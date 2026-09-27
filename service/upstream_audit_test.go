@@ -43,7 +43,7 @@ func TestUpstreamModelsMatchForAudit(t *testing.T) {
 		// -latest alias (suffix form)
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", true},
 		// -latest rolling alias resolving to a concrete same-family version (2026-09-03 #57 real traffic)
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", false}, // A2: preview tier was never asked for
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", true}, // Google ships -latest targets as -preview builds
 		{"gemini-flash-latest", "gemini-3.7-flash", true},
 		{"gemini-flash-latest", "gemini-3.1-pro-preview", false}, // tier swap must still flag
 		{"gemini-pro-latest", "gemini-2.5-flash-lite", false},    // tier swap must still flag
@@ -108,7 +108,7 @@ func TestClassifyUpstreamModelMismatch(t *testing.T) {
 		{"gpt-5", "gpt-5-2025-08-07", VerdictSnapshotDate},
 		{"deepseek-v4-flash", "deepseek-v4-flash-0731", VerdictSnapshotDate},
 		// rolling -latest alias
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", VerdictMismatch}, // A2: lower-tier "preview" not in the alias
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", VerdictRollingAlias}, // preview is not a downgrade for -latest
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", VerdictRollingAlias},
 		// real mismatches
 		{"gpt-5.5", "gpt-5-6-luna", VerdictMismatch},
@@ -164,7 +164,7 @@ func TestUpstreamModelIsTierDowngrade(t *testing.T) {
 		{"claude-opus-4-7", "deepseek-v4-pro", false, "unrelated model"},
 		{"grok-4.5", "grok-4.5-build", false, "runtime alias, not a tier"},
 		{"claude-sonnet-4-6", "claude-sonnet-4-6-latest", false, "rolling alias"},
-		{"gemini-pro-latest", "gemini-3.1-pro-preview", true, "-latest resolved to a preview tier"},
+		{"gemini-pro-latest", "gemini-3.1-pro-preview", false, "alias resolution, not a mismatch"},
 		// version-only change within the same tier: a different model, not a tier swap
 		{"claude-opus-4-7", "claude-opus-4-5", false, "version change, tier unknown"},
 		// degenerate input
@@ -234,7 +234,16 @@ func TestVerdictHardening(t *testing.T) {
 		{"latest same tier", "gemini-flash-latest", "gemini-3.7-flash", VerdictRollingAlias},
 		{"latest pro resolves pro", "gemini-pro-latest", "gemini-3.1-pro", VerdictRollingAlias},
 		{"latest flash to flash-lite", "gemini-flash-latest", "gemini-3.7-flash-lite", VerdictMismatch},
-		{"latest pro to preview", "gemini-pro-latest", "gemini-3.1-pro-preview", VerdictMismatch},
+		{"latest pro to preview", "gemini-pro-latest", "gemini-3.1-pro-preview", VerdictRollingAlias},
+		{"latest flash to dated preview", "gemini-flash-latest", "gemini-2.5-flash-preview-09-2025", VerdictRollingAlias},
+		{"latest flash to lite preview", "gemini-flash-latest", "gemini-2.5-flash-lite-preview-09-2025", VerdictMismatch},
+		{"google MM-YYYY", "gemini-2.5-flash-preview", "gemini-2.5-flash-preview-09-2025", VerdictSnapshotDate},
+		{"MM-YYYY month 13", "gemini-2.5-flash-preview", "gemini-2.5-flash-preview-13-2025", VerdictMismatch},
+		// Vertex @YYYYMMDD pins on the wire vs the Claude body's model
+		{"vertex at-date", "claude-sonnet-4-5@20250929", "claude-sonnet-4-5-20250929", VerdictVendorPrefix},
+		{"vertex v2 at-date", "claude-3-5-sonnet-v2@20241022", "claude-3-5-sonnet-20241022", VerdictVendorPrefix},
+		{"vertex pin different build", "claude-sonnet-4-5@20250929", "claude-sonnet-4-5-20250514", VerdictMismatch},
+		{"vertex pin answered by alias", "claude-sonnet-4-5@20250929", "claude-sonnet-4-5", VerdictPinnedToAlias},
 		{"latest suffix form", "claude-sonnet-4-6", "claude-sonnet-4-6-latest", VerdictRollingAlias},
 		// A3 Bedrock build suffix
 		{"both builds differ", "anthropic.claude-haiku-4-5-20251001-v1:0", "anthropic.claude-haiku-4-5-20251001-v2:0", VerdictMismatch},
@@ -790,15 +799,22 @@ func TestAuditReplaySignals(t *testing.T) {
 	ursp, _ := run("req-1", "chatcmpl-first0001", longAnswer, promptA, now, nil)
 	assert.NotContains(t, ursp, "dup_id")
 
-	// the same id answering another request is a replay on its own
-	ursp, ev := run("req-2", "chatcmpl-first0001", "different answer entirely", promptA, now, nil)
+	// a recycled id over a fresh answer is only a weak dup_id flag
+	fresh := "a fresh answer that is long enough to be distinctive, written only once here"
+	ursp, ev := run("req-2", "chatcmpl-first0001", fresh, promptA, now, nil)
+	assert.Equal(t, true, ursp["dup_id"])
+	assert.NotContains(t, ursp, "replay")
+	assert.Equal(t, "normal", ev.Kind)
+
+	// a retry of the same request repeating its id is not a duplicate
+	ursp, _ = run("req-2", "chatcmpl-first0001", fresh, promptA, now, nil)
+	assert.NotContains(t, ursp, "dup_id")
+
+	// the same id with the same answer for another request is a replay
+	ursp, ev = run("req-2b", "chatcmpl-first0001", fresh, promptB, now, nil)
 	assert.Equal(t, true, ursp["dup_id"])
 	assert.Equal(t, true, ursp["replay"])
 	assert.Equal(t, "replay_suspect", ev.Kind)
-
-	// a retry of the same request repeating its id is not a duplicate
-	ursp, _ = run("req-2", "chatcmpl-first0001", "different answer entirely", promptA, now, nil)
-	assert.NotContains(t, ursp, "dup_id")
 
 	// same output, same prompt, no sampling: an honest deterministic repeat
 	ursp, ev = run("req-3", "chatcmpl-third0001", longAnswer, promptA, now, nil)
@@ -895,6 +911,14 @@ func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
 	assert.Equal(t, false, ursp["mismatch"], "the verdict still judges the final model")
 	assert.Equal(t, "mid_stream_change", ev.Kind)
 	assert.Equal(t, `{"model":"gpt-5-mini"}`, ev.ModelFrame, "the first model-bearing frame is kept")
+
+	// a benign rename inside the stream (alias → dated snapshot) is listed
+	// but is not a model change
+	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-0", stream: true,
+		models: []string{"gpt-5", "gpt-5-2025-08-07"}, id: "chatcmpl-mid00000"})
+	assert.NotContains(t, ursp, "mid_stream_change")
+	assert.Equal(t, []string{"gpt-5", "gpt-5-2025-08-07"}, ursp["models"])
+	assert.Equal(t, "normal", ev.Kind)
 
 	// combined with a mismatch the row stays a model_mismatch, noted
 	ursp, ev = runAuditExchange(t, auditExchange{channelId: 987660, requestId: "m-2", stream: true,

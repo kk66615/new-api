@@ -89,6 +89,7 @@ func snapshotAliasVerdict(sent, resp string) string {
 //	YYMMDD      Volcengine  deepseek-v3-250324
 //	MMDD        DeepSeek    deepseek-v4-flash-0731, gpt-4-0613
 //	MM-DD       Google      gemini-2.5-flash-preview-05-20
+//	MM-YYYY     Google      gemini-2.5-flash-preview-09-2025
 func isSnapshotDateSuffix(suffix string) bool {
 	segs := strings.Split(suffix, "-")
 	for _, seg := range segs {
@@ -101,6 +102,9 @@ func isSnapshotDateSuffix(suffix string) bool {
 		return len(segs[0]) == 4 && strings.HasPrefix(segs[0], "20") &&
 			len(segs[1]) == 2 && len(segs[2]) == 2 && validMonthDay(segs[1], segs[2])
 	case 2:
+		if len(segs[0]) == 2 && len(segs[1]) == 4 { // Google MM-YYYY: gemini-2.5-flash-preview-09-2025
+			return strings.HasPrefix(segs[1], "20") && validMonthDay(segs[0], "01")
+		}
 		return len(segs[0]) == 2 && len(segs[1]) == 2 && validMonthDay(segs[0], segs[1])
 	case 1:
 		d := segs[0]
@@ -145,6 +149,12 @@ var bedrockModelRe = regexp.MustCompile(`^(?:[a-z]{2,6}\.)?(anthropic|amazon|met
 var bedrockVersionSuffixRe = regexp.MustCompile(`-v\d+(?::\d+)?$`)
 var colonVersionSuffixRe = regexp.MustCompile(`-v\d+:\d+$`)
 
+// vertexAtVersionRe matches the Vertex AI "@YYYYMMDD" pin (and the "-vN@"
+// revision form): the wire carries claude-sonnet-4-5@20250929 or
+// claude-3-5-sonnet-v2@20241022 while the Claude body declares
+// claude-sonnet-4-5-20250929 / claude-3-5-sonnet-20241022.
+var vertexAtVersionRe = regexp.MustCompile(`(?:-v\d+)?@(\d{8})$`)
+
 func isBedrockModelId(m string) bool {
 	return bedrockModelRe.MatchString(strings.ToLower(strings.TrimSpace(m)))
 }
@@ -188,6 +198,7 @@ func splitVendorPrefix(m string) (prefix, bare string, bedrock bool) {
 func canonicalModelPair(rawSent, rawResp string) (sent, resp, respPrefix string) {
 	_, sent, sentBedrock := splitVendorPrefix(rawSent)
 	respPrefix, resp, respBedrock := splitVendorPrefix(rawResp)
+	sent, resp = vertexAtVersionRe.ReplaceAllString(sent, "-$1"), vertexAtVersionRe.ReplaceAllString(resp, "-$1")
 	sentVersioned := (sentBedrock && bedrockVersionSuffixRe.MatchString(sent)) || colonVersionSuffixRe.MatchString(sent)
 	respVersioned := (respBedrock && bedrockVersionSuffixRe.MatchString(resp)) || colonVersionSuffixRe.MatchString(resp)
 	if sentVersioned && respVersioned {
@@ -456,7 +467,10 @@ func latestFamilyMatch(sentModel, responseModel string) bool {
 	}
 	respTokens := map[string]bool{}
 	for t := range strings.SplitSeq(strings.ToLower(responseModel), "-") {
-		if lowerTierTokens[t] && !aliasTokens[t] {
+		// "preview" is how Google ships the build a -latest alias points at
+		// (gemini-flash-latest → gemini-2.5-flash-preview-09-2025); it stays a
+		// tier label elsewhere but does not fail the alias resolution
+		if lowerTierTokens[t] && t != "preview" && !aliasTokens[t] {
 			return false
 		}
 		respTokens[t] = true
@@ -932,7 +946,15 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	tierDowngrade := mismatch && UpstreamModelIsTierDowngrade(sentModel, respModel)
 	versionDowngrade := mismatch && UpstreamModelIsVersionDowngrade(sentModel, respModel)
 	_, _, respPrefix := canonicalModelPair(sentModel, respModel)
-	midStreamChange := len(audit.Models) > 1
+	// a stream changed model when a later declaration is not a benign rename
+	// of the first one (alias → dated snapshot, vendor prefix, …)
+	midStreamChange := false
+	for _, m := range audit.Models[min(1, len(audit.Models)):] {
+		if VerdictIsMismatch(ClassifyUpstreamModelMismatch(audit.Models[0], m)) {
+			midStreamChange = true
+			break
+		}
+	}
 
 	channelId, channelType := 0, 0
 	if relayInfo.ChannelMeta != nil {
@@ -972,9 +994,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if respPrefix != "" {
 		ursp["prefix"] = respPrefix // vendor namespace stripped before comparing (deepseek/, global.anthropic.)
 	}
+	if len(audit.Models) > 1 {
+		ursp["models"] = audit.Models // every distinct declaration, in order
+	}
 	if midStreamChange {
 		ursp["mid_stream_change"] = true
-		ursp["models"] = audit.Models
 	}
 	// Channel TYPE only. The numeric channel id is deliberately NOT duplicated
 	// here: the log record already carries it (log.channel_id / channel_name),
@@ -987,7 +1011,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 	// mapping layer: present only when the channel redirected the model, so an
 	// intentional mapping is never confused with an upstream swap
-	if relayInfo.IsModelMapped {
+	if relayInfo.ChannelMeta != nil && relayInfo.IsModelMapped {
 		ursp["mapped"] = true
 	}
 	if backend != "unknown" {
@@ -1114,9 +1138,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if kind == "normal" && audit_setting.NormalExcerptMode() == audit_setting.NormalExcerptModeDigest {
 		digestNormalEvidence(ev)
 	}
+	// built before the hand-off: once queued, the row belongs to the writer
+	// goroutine, which sanitizes it in place
+	logLine := "[upstream-audit] " + kind + " queued: sent=" + ev.SentModel +
+		" got=" + ev.ResponseModel + " src=" + src + " " + ev.Note
 	if enqueueUpstreamEvidence(ev) && kind != "normal" { // normal rows are high-volume — no per-row logging
-		common.SysLog("[upstream-audit] " + kind + " queued: sent=" + ev.SentModel +
-			" got=" + ev.ResponseModel + " src=" + src + " " + ev.Note)
+		common.SysLog(logLine)
 	}
 }
 
