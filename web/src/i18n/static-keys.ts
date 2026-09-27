@@ -826,4 +826,17 @@ export const STATIC_I18N_KEYS = [
   'Not observed',
   'Observed, no model declared',
   'Observed',
+  // Upstream backend labels and evidence (usage-logs details dialog).
+  'OpenAI-compatible (backend unidentified)',
+  'Anthropic-compatible (backend unidentified)',
+  'Channel protocol type',
+  'Official vendor response headers',
+  'Vendor-specific response body fields',
+  'Response ID shape',
+  'Model naming',
+  'Protocol format only (no vendor evidence)',
+  'Strong evidence',
+  'Medium evidence',
+  'Weak evidence',
+  'No vendor evidence',
 ] as const

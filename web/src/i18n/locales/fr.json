@@ -6798,6 +6798,21 @@
     "Retry Attempt": "Retry Attempt",
     "Authenticity Signals": "Authenticity Signals",
     "Extra Response Keys": "Extra Response Keys",
-    "Prompt Token Ratio": "Prompt Token Ratio"
+    "Prompt Token Ratio": "Prompt Token Ratio",
+    "OpenAI-compatible (backend unidentified)": "OpenAI-compatible (backend unidentified)",
+    "Anthropic-compatible (backend unidentified)": "Anthropic-compatible (backend unidentified)",
+    "Backend Evidence": "Backend Evidence",
+    "Backend Confidence": "Backend Confidence",
+    "Conflicting Evidence": "Conflicting Evidence",
+    "Channel protocol type": "Channel protocol type",
+    "Official vendor response headers": "Official vendor response headers",
+    "Vendor-specific response body fields": "Vendor-specific response body fields",
+    "Response ID shape": "Response ID shape",
+    "Model naming": "Model naming",
+    "Protocol format only (no vendor evidence)": "Protocol format only (no vendor evidence)",
+    "Strong evidence": "Strong evidence",
+    "Medium evidence": "Medium evidence",
+    "Weak evidence": "Weak evidence",
+    "No vendor evidence": "No vendor evidence"
   }
 }

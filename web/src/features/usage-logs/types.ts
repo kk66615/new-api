@@ -171,6 +171,19 @@ export interface UpstreamResponseAudit {
   src?: string
   src_flip?: string
   backend?: string
+  // Where the backend came from and how far to trust it:
+  // channel_type (strong) > header / body (medium) > id_shape / model_name
+  // (weak) > fallback (none: protocol format only)
+  backend_by?:
+    | 'channel_type'
+    | 'header'
+    | 'body'
+    | 'id_shape'
+    | 'model_name'
+    | 'fallback'
+  backend_conf?: 'strong' | 'medium' | 'weak' | 'none'
+  // Every "vendor:by" claim when the evidence disagreed; the first one won
+  backend_conflict?: string[]
   backend_flip?: string
   nomodel?: boolean
   // Channel type (int enum) of the channel that produced this response. The

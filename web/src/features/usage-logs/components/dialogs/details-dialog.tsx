@@ -182,9 +182,10 @@ const UPSTREAM_SOURCE_LABELS: Record<string, string> = {
   google: 'Google (Vertex/AIStudio)',
   anthropic: 'Anthropic 官方',
   ccmax: 'Claude Max 订阅 (ccmax)',
-  claude_relay: 'Claude 反代',
+  // neutral fallbacks: only the protocol format is known, not the backend
+  claude_relay: 'Anthropic-compatible (backend unidentified)',
   openai: 'OpenAI 官方',
-  gpt_relay: 'GPT 反代',
+  gpt_relay: 'OpenAI-compatible (backend unidentified)',
   deepseek: 'DeepSeek 官方形态',
   glm: 'GLM 官方形态',
   kimi: 'Kimi 官方',
@@ -198,7 +199,24 @@ function upstreamSourceLabel(
   t: (key: string) => string
 ): string {
   if (!src || src === 'unknown') return t('Unknown Source')
-  return UPSTREAM_SOURCE_LABELS[src] || src
+  const label = UPSTREAM_SOURCE_LABELS[src]
+  return label ? t(label) : src
+}
+
+const URSP_BACKEND_BY_LABELS: Record<string, string> = {
+  channel_type: 'Channel protocol type',
+  header: 'Official vendor response headers',
+  body: 'Vendor-specific response body fields',
+  id_shape: 'Response ID shape',
+  model_name: 'Model naming',
+  fallback: 'Protocol format only (no vendor evidence)',
+}
+
+const URSP_BACKEND_CONF_LABELS: Record<string, string> = {
+  strong: 'Strong evidence',
+  medium: 'Medium evidence',
+  weak: 'Weak evidence',
+  none: 'No vendor evidence',
 }
 
 // Verdict labels explain WHY the sent/declared model pair was judged the way it
@@ -1030,6 +1048,30 @@ export function DetailsDialog(props: DetailsDialogProps) {
               <DetailRow
                 label={t('Inferred Backend')}
                 value={upstreamSourceLabel(ursp.backend, t)}
+              />
+            )}
+            {ursp.backend_by && (
+              <DetailRow
+                label={t('Backend Evidence')}
+                value={t(
+                  URSP_BACKEND_BY_LABELS[ursp.backend_by] ?? ursp.backend_by
+                )}
+              />
+            )}
+            {ursp.backend_conf && (
+              <DetailRow
+                label={t('Backend Confidence')}
+                value={t(
+                  URSP_BACKEND_CONF_LABELS[ursp.backend_conf] ??
+                    ursp.backend_conf
+                )}
+              />
+            )}
+            {ursp.backend_conflict && ursp.backend_conflict.length > 0 && (
+              <DetailRow
+                label={t('Conflicting Evidence')}
+                value={ursp.backend_conflict.join(', ')}
+                mono
               />
             )}
             {ursp.backend_flip && (

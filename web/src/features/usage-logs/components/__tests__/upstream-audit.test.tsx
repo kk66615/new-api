@@ -160,6 +160,50 @@ describe('upstream response audit details', () => {
     ).toBeInTheDocument()
   })
 
+  test('shows the backend with its evidence, confidence and conflicts', () => {
+    renderDetails(
+      {
+        sent: 'gpt-5.1',
+        model: 'gpt-5.1',
+        mismatch: false,
+        kind: 'exact',
+        src: 'newapi_relay',
+        backend: 'azure',
+        backend_by: 'body',
+        backend_conf: 'medium',
+        backend_conflict: ['openai:header', 'azure:body'],
+      },
+      true
+    )
+
+    expect(
+      screen.getByText('Vendor-specific response body fields')
+    ).toBeInTheDocument()
+    expect(screen.getByText('Medium evidence')).toBeInTheDocument()
+    expect(screen.getByText('openai:header, azure:body')).toBeInTheDocument()
+  })
+
+  test('labels a neutral fallback backend as unidentified', () => {
+    renderDetails(
+      {
+        sent: 'gpt-5',
+        model: 'gpt-5',
+        mismatch: false,
+        kind: 'exact',
+        backend: 'gpt_relay',
+        backend_by: 'fallback',
+        backend_conf: 'none',
+      },
+      true
+    )
+
+    expect(
+      screen.getByText('OpenAI-compatible (backend unidentified)')
+    ).toBeInTheDocument()
+    expect(screen.getByText('No vendor evidence')).toBeInTheDocument()
+    expect(screen.queryByText('Conflicting Evidence')).toBeNull()
+  })
+
   test('hides the audit block from non-root viewers', () => {
     renderDetails(replayed, false)
 
