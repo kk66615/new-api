@@ -351,3 +351,42 @@ func TestForensicsTruncationFlagAndFingerprintBound(t *testing.T) {
 	info.ObserveUpstreamResponse("gpt-5", "chatcmpl-x", 0, strings.Repeat("f", 1000))
 	assert.Len(t, info.UpstreamSystemFingerprint, 128)
 }
+
+// Vendor fingerprints only count at their protocol-defined position: model
+// text, tool arguments, or a Responses event echoing the client's tools /
+// metadata / schema can contain the same words.
+func TestBodyMarkersRequireProtocolPosition(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame string
+		want  UpstreamBodyMarkers
+	}{
+		{"text mentions the keys (escaped quotes)",
+			`{"id":"chatcmpl-x1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"fields \"prompt_filter_results\", \"content_filters\", \"content_filter_results\", \"prompt_cache_hit_tokens\" and \"prompt_cache_miss_tokens\""}}]}`, 0},
+		{"tool argument mentions content_filters",
+			`{"id":"chatcmpl-x2","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":"{\"content_filters\":[{\"content_filter_results\":{}}]}"}}]}}]}`, 0},
+		{"Responses echoes a user tool and schema named like the keys",
+			`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5","tools":[{"type":"function","name":"content_filters","parameters":{"type":"object","properties":{"content_filters":{"type":"array"},"content_filter_results":{"type":"object"}}}}],"metadata":{"content_filters":"x"},"text":{"format":{"type":"json_schema","schema":{"properties":{"prompt_filter_results":{"type":"array"}}}}}}}`, 0},
+		{"unquoted and quoted Bedrock string in model text",
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"amazon-bedrock-invocationMetrics and \"amazon-bedrock-invocationMetrics\": {}"}}`, 0},
+		{"Azure chat first chunk",
+			`{"choices":[],"created":0,"id":"","model":"","object":"","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}}}]}`, BodyMarkerAzureContentFilter},
+		{"Azure chat content chunk",
+			`{"choices":[{"content_filter_results":{"hate":{"filtered":false,"severity":"safe"}},"delta":{"content":"Hi"},"index":0}],"id":"chatcmpl-a","model":"gpt-4o"}`, BodyMarkerAzureContentFilter},
+		{"Azure Responses completed event",
+			`{"type":"response.completed","response":{"id":"resp_2","model":"gpt-5.1","output":[],"content_filters":[{"blocked":false,"source_type":"completion","content_filter_results":{"hate":{"filtered":false,"severity":"safe"}},"content_filter_offsets":{"start_offset":0,"end_offset":6,"check_offset":0}}]}}`, BodyMarkerAzureContentFilter},
+		{"Bedrock final event",
+			`{"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":3,"outputTokenCount":2,"invocationLatency":400,"firstByteLatency":200}}`, BodyMarkerBedrockMetrics},
+		{"DeepSeek usage",
+			`{"id":"x","model":"deepseek-chat","choices":[],"usage":{"prompt_tokens":12,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":12}}`, BodyMarkerDeepSeekCacheHit | BodyMarkerDeepSeekCacheMiss},
+		{"NewAPI hop usage",
+			`{"id":"chatcmpl-h","model":"claude-sonnet-4-5","choices":[],"usage":{"prompt_tokens":3,"claude_cache_creation_5_m_tokens":0}}`, BodyMarkerNewAPICacheSplit},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			info := &RelayInfo{}
+			info.ObserveUpstreamBodyMarkers([]byte(c.frame))
+			assert.Equal(t, c.want, info.UpstreamAudit.BodyMarkers)
+		})
+	}
+}

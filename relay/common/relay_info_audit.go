@@ -120,17 +120,56 @@ const (
 	BodyMarkerNewAPICacheSplit
 )
 
+// upstreamBodyMarkerNeedles pairs a cheap pre-filter (bytes.Contains on the
+// quoted key) with a confirmation at the protocol-defined path: the same
+// words can appear in positions nobody but the client controls — model text
+// (escaped quotes), tool arguments, or a Responses event echoing the
+// request's tools / metadata / text.format schema.
 var upstreamBodyMarkerNeedles = []struct {
-	needle []byte
-	marker UpstreamBodyMarkers
+	needle  []byte
+	marker  UpstreamBodyMarkers
+	confirm func(frame []byte) bool
 }{
-	{[]byte(`"prompt_filter_results"`), BodyMarkerAzureContentFilter},
-	{[]byte(`"content_filter_results"`), BodyMarkerAzureContentFilter},
-	{[]byte(`"content_filters"`), BodyMarkerAzureContentFilter},
-	{[]byte(`amazon-bedrock-invocationMetrics`), BodyMarkerBedrockMetrics},
-	{[]byte(`"prompt_cache_hit_tokens"`), BodyMarkerDeepSeekCacheHit},
-	{[]byte(`"prompt_cache_miss_tokens"`), BodyMarkerDeepSeekCacheMiss},
-	{[]byte(`"claude_cache_creation_5_m_tokens"`), BodyMarkerNewAPICacheSplit},
+	// chat completion object / chunk: top-level only
+	{[]byte(`"prompt_filter_results"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
+		return gjson.GetBytes(f, "prompt_filter_results").IsArray()
+	}},
+	// chat choices, or entries of the Responses content_filters array
+	{[]byte(`"content_filter_results"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
+		return anyGJSONMatch(f, "choices.#.content_filter_results", "content_filters.#.content_filter_results",
+			"response.content_filters.#.content_filter_results")
+	}},
+	// Responses object (non-stream) or event (stream): top-level of the response only
+	{[]byte(`"content_filters"`), BodyMarkerAzureContentFilter, func(f []byte) bool {
+		return gjson.GetBytes(f, "content_filters").IsArray() || gjson.GetBytes(f, "response.content_filters").IsArray()
+	}},
+	// Bedrock stream event: a top-level object on the event itself
+	{[]byte(`"amazon-bedrock-invocationMetrics"`), BodyMarkerBedrockMetrics, func(f []byte) bool {
+		return gjson.GetBytes(f, "amazon-bedrock-invocationMetrics").IsObject()
+	}},
+	// official DeepSeek usage (chat completion / final chunk)
+	{[]byte(`"prompt_cache_hit_tokens"`), BodyMarkerDeepSeekCacheHit, func(f []byte) bool {
+		return gjson.GetBytes(f, "usage.prompt_cache_hit_tokens").Type == gjson.Number
+	}},
+	{[]byte(`"prompt_cache_miss_tokens"`), BodyMarkerDeepSeekCacheMiss, func(f []byte) bool {
+		return gjson.GetBytes(f, "usage.prompt_cache_miss_tokens").Type == gjson.Number
+	}},
+	// NewAPI hop usage (chat usage, or a Responses object's usage)
+	{[]byte(`"claude_cache_creation_5_m_tokens"`), BodyMarkerNewAPICacheSplit, func(f []byte) bool {
+		return gjson.GetBytes(f, "usage.claude_cache_creation_5_m_tokens").Type == gjson.Number ||
+			gjson.GetBytes(f, "response.usage.claude_cache_creation_5_m_tokens").Type == gjson.Number
+	}},
+}
+
+// anyGJSONMatch reports whether any of the #-query paths matches at least
+// one element.
+func anyGJSONMatch(frame []byte, paths ...string) bool {
+	for _, path := range paths {
+		if len(gjson.GetBytes(frame, path).Array()) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Has reports whether every marker in want is present.
@@ -139,13 +178,15 @@ func (m UpstreamBodyMarkers) Has(want UpstreamBodyMarkers) bool {
 }
 
 // ObserveUpstreamBodyMarkers scans one raw response frame or body (before any
-// truncation) for vendor fingerprints; a handful of bytes.Contains per frame.
+// truncation) for vendor fingerprints. The byte pre-filter keeps the common
+// case to a few bytes.Contains; only a hit is parsed, and needles whose bit
+// is already set are skipped.
 func (info *RelayInfo) ObserveUpstreamBodyMarkers(frame []byte) {
 	if info == nil || len(frame) == 0 {
 		return
 	}
 	for _, n := range upstreamBodyMarkerNeedles {
-		if info.UpstreamAudit.BodyMarkers&n.marker == 0 && bytes.Contains(frame, n.needle) {
+		if info.UpstreamAudit.BodyMarkers&n.marker == 0 && bytes.Contains(frame, n.needle) && n.confirm(frame) {
 			info.UpstreamAudit.BodyMarkers |= n.marker
 		}
 	}
