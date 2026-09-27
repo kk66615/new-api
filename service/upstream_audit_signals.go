@@ -388,8 +388,12 @@ func unknownResponseKeys(handler string, relayInfo *relaycommon.RelayInfo) []str
 	// bounded: an upstream controls both the number and the length of keys
 	var extra []string
 	object.ForEach(func(k, _ gjson.Result) bool {
-		if !slices.Contains(known, k.String()) {
-			extra = append(extra, common.TruncateAuditRunes(k.String(), maxExtraKeyRunes))
+		if slices.Contains(known, k.String()) {
+			return true
+		}
+		// long keys sharing a prefix collapse to the same cut name
+		if key := common.TruncateAuditRunes(k.String(), maxExtraKeyRunes); !slices.Contains(extra, key) {
+			extra = append(extra, key)
 		}
 		return len(extra) < maxExtraKeys
 	})

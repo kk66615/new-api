@@ -1369,8 +1369,11 @@ func TestAuditExtraKeysAreBounded(t *testing.T) {
 	isolatedAuditKey(t, 987677, "gpt")
 	var b strings.Builder
 	b.WriteString(`{"id":"chatcmpl-extra0001","object":"chat.completion","model":"gpt-5","choices":[]`)
+	// 30 long keys sharing one 200-char prefix collapse to a single cut name;
+	// 30 distinct short keys are capped at 20
 	for i := range 30 {
 		b.WriteString(`,"` + strings.Repeat("k", 200) + strconv.Itoa(i) + `":1`)
+		b.WriteString(`,"x` + strconv.Itoa(i) + `":1`)
 	}
 	b.WriteString(`}`)
 	ursp, _ := runAuditExchange(t, auditExchange{channelId: 987677, requestId: "x-1", models: []string{"gpt-5"},
@@ -1378,7 +1381,11 @@ func TestAuditExtraKeysAreBounded(t *testing.T) {
 	keys, ok := ursp["extra_keys"].([]string)
 	require.True(t, ok)
 	assert.Len(t, keys, 20)
+	seen := map[string]bool{}
 	for _, k := range keys {
 		assert.LessOrEqual(t, len([]rune(k)), 64)
+		assert.False(t, seen[k], "duplicate extra key %q", k)
+		seen[k] = true
 	}
+	assert.True(t, seen[strings.Repeat("k", 64)], "the collapsed long key is kept once")
 }
