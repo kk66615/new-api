@@ -6825,7 +6825,6 @@
     "Retry Attempt": "重试序号",
     "Authenticity Signals": "真实性信号",
     "Extra Response Keys": "额外响应字段",
-    "Prompt Token Ratio": "输入 Token 比值",
     "OpenAI-compatible (backend unidentified)": "OpenAI 兼容格式（后端未识别）",
     "Anthropic-compatible (backend unidentified)": "Anthropic 兼容格式（后端未识别）",
     "Backend Evidence": "后端判定依据",

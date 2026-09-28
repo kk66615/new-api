@@ -6798,7 +6798,6 @@
     "Retry Attempt": "Retry Attempt",
     "Authenticity Signals": "Authenticity Signals",
     "Extra Response Keys": "Extra Response Keys",
-    "Prompt Token Ratio": "Prompt Token Ratio",
     "OpenAI-compatible (backend unidentified)": "OpenAI-compatible (backend unidentified)",
     "Anthropic-compatible (backend unidentified)": "Anthropic-compatible (backend unidentified)",
     "Backend Evidence": "Backend Evidence",

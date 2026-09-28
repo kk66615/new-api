@@ -1117,12 +1117,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 mono
               />
             )}
-            {ursp.pt_ratio !== undefined && (
-              <DetailRow
-                label={t('Prompt Token Ratio')}
-                value={`${formatNumber(ursp.pt_ratio, locale)}×`}
-              />
-            )}
           </DetailSection>
         )}
 

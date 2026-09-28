@@ -482,13 +482,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	logContent := strings.Join(extraContent, ", ")
-	// upstream audit (observation only): the settled counts feed the speed and
-	// prompt-ratio signals written with the log; billing does not read them
-	promptTokensForAudit := summary.PromptTokens
-	if summary.IsClaudeUsageSemantic {
-		promptTokensForAudit += summary.CacheTokens + summary.CacheCreationTokens
-	}
-	relayInfo.ObserveUpstreamTokenCounts(promptTokensForAudit, summary.CompletionTokens, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens))
+	// upstream audit (observation only): the settled completion count feeds
+	// the generation-speed signal written with the log; billing does not read it
+	relayInfo.ObserveUpstreamCompletionTokens(summary.CompletionTokens)
 	var other *model.LogOther
 	if summary.IsClaudeUsageSemantic {
 		other = GenerateClaudeOtherInfo(ctx, relayInfo,

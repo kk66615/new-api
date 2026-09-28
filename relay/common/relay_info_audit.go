@@ -87,10 +87,8 @@ type UpstreamAuditObservation struct {
 	// (a byte slice, not a strings.Builder, so RelayInfo stays copyable).
 	outputText []byte
 
-	// Token counts as settled, for the speed and prompt-ratio signals.
-	PromptTokens     int
+	// CompletionTokens as settled, for the generation-speed signal.
 	CompletionTokens int
-	TokensLocal      bool
 
 	// BodyMarkers accumulates vendor-specific response body fields seen in
 	// ANY observed frame of this attempt (Azure puts prompt_filter_results in
@@ -501,16 +499,13 @@ func (info *RelayInfo) FinishUpstreamOutput() {
 	info.UpstreamAudit.outputText = nil
 }
 
-// ObserveUpstreamTokenCounts records the settled prompt (all input incl.
-// cache) and completion token counts; local marks counts we estimated
-// ourselves because the upstream reported none.
-func (info *RelayInfo) ObserveUpstreamTokenCounts(promptTokens, completionTokens int, local bool) {
+// ObserveUpstreamCompletionTokens records the settled completion token count
+// for the generation-speed signal.
+func (info *RelayInfo) ObserveUpstreamCompletionTokens(completionTokens int) {
 	if info == nil {
 		return
 	}
-	info.UpstreamAudit.PromptTokens = promptTokens
 	info.UpstreamAudit.CompletionTokens = completionTokens
-	info.UpstreamAudit.TokensLocal = local
 }
 
 // UpstreamObservationLevel is ursp.obs: "full" when the upstream declared a

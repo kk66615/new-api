@@ -93,7 +93,6 @@ const replayed: UpstreamResponseAudit = {
   dup_id: true,
   stale_created: true,
   extra_keys: ['api_key_id', 'provider'],
-  pt_ratio: 1.25,
   retry: 1,
 }
 
@@ -116,7 +115,16 @@ describe('upstream response audit details', () => {
       screen.getByText('Duplicate response ID, Stale created timestamp')
     ).toBeInTheDocument()
     expect(screen.getByText('api_key_id, provider')).toBeInTheDocument()
-    expect(screen.getByText('1.25×')).toBeInTheDocument()
+  })
+
+  test('ignores the removed prompt-token ratio on log rows written before it was dropped', () => {
+    // rows logged by the previous build still carry pt_ratio in root_info
+    const legacyRow = { ...replayed, pt_ratio: 1.25 } as unknown as UpstreamResponseAudit
+    renderDetails(legacyRow, true)
+
+    expect(screen.queryByText('1.25×')).not.toBeInTheDocument()
+    expect(screen.queryByText('Prompt Token Ratio')).not.toBeInTheDocument()
+    expect(screen.getByText('api_key_id, provider')).toBeInTheDocument()
   })
 
   test('labels a pinned build answered by the bare alias without a mismatch warning', () => {

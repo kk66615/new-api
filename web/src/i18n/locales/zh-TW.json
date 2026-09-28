@@ -6798,7 +6798,6 @@
     "Retry Attempt": "重試序號",
     "Authenticity Signals": "真實性信號",
     "Extra Response Keys": "額外回應欄位",
-    "Prompt Token Ratio": "輸入 Token 比值",
     "OpenAI-compatible (backend unidentified)": "OpenAI 相容格式（後端未識別）",
     "Anthropic-compatible (backend unidentified)": "Anthropic 相容格式（後端未識別）",
     "Backend Evidence": "後端判定依據",

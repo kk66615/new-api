@@ -164,8 +164,6 @@ export interface UpstreamResponseAudit {
   implausible_speed?: boolean
   // Top-level response keys outside the protocol's standard set
   extra_keys?: string[]
-  // Upstream prompt tokens / local estimate (no flag)
-  pt_ratio?: number
   // Retry index of the attempt (absent on the first attempt)
   retry?: number
   src?: string

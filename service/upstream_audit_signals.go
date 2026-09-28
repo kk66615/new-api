@@ -48,7 +48,6 @@ type replaySignals struct {
 	replay           bool
 	implausibleSpeed bool
 	extraKeys        []string
-	ptRatio          float64
 }
 
 // reasons lists the replay-related signals that fired, for the evidence note.
@@ -87,12 +86,9 @@ func (s replaySignals) apply(ursp map[string]any) {
 	if len(s.extraKeys) > 0 {
 		ursp["extra_keys"] = s.extraKeys
 	}
-	if s.ptRatio > 0 {
-		ursp["pt_ratio"] = s.ptRatio
-	}
 }
 
-// evaluateReplaySignals computes the H1–H7 signals for one exchange. success
+// evaluateReplaySignals computes the H1–H6 signals for one exchange. success
 // is false for failed attempts (only the created-time check applies to them);
 // record is false for failed attempts and channel tests, which may look up
 // the replay memory but never add to it.
@@ -195,11 +191,8 @@ func evaluateReplaySignals(relayInfo *relaycommon.RelayInfo, channelId int, requ
 
 	// H6: top-level response keys outside the protocol's standard set
 	s.extraKeys = unknownResponseKeys(audit.Handler, relayInfo)
-
-	// H7: upstream-reported prompt tokens against our own estimate
-	if est := relayInfo.GetEstimatePromptTokens(); est > 0 && audit.PromptTokens > 0 && !audit.TokensLocal {
-		s.ptRatio = math.Round(float64(audit.PromptTokens)/float64(est)*100) / 100
-	}
+	// H7 (prompt tokens / local estimate) was removed: the local estimator is
+	// not the model's tokenizer, so the ratio misled more than it told
 	return s
 }
 

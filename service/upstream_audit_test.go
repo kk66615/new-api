@@ -674,7 +674,6 @@ type auditExchange struct {
 	keyIndex    int
 	multiKey    bool
 	completion  int
-	promptTok   int
 	estimate    int
 	elapsed     time.Duration
 	startedAt   time.Time // request start; defaults to now − elapsed
@@ -736,7 +735,7 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	}
 	info.SetUpstreamResponseForensics(excerpt, x.headers)
 	info.ObserveUpstreamOutput(x.output)
-	info.ObserveUpstreamTokenCounts(x.promptTok, x.completion, false)
+	info.ObserveUpstreamCompletionTokens(x.completion)
 	other := model.NewLogOther()
 	appendUpstreamResponseAudit(ctx, info, other, x.errorType)
 	return urspOf(t, other), queued
@@ -1010,19 +1009,18 @@ func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
 	assert.Contains(t, ev.Note, "mid_stream_change: gpt-5 -> gpt-5-mini")
 }
 
-func TestAuditSpeedKeysAndPromptRatio(t *testing.T) {
+func TestAuditSpeedAndExtraKeys(t *testing.T) {
 	isolatedAuditKey(t, 987661, "gpt")
 	ursp, _ := runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-1", models: []string{"gpt-5"},
-		id: "chatcmpl-speed0001", completion: 2000, elapsed: time.Second, promptTok: 1234, estimate: 1000,
+		id: "chatcmpl-speed0001", completion: 2000, elapsed: time.Second, estimate: 1000,
 		excerpt: `{"id":"chatcmpl-speed0001","object":"chat.completion","model":"gpt-5","choices":[],"provider":"x","api_key_id":"k"}`})
 	assert.Equal(t, true, ursp["implausible_speed"])
 	assert.Equal(t, []string{"api_key_id", "provider"}, ursp["extra_keys"])
-	assert.Equal(t, 1.23, ursp["pt_ratio"])
+	assert.NotContains(t, ursp, "pt_ratio", "the prompt-token ratio is no longer recorded")
 
 	ursp, _ = runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-2", models: []string{"gpt-5"},
 		id: "chatcmpl-speed0002", completion: 2000, elapsed: 20 * time.Second})
 	assert.NotContains(t, ursp, "implausible_speed")
-	assert.NotContains(t, ursp, "pt_ratio")
 }
 
 func TestAuditRecordsObservationSentFieldAndRetry(t *testing.T) {
