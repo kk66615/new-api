@@ -1012,7 +1012,7 @@ func TestAuditMidStreamChangeIsAnAnomaly(t *testing.T) {
 func TestAuditSpeedAndExtraKeys(t *testing.T) {
 	isolatedAuditKey(t, 987661, "gpt")
 	ursp, _ := runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-1", models: []string{"gpt-5"},
-		id: "chatcmpl-speed0001", completion: 2000, elapsed: time.Second, estimate: 1000,
+		id: "chatcmpl-speed0001", completion: 2000, elapsed: time.Second,
 		excerpt: `{"id":"chatcmpl-speed0001","object":"chat.completion","model":"gpt-5","choices":[],"provider":"x","api_key_id":"k"}`})
 	assert.Equal(t, true, ursp["implausible_speed"])
 	assert.Equal(t, []string{"api_key_id", "provider"}, ursp["extra_keys"])
