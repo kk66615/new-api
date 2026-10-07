@@ -366,29 +366,44 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t 
 	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
 }
 
-func TestResponsesRequestToChatCompletionsRequestCustomToolCallPreservesRawShape(t *testing.T) {
+func TestResponsesRequestToChatCompletionsRequestEncodesCustomToolHistoryAsFunction(t *testing.T) {
 	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), nil, &dto.OpenAIResponsesRequest{
 		Model: "gpt-test",
 		Input: mustRawMessage(t, []map[string]any{
 			{
 				"type":    "custom_tool_call",
 				"call_id": "call_custom",
-				"name":    "apply_patch",
-				"input":   "patch body",
+				"name":    "exec",
+				"input":   "echo \"hi\" && ls",
+			},
+			{
+				"type":    "custom_tool_call_output",
+				"call_id": "call_custom",
+				"output":  "hi",
 			},
 		}),
 	})
 	require.NoError(t, err)
 
-	require.Len(t, got.Messages, 1)
+	require.Len(t, got.Messages, 2)
 	toolCalls := got.Messages[0].ParseToolCalls()
 	require.Len(t, toolCalls, 1)
-	assert.Equal(t, dto.CustomType, toolCalls[0].Type)
+	assert.Equal(t, "function", toolCalls[0].Type)
 	assert.Equal(t, "call_custom", toolCalls[0].ID)
-	assert.Equal(t, "apply_patch", toolCalls[0].Function.Name)
-	assert.Equal(t, "patch body", toolCalls[0].Function.Arguments)
-	assert.Equal(t, "custom_tool_call", gjson.GetBytes(toolCalls[0].Custom, "type").String())
-	assert.Equal(t, "patch body", gjson.GetBytes(toolCalls[0].Custom, "input").String())
+	assert.Equal(t, "exec", toolCalls[0].Function.Name)
+	assert.Equal(t, `echo "hi" && ls`, gjson.Get(toolCalls[0].Function.Arguments, "input").String())
+	assert.Empty(t, toolCalls[0].Custom)
+	assert.Equal(t, dto.Message{Role: "tool", ToolCallId: "call_custom", Content: "hi"}, got.Messages[1])
+}
+
+func TestResponsesRequestToChatCompletionsRequestRejectsNamelessCustomToolCall(t *testing.T) {
+	_, err := ResponsesRequestToChatCompletionsRequest(context.Background(), nil, &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{
+			{"type": "custom_tool_call", "call_id": "call_custom", "input": "ls"},
+		}),
+	})
+	require.ErrorContains(t, err, "custom_tool_call item is missing name")
 }
 
 func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {
@@ -644,6 +659,25 @@ func TestResponsesRequestToChatCompletionsRequestHoistsToolOutputMediaAfterToolB
 		assert.Equal(t, dto.Message{Role: "user", Content: "next"}, got.Messages[4])
 	})
 
+	t.Run("custom tool outputs stay in the same batch", func(t *testing.T) {
+		got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), nil, &dto.OpenAIResponsesRequest{
+			Model: "gpt-test",
+			Input: mustRawMessage(t, []map[string]any{
+				{"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+				{"type": "custom_tool_call", "call_id": "call_2", "name": "exec", "input": "ls"},
+				{"type": "function_call_output", "call_id": "call_1", "output": imageOutput},
+				{"type": "custom_tool_call_output", "call_id": "call_2", "output": "file.txt"},
+			}),
+		})
+		require.NoError(t, err)
+
+		require.Len(t, got.Messages, 4)
+		assert.Len(t, got.Messages[0].ParseToolCalls(), 2)
+		assert.Equal(t, dto.Message{Role: "tool", ToolCallId: "call_1", Content: "[image]"}, got.Messages[1])
+		assert.Equal(t, dto.Message{Role: "tool", ToolCallId: "call_2", Content: "file.txt"}, got.Messages[2])
+		assert.Equal(t, "user", got.Messages[3].Role)
+	})
+
 	t.Run("trailing output flushes media at end of input", func(t *testing.T) {
 		got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), nil, &dto.OpenAIResponsesRequest{
 			Model: "gpt-test",
@@ -669,4 +703,33 @@ func mustRawMessage(t *testing.T, value any) []byte {
 	raw, err := kitutil.Marshal(value)
 	require.NoError(t, err)
 	return raw
+}
+
+func TestResponsesRequestToChatCompletionsRequestPreservedReasoningKeepsMixedToolBatchContiguous(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+	meta := &convmeta.Values{Options: &convmeta.Options{PreserveReasoningContent: true}}
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), meta, &dto.OpenAIResponsesRequest{
+		Model: "deepseek-reasoner",
+		Input: mustRawMessage(t, []map[string]any{
+			{"type": "reasoning", "summary": []map[string]any{{"type": "summary_text", "text": "Need both."}}},
+			{"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+			{"type": "custom_tool_call", "call_id": "call_2", "name": "exec", "input": "ls"},
+			{"type": "function_call_output", "call_id": "call_1", "output": []any{map[string]any{"type": "input_image", "image_url": dataURL}}},
+			{"type": "custom_tool_call_output", "call_id": "call_2", "output": "file.txt"},
+			{"role": "user", "content": "next"},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 5)
+	assert.Equal(t, "assistant", got.Messages[0].Role)
+	assert.Equal(t, "Need both.", got.Messages[0].GetReasoningContent())
+	assert.Len(t, got.Messages[0].ParseToolCalls(), 2)
+	assert.Equal(t, dto.Message{Role: "tool", ToolCallId: "call_1", Content: "[image]"}, got.Messages[1])
+	assert.Equal(t, dto.Message{Role: "tool", ToolCallId: "call_2", Content: "file.txt"}, got.Messages[2])
+	assert.Equal(t, "user", got.Messages[3].Role)
+	mediaParts := got.Messages[3].ParseContent()
+	require.NotEmpty(t, mediaParts)
+	assert.Equal(t, dto.ContentTypeImageURL, mediaParts[0].Type)
+	assert.Equal(t, dto.Message{Role: "user", Content: "next"}, got.Messages[4])
 }
