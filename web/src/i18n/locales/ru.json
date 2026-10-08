@@ -6887,7 +6887,6 @@
     "OpenAI-compatible (backend unidentified)": "OpenAI-compatible (backend unidentified)",
     "Anthropic-compatible (backend unidentified)": "Anthropic-compatible (backend unidentified)",
     "Backend Evidence": "Backend Evidence",
-    "Backend Confidence": "Backend Confidence",
     "Conflicting Evidence": "Conflicting Evidence",
     "Channel protocol type": "Channel protocol type",
     "Official vendor response headers": "Official vendor response headers",
@@ -6900,6 +6899,17 @@
     "Weak evidence": "Weak evidence",
     "No vendor evidence": "No vendor evidence",
     "OpenAI-compatible relay": "OpenAI-compatible relay",
-    "Anthropic-compatible relay": "Anthropic-compatible relay"
+    "Anthropic-compatible relay": "Anthropic-compatible relay",
+    "DeepSeek format": "DeepSeek format",
+    "GLM format": "GLM format",
+    "Backend Clues": "Backend Clues",
+    "Backend not identified · model name points to {{family}} (not independently verified)": "Backend not identified · model name points to {{family}} (not independently verified)",
+    "AWS Bedrock naming": "AWS Bedrock naming",
+    "{{backend}} ({{confidence}})": "{{backend}} ({{confidence}})",
+    "Provider name labelled by a relay (some relays fake or mask it)": "Provider name labelled by a relay (some relays fake or mask it)",
+    "Relay-internal upstream key number": "Relay-internal upstream key number",
+    "Azure content-safety annotations": "Azure content-safety annotations",
+    "Meaning unknown": "Meaning unknown",
+    "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity."
   }
 }

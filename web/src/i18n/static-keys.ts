@@ -918,4 +918,12 @@ export const STATIC_I18N_KEYS = [
   'Medium evidence',
   'Weak evidence',
   'No vendor evidence',
+  'DeepSeek format',
+  'GLM format',
+  'AWS Bedrock naming',
+  // Generic meanings of extra top-level response keys (usage-logs details dialog).
+  'Provider name labelled by a relay (some relays fake or mask it)',
+  'Relay-internal upstream key number',
+  'Azure content-safety annotations',
+  'Meaning unknown',
 ] as const

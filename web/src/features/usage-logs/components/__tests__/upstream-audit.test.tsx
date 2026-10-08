@@ -114,7 +114,23 @@ describe('upstream response audit details', () => {
     expect(
       screen.getByText('Duplicate response ID, Stale created timestamp')
     ).toBeInTheDocument()
-    expect(screen.getByText('api_key_id, provider')).toBeInTheDocument()
+    expect(screen.getByText('api_key_id')).toBeInTheDocument()
+  })
+
+  test('explains each extra response key and what the row can and cannot show', () => {
+    renderDetails({ ...replayed, extra_keys: ['provider', 'turnToken'] }, true)
+
+    expect(
+      screen.getByText(
+        /Provider name labelled by a relay \(some relays fake or mask it\)/
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByText('turnToken').parentElement).toHaveTextContent(
+      'turnToken — Meaning unknown'
+    )
+    expect(
+      screen.getByText(/not evidence of model authenticity/)
+    ).toBeInTheDocument()
   })
 
   test('ignores the removed prompt-token ratio on log rows written before it was dropped', () => {
@@ -124,7 +140,7 @@ describe('upstream response audit details', () => {
 
     expect(screen.queryByText('1.25×')).not.toBeInTheDocument()
     expect(screen.queryByText('Prompt Token Ratio')).not.toBeInTheDocument()
-    expect(screen.getByText('api_key_id, provider')).toBeInTheDocument()
+    expect(screen.getByText('api_key_id')).toBeInTheDocument()
   })
 
   test('labels a pinned build answered by the bare alias without a mismatch warning', () => {
@@ -168,7 +184,7 @@ describe('upstream response audit details', () => {
     ).toBeInTheDocument()
   })
 
-  test('shows the backend with its evidence, confidence and conflicts', () => {
+  test('shows the backend clue with inline confidence and a highlighted conflict', () => {
     renderDetails(
       {
         sent: 'gpt-5.1',
@@ -187,8 +203,59 @@ describe('upstream response audit details', () => {
     expect(
       screen.getByText('Vendor-specific response body fields')
     ).toBeInTheDocument()
-    expect(screen.getByText('Medium evidence')).toBeInTheDocument()
-    expect(screen.getByText('openai:header, azure:body')).toBeInTheDocument()
+    expect(screen.getByText('Backend Clues')).toBeInTheDocument()
+    expect(
+      screen.getByText('Azure OpenAI (Medium evidence)')
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('openai:header, azure:body').parentElement
+    ).toHaveClass('text-amber-600')
+  })
+
+  test('labels a DeepSeek body claim as a format, never as official', () => {
+    renderDetails(
+      {
+        sent: 'glm-5.3-flash',
+        model: 'glm-5.3-flash',
+        mismatch: false,
+        kind: 'exact',
+        backend: 'deepseek',
+        backend_by: 'body',
+        backend_conf: 'weak',
+        backend_conflict: ['deepseek:body', 'glm:model_name'],
+      },
+      true
+    )
+
+    expect(
+      screen.getByText('DeepSeek format (Weak evidence)')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/官方/)).toBeNull()
+    expect(
+      screen.getByText('deepseek:body, glm:model_name')
+    ).toBeInTheDocument()
+  })
+
+  test('does not present a backend known only from the model name as identified', () => {
+    renderDetails(
+      {
+        sent: 'gemini-3-pro',
+        model: 'gemini-3-pro',
+        mismatch: false,
+        kind: 'exact',
+        backend: 'aistudio',
+        backend_by: 'model_name',
+        backend_conf: 'weak',
+      },
+      true
+    )
+
+    expect(
+      screen.getByText(
+        'Backend not identified · model name points to Gemini (not independently verified)'
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/AI Studio/)).toBeNull()
   })
 
   test('labels a neutral fallback backend as unidentified', () => {
@@ -207,9 +274,10 @@ describe('upstream response audit details', () => {
     )
 
     expect(
-      screen.getByText('OpenAI-compatible (backend unidentified)')
+      screen.getByText(
+        'OpenAI-compatible (backend unidentified) (No vendor evidence)'
+      )
     ).toBeInTheDocument()
-    expect(screen.getByText('No vendor evidence')).toBeInTheDocument()
     expect(screen.getByText('OpenAI-compatible relay')).toBeInTheDocument()
     expect(screen.queryByText('Conflicting Evidence')).toBeNull()
   })
@@ -218,6 +286,6 @@ describe('upstream response audit details', () => {
     renderDetails(replayed, false)
 
     expect(screen.queryByText(/Suspected replay/)).toBeNull()
-    expect(screen.queryByText('api_key_id, provider')).toBeNull()
+    expect(screen.queryByText('api_key_id')).toBeNull()
   })
 })

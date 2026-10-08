@@ -97,7 +97,11 @@ import {
   isPerCallBilling,
   isTimingLogType,
 } from '../../lib/utils'
-import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
+import {
+  USAGE_BILLING_PATH,
+  type LogOtherData,
+  type UpstreamResponseAudit,
+} from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
@@ -186,8 +190,9 @@ const UPSTREAM_SOURCE_LABELS: Record<string, string> = {
   claude_relay: 'Anthropic-compatible (backend unidentified)',
   openai: 'OpenAI 官方',
   gpt_relay: 'OpenAI-compatible (backend unidentified)',
-  deepseek: 'DeepSeek 官方形态',
-  glm: 'GLM 官方形态',
+  // body fields / id shape show a wire format, not the vendor behind it
+  deepseek: 'DeepSeek format',
+  glm: 'GLM format',
   kimi: 'Kimi 官方',
   newapi_relay: 'NewAPI 中转',
   openrouter: 'OpenRouter',
@@ -227,6 +232,42 @@ const URSP_BACKEND_CONF_LABELS: Record<string, string> = {
   medium: 'Medium evidence',
   weak: 'Weak evidence',
   none: 'No vendor evidence',
+}
+
+// A backend known only from the response model name is the upstream's own
+// claim, so the row names the model family it points to, never a platform.
+const MODEL_NAME_FAMILIES: Record<string, string> = {
+  aistudio: 'Gemini',
+  google: 'Gemini',
+  vertex: 'Gemini',
+  glm: 'GLM',
+  kimi: 'Kimi',
+  deepseek: 'DeepSeek',
+  aws: 'AWS Bedrock naming',
+}
+
+function urspBackendClue(ursp: UpstreamResponseAudit, t: TFunction): string {
+  if (ursp.backend_by === 'model_name') {
+    const family = MODEL_NAME_FAMILIES[ursp.backend ?? '']
+    return t(
+      'Backend not identified · model name points to {{family}} (not independently verified)',
+      { family: family ? t(family) : ursp.backend }
+    )
+  }
+  const backend = upstreamSourceLabel(ursp.backend, t)
+  if (!ursp.backend_conf) return backend
+  const confidence = t(
+    URSP_BACKEND_CONF_LABELS[ursp.backend_conf] ?? ursp.backend_conf
+  )
+  return t('{{backend}} ({{confidence}})', { backend, confidence })
+}
+
+// Generic meaning of top-level response keys outside the standard protocol;
+// anything not listed is shown as unknown.
+const EXTRA_RESPONSE_KEY_MEANINGS: Record<string, string> = {
+  provider: 'Provider name labelled by a relay (some relays fake or mask it)',
+  api_key_id: 'Relay-internal upstream key number',
+  content_filters: 'Azure content-safety annotations',
 }
 
 // Verdict labels explain WHY the sent/declared model pair was judged the way it
@@ -1056,8 +1097,8 @@ export function DetailsDialog(props: DetailsDialogProps) {
             )}
             {ursp.backend && (
               <DetailRow
-                label={t('Inferred Backend')}
-                value={upstreamSourceLabel(ursp.backend, t)}
+                label={t('Backend Clues')}
+                value={urspBackendClue(ursp, t)}
               />
             )}
             {ursp.backend_by && (
@@ -1068,20 +1109,20 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 )}
               />
             )}
-            {ursp.backend_conf && (
-              <DetailRow
-                label={t('Backend Confidence')}
-                value={t(
-                  URSP_BACKEND_CONF_LABELS[ursp.backend_conf] ??
-                    ursp.backend_conf
-                )}
-              />
-            )}
             {ursp.backend_conflict && ursp.backend_conflict.length > 0 && (
               <DetailRow
                 label={t('Conflicting Evidence')}
-                value={ursp.backend_conflict.join(', ')}
-                mono
+                value={
+                  <span className='flex items-start gap-1.5 font-medium text-amber-600 dark:text-amber-400'>
+                    <AlertTriangle
+                      className='mt-0.5 size-3.5 shrink-0'
+                      aria-hidden='true'
+                    />
+                    <span className='font-mono'>
+                      {ursp.backend_conflict.join(', ')}
+                    </span>
+                  </span>
+                }
               />
             )}
             {ursp.backend_flip && (
@@ -1113,8 +1154,24 @@ export function DetailsDialog(props: DetailsDialogProps) {
             {ursp.extra_keys && ursp.extra_keys.length > 0 && (
               <DetailRow
                 label={t('Extra Response Keys')}
-                value={ursp.extra_keys.join(', ')}
-                mono
+                value={
+                  <span className='block space-y-0.5'>
+                    {ursp.extra_keys.map((key) => (
+                      <span key={key} className='block'>
+                        <span className='font-mono'>{key}</span>
+                        {' — '}
+                        {t(
+                          EXTRA_RESPONSE_KEY_MEANINGS[key] ?? 'Meaning unknown'
+                        )}
+                      </span>
+                    ))}
+                    <span className='text-muted-foreground block'>
+                      {t(
+                        'Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.'
+                      )}
+                    </span>
+                  </span>
+                }
               />
             )}
           </DetailSection>
