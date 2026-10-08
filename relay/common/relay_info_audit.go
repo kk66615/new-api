@@ -110,7 +110,8 @@ const (
 	// by Bedrock to the final stream event.
 	BodyMarkerBedrockMetrics
 	// BodyMarkerDeepSeekCacheHit / Miss: the official DeepSeek API reports
-	// prompt_cache_hit_tokens and prompt_cache_miss_tokens; both are needed.
+	// prompt_cache_hit_tokens and prompt_cache_miss_tokens; both are needed,
+	// and only in an official-shaped usage object (isDeepSeekShapedUsage).
 	BodyMarkerDeepSeekCacheHit
 	BodyMarkerDeepSeekCacheMiss
 	// BodyMarkerNewAPICacheSplit: claude_cache_creation_5_m_tokens, written
@@ -149,16 +150,66 @@ var upstreamBodyMarkerNeedles = []struct {
 	}},
 	// official DeepSeek usage (chat completion / final chunk)
 	{[]byte(`"prompt_cache_hit_tokens"`), BodyMarkerDeepSeekCacheHit, func(f []byte) bool {
-		return gjson.GetBytes(f, "usage.prompt_cache_hit_tokens").Type == gjson.Number
+		return gjson.GetBytes(f, "usage.prompt_cache_hit_tokens").Type == gjson.Number && isDeepSeekShapedUsage(f)
 	}},
 	{[]byte(`"prompt_cache_miss_tokens"`), BodyMarkerDeepSeekCacheMiss, func(f []byte) bool {
-		return gjson.GetBytes(f, "usage.prompt_cache_miss_tokens").Type == gjson.Number
+		return gjson.GetBytes(f, "usage.prompt_cache_miss_tokens").Type == gjson.Number && isDeepSeekShapedUsage(f)
 	}},
 	// NewAPI hop usage (chat usage, or a Responses object's usage)
 	{[]byte(`"claude_cache_creation_5_m_tokens"`), BodyMarkerNewAPICacheSplit, func(f []byte) bool {
 		return gjson.GetBytes(f, "usage.claude_cache_creation_5_m_tokens").Type == gjson.Number ||
 			gjson.GetBytes(f, "response.usage.claude_cache_creation_5_m_tokens").Type == gjson.Number
 	}},
+}
+
+// Official usage key sets (fetched 2026-10-08):
+//   - DeepSeek, api-docs.deepseek.com "Create Chat Completion": usage is the
+//     five OpenAI keys plus prompt_cache_hit_tokens / prompt_cache_miss_tokens;
+//     prompt_tokens_details carries only cached_tokens and
+//     completion_tokens_details only reasoning_tokens.
+//   - OpenAI CompletionUsage, developers.openai.com chat completion object
+//     and streaming events: the detail objects below. They are tolerated
+//     because a pass-through hop may add OpenAI-standard detail subfields.
+var (
+	deepSeekUsageKeys = []string{
+		"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details",
+		"completion_tokens_details", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+	}
+	openAIPromptDetailKeys     = []string{"audio_tokens", "cache_write_tokens", "cached_tokens", "image_tokens", "text_tokens"}
+	openAICompletionDetailKeys = []string{"accepted_prediction_tokens", "audio_tokens", "reasoning_tokens", "rejected_prediction_tokens", "text_tokens"}
+)
+
+// isDeepSeekShapedUsage reports whether the frame's usage object has only
+// keys the official DeepSeek (or OpenAI-standard detail) schema defines.
+// Relays that rewrite usage into a union of several vendors' fields
+// (cache_read_input_tokens, prompt_cache_write_tokens, credit, cached_tokens
+// at the top level, ...) also carry the DeepSeek cache keys, so those keys
+// alone do not point at DeepSeek.
+func isDeepSeekShapedUsage(frame []byte) bool {
+	usage := gjson.GetBytes(frame, "usage")
+	if !usage.IsObject() {
+		return false
+	}
+	pure := true
+	usage.ForEach(func(key, value gjson.Result) bool {
+		var allowedDetails []string
+		switch k := key.String(); {
+		case !slices.Contains(deepSeekUsageKeys, k):
+			pure = false
+		case k == "prompt_tokens_details":
+			allowedDetails = openAIPromptDetailKeys
+		case k == "completion_tokens_details":
+			allowedDetails = openAICompletionDetailKeys
+		}
+		if pure && allowedDetails != nil && value.IsObject() {
+			value.ForEach(func(detailKey, _ gjson.Result) bool {
+				pure = slices.Contains(allowedDetails, detailKey.String())
+				return pure
+			})
+		}
+		return pure
+	})
+	return pure
 }
 
 // anyGJSONMatch reports whether any of the #-query paths matches at least

@@ -673,7 +673,8 @@ func bodyBackends(markers relaycommon.UpstreamBodyMarkers) []string {
 
 // decideUpstreamBackend is the single place that decides the backend behind
 // the hop, by evidence priority: channel protocol type (strong) > official
-// vendor headers (medium) > vendor-specific body fields (medium) > positive
+// vendor headers (medium) > vendor-specific body fields (medium; DeepSeek
+// usage shape weak) > positive
 // id / model shape (weak) > neutral protocol-format fallback (none).
 func decideUpstreamBackend(channelType int, headerSource string, markers relaycommon.UpstreamBodyMarkers, id, model string, ccmaxHint bool) backendDecision {
 	type claim struct{ vendor, by, conf string }
@@ -685,7 +686,16 @@ func decideUpstreamBackend(channelType int, headerSource string, markers relayco
 		claims = append(claims, claim{headerSource, BackendByHeader, BackendConfMedium})
 	}
 	for _, v := range bodyBackends(markers) {
-		claims = append(claims, claim{v, BackendByBody, BackendConfMedium})
+		conf := BackendConfMedium
+		if v == "deepseek" {
+			// The pure DeepSeek usage shape is documented, but nothing proves
+			// only DeepSeek emits it, so it is displayed as weak. The flip
+			// trackers still rank it by provenance (body, backendEvidenceStrength):
+			// that strength governs hysteresis against intermittently missing
+			// evidence, not how much the claim is believed.
+			conf = BackendConfWeak
+		}
+		claims = append(claims, claim{v, BackendByBody, conf})
 	}
 	shape, shapeBy := inferBackendShape(channelType, strings.TrimSpace(id), model, ccmaxHint)
 	if shapeBy != BackendByFallback {

@@ -587,7 +587,7 @@ func TestDecideUpstreamBackend(t *testing.T) {
 		{"bedrock metrics without msg_bdrk_", 14, "", relaycommon.BodyMarkerBedrockMetrics, "msg_01abc", "claude-sonnet-5",
 			backendDecision{backend: "aws", by: BackendByBody, conf: BackendConfMedium}},
 		{"deepseek usage fields", 1, "", deepseekBody, "chatcmpl-a1", "deepseek-v4",
-			backendDecision{backend: "deepseek", by: BackendByBody, conf: BackendConfMedium}},
+			backendDecision{backend: "deepseek", by: BackendByBody, conf: BackendConfWeak}},
 		{"header openai vs body azure", 1, "openai", azureBody, "chatcmpl-a1", "gpt-4o",
 			backendDecision{backend: "openai", by: BackendByHeader, conf: BackendConfMedium,
 				conflict: []string{"openai:header", "azure:body"}}},
@@ -1017,6 +1017,12 @@ func TestAuditSpeedAndExtraKeys(t *testing.T) {
 	assert.Equal(t, true, ursp["implausible_speed"])
 	assert.Equal(t, []string{"api_key_id", "provider"}, ursp["extra_keys"])
 	assert.NotContains(t, ursp, "pt_ratio", "the prompt-token ratio is no longer recorded")
+
+	// stop_details is an official Messages API field (refusals), not extra
+	ursp, _ = runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-3", handler: "claude",
+		sent: "claude-sonnet-4-5", models: []string{"claude-sonnet-4-5"}, id: "msg_01stopdetails",
+		excerpt: `{"id":"msg_01stopdetails","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal"},"usage":{"input_tokens":3,"output_tokens":1}}`})
+	assert.NotContains(t, ursp, "extra_keys")
 
 	ursp, _ = runAuditExchange(t, auditExchange{channelId: 987661, requestId: "s-2", models: []string{"gpt-5"},
 		id: "chatcmpl-speed0002", completion: 2000, elapsed: 20 * time.Second})
@@ -1475,13 +1481,45 @@ func TestAuditBedrockMetricsIdentifyAWS(t *testing.T) {
 	assert.Equal(t, BackendByBody, ursp["backend_by"])
 }
 
-func TestAuditDeepSeekUsageFieldsIdentifyDeepSeek(t *testing.T) {
-	isolatedAuditKey(t, 987682, "deepseek")
-	ursp, _ := auditFrames(t, 987682, constant.ChannelTypeOpenAI, relayOnlyHeaders,
-		[]string{`{"id":"5f1c7c3e-0b4b-4f5e-9d61-3c2a1f0e9b7d","object":"chat.completion","model":"deepseek-chat","choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":12}}`}, "")
-	assert.Equal(t, "deepseek", ursp["backend"])
-	assert.Equal(t, BackendByBody, ursp["backend_by"])
-	assert.NotContains(t, ursp, "backend_conflict", "the deepseek model name agrees")
+// Only an official-shaped DeepSeek usage object claims DeepSeek, and only
+// weakly; a relay's union usage that also carries the DeepSeek cache keys
+// leaves the decision to the (weak) model name.
+func TestAuditDeepSeekUsageShapeClaimsDeepSeekWeakly(t *testing.T) {
+	const pureUsage = `"usage":{"prompt_tokens":36,"completion_tokens":19,"total_tokens":55,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":17},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":36}`
+	const unionUsage = `"usage":{"prompt_tokens":926,"completion_tokens":173,"total_tokens":1099,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":0,"rejected_prediction_tokens":0,"cached_tokens":0},"prompt_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":0,"rejected_prediction_tokens":0,"cached_tokens":256},"prompt_cache_hit_tokens":256,"prompt_cache_miss_tokens":670,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_cache_write_tokens":0,"completion_thinking_tokens":0,"credit":0.02,"cached_tokens":0}`
+	cases := []struct {
+		name      string
+		channelId int
+		frame     string
+		backend   string
+		by        string
+		conf      string
+		conflict  []string
+	}{
+		{"pure DeepSeek usage, deepseek model", 987682,
+			`{"id":"5f1c7c3e-0b4b-4f5e-9d61-3c2a1f0e9b7d","object":"chat.completion","model":"deepseek-chat","choices":[{"message":{"content":"Hi"}}],` + pureUsage + `}`,
+			"deepseek", BackendByBody, BackendConfWeak, nil},
+		{"pure DeepSeek usage, glm model", 987699,
+			`{"id":"chatcmpl-dsglm0001","object":"chat.completion","model":"glm-5.3-flash","choices":[{"message":{"content":"Hi"}}],` + pureUsage + `}`,
+			"deepseek", BackendByBody, BackendConfWeak, []string{"deepseek:body", "glm:model_name"}},
+		{"relay union usage, glm model", 987700,
+			`{"id":"chatcmpl-union0001","object":"chat.completion.chunk","model":"glm-5.3-flash","choices":[],` + unionUsage + `}`,
+			"glm", BackendByModelName, BackendConfWeak, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			isolatedAuditKey(t, c.channelId, auditModelFamily(gjson.Get(c.frame, "model").String()))
+			ursp, _ := auditFrames(t, c.channelId, constant.ChannelTypeOpenAI, relayOnlyHeaders, []string{c.frame}, "")
+			assert.Equal(t, c.backend, ursp["backend"])
+			assert.Equal(t, c.by, ursp["backend_by"])
+			assert.Equal(t, c.conf, ursp["backend_conf"])
+			if c.conflict == nil {
+				assert.NotContains(t, ursp, "backend_conflict")
+			} else {
+				assert.Equal(t, c.conflict, ursp["backend_conflict"])
+			}
+		})
+	}
 }
 
 func TestAuditHeaderAndBodyConflictIsRecorded(t *testing.T) {

@@ -334,7 +334,7 @@ var knownResponseKeys = map[string][]string{
 	},
 	"claude": {
 		"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage",
-		"container", "context_management",
+		"container", "context_management", "stop_details", // stop_details: Messages API refusal details
 	},
 	"gemini": {
 		"candidates", "usageMetadata", "modelVersion", "responseId", "promptFeedback", "createTime",
