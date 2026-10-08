@@ -6930,7 +6930,7 @@
     "GLM format": "GLM 格式",
     "Backend Clues": "后端线索",
     "Backend not identified · model name points to {{family}} (not independently verified)": "后端未识别 · 模型名指向 {{family}}（未独立验证）",
-    "AWS Bedrock naming": "AWS Bedrock 命名",
+    "Backend not identified · model ID uses AWS Bedrock naming (not independently verified)": "后端未识别 · 模型 ID 采用 AWS Bedrock 命名（未独立验证）",
     "{{backend}} ({{confidence}})": "{{backend}}（{{confidence}}）",
     "Provider name labelled by a relay (some relays fake or mask it)": "中转标注的供应商名（部分中转会伪造或隐藏）",
     "Relay-internal upstream key number": "中转内部的上游密钥编号",

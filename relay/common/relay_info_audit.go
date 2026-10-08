@@ -201,7 +201,11 @@ func isDeepSeekShapedUsage(frame []byte) bool {
 		case k == "completion_tokens_details":
 			allowedDetails = openAICompletionDetailKeys
 		}
-		if pure && allowedDetails != nil && value.IsObject() {
+		switch {
+		case !pure || allowedDetails == nil || value.Type == gjson.Null:
+		case !value.IsObject():
+			pure = false // a details value that is neither an object nor null is off-schema
+		default:
 			value.ForEach(func(detailKey, _ gjson.Result) bool {
 				pure = slices.Contains(allowedDetails, detailKey.String())
 				return pure

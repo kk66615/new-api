@@ -6904,7 +6904,7 @@
     "GLM format": "GLM format",
     "Backend Clues": "Backend Clues",
     "Backend not identified · model name points to {{family}} (not independently verified)": "Backend not identified · model name points to {{family}} (not independently verified)",
-    "AWS Bedrock naming": "AWS Bedrock naming",
+    "Backend not identified · model ID uses AWS Bedrock naming (not independently verified)": "Backend not identified · model ID uses AWS Bedrock naming (not independently verified)",
     "{{backend}} ({{confidence}})": "{{backend}} ({{confidence}})",
     "Provider name labelled by a relay (some relays fake or mask it)": "Provider name labelled by a relay (some relays fake or mask it)",
     "Relay-internal upstream key number": "Relay-internal upstream key number",

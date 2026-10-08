@@ -236,26 +236,29 @@ const URSP_BACKEND_CONF_LABELS: Record<string, string> = {
 
 // A backend known only from the response model name is the upstream's own
 // claim, so the row names the model family it points to, never a platform.
+// Brand names are shown verbatim, never translated.
 const MODEL_NAME_FAMILIES: Record<string, string> = {
   aistudio: 'Gemini',
-  google: 'Gemini',
-  vertex: 'Gemini',
   glm: 'GLM',
   kimi: 'Kimi',
   deepseek: 'DeepSeek',
-  aws: 'AWS Bedrock naming',
 }
 
 function urspBackendClue(ursp: UpstreamResponseAudit, t: TFunction): string {
   if (ursp.backend_by === 'model_name') {
-    const family = MODEL_NAME_FAMILIES[ursp.backend ?? '']
+    if (ursp.backend === 'aws') {
+      return t(
+        'Backend not identified · model ID uses AWS Bedrock naming (not independently verified)'
+      )
+    }
     return t(
       'Backend not identified · model name points to {{family}} (not independently verified)',
-      { family: family ? t(family) : ursp.backend }
+      { family: MODEL_NAME_FAMILIES[ursp.backend ?? ''] ?? ursp.backend }
     )
   }
   const backend = upstreamSourceLabel(ursp.backend, t)
-  if (!ursp.backend_conf) return backend
+  // 'none' is a fallback: the label already says the backend is unidentified
+  if (!ursp.backend_conf || ursp.backend_conf === 'none') return backend
   const confidence = t(
     URSP_BACKEND_CONF_LABELS[ursp.backend_conf] ?? ursp.backend_conf
   )

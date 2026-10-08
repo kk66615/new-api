@@ -258,6 +258,27 @@ describe('upstream response audit details', () => {
     expect(screen.queryByText(/AI Studio/)).toBeNull()
   })
 
+  test('says a Bedrock-style model ID only shows AWS Bedrock naming', () => {
+    renderDetails(
+      {
+        sent: 'claude-sonnet-4-5',
+        model: 'anthropic.claude-sonnet-4-5-v1:0',
+        mismatch: false,
+        kind: 'vendor_prefix',
+        backend: 'aws',
+        backend_by: 'model_name',
+        backend_conf: 'weak',
+      },
+      true
+    )
+
+    expect(
+      screen.getByText(
+        'Backend not identified · model ID uses AWS Bedrock naming (not independently verified)'
+      )
+    ).toBeInTheDocument()
+  })
+
   test('labels a neutral fallback backend as unidentified', () => {
     renderDetails(
       {
@@ -274,10 +295,9 @@ describe('upstream response audit details', () => {
     )
 
     expect(
-      screen.getByText(
-        'OpenAI-compatible (backend unidentified) (No vendor evidence)'
-      )
+      screen.getByText('OpenAI-compatible (backend unidentified)')
     ).toBeInTheDocument()
+    expect(screen.queryByText(/\(No vendor evidence\)/)).toBeNull()
     expect(screen.getByText('OpenAI-compatible relay')).toBeInTheDocument()
     expect(screen.queryByText('Conflicting Evidence')).toBeNull()
   })
