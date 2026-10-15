@@ -247,6 +247,12 @@ export interface LogOtherData {
     // for admins and users alike).
     ursp?: UpstreamResponseAudit
   }
+  // Structured log content: English source keys plus params, rendered in the
+  // viewer's language. `content` keeps the English text for older clients.
+  content_parts?: {
+    key: string
+    params?: Record<string, string | number | boolean>
+  }[]
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.
   op?: {

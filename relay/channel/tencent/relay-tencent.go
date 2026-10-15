@@ -110,7 +110,7 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 		var tencentResponse TencentChatResponse
 		err := common.Unmarshal([]byte(data), &tencentResponse)
 		if err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
 			continue
 		}
 		// upstream response forensics — Hunyuan declares no model, only id/created
@@ -129,7 +129,7 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 	}
 
 	if err := scanner.Err(); err != nil {
-		common.SysLog("error reading stream: " + err.Error())
+		common.SysLog(common.LogText("error reading stream: %s", err.Error()))
 	}
 	info.SetUpstreamResponseForensics(lastStreamData, nil)
 

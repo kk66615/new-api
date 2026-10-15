@@ -38,7 +38,9 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 	// upstream response forensics (responses-api-on-gemini path)
 	info.ObserveUpstreamResponse(geminiResponse.ModelVersion, geminiResponse.ResponseId, 0, "")
 	info.ObserveUpstreamOutputJSON(responseBody)
-	markGeminiGoogleSearchCall(c, &geminiResponse)
+	var grounding geminiGroundingCounter
+	grounding.observe(&geminiResponse)
+	grounding.commit(info)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
 		usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
