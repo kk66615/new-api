@@ -395,6 +395,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, incoming.err)
 				state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "upstream connection closed"
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
+				unbindFailedTurn(c, info)
 				return nil
 			}
 			info.SetFirstResponseTime()
@@ -454,11 +455,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 							state.closeCode = websocket.CloseInternalServerErr
 						}
 						ConsumeResponsesQuota(c, info, accumulator.Finish())
-						if info.StreamStatus.ResponseFailed() {
-							// The turn bound the session on its first response.* event;
-							// unbind it so the client's next connection re-selects.
-							service.ClearCurrentChannelAffinityCache(c)
-						}
+						unbindFailedTurn(c, info)
 						return nil
 					}
 					if rejection.Error == nil {
@@ -492,6 +489,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				state.terminal = &incoming
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
+				unbindFailedTurn(c, info)
 				return nil
 			}
 			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
@@ -966,4 +964,17 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 		return nil, err
 	}
 	return channel, nil
+}
+
+// unbindFailedTurn drops the session binding after a turn that failed upstream
+// (response.failed, an error frame, or a broken upstream connection). The turn
+// bound the session on its first response.* event, so without this the
+// client's next connection would go straight back to the failing channel.
+func unbindFailedTurn(c *gin.Context, info *relaycommon.RelayInfo) {
+	if info == nil || info.StreamStatus == nil {
+		return
+	}
+	if info.StreamStatus.ResponseFailed() || info.StreamStatus.OutcomeSnapshot().EndReason == relaycommon.StreamEndReasonScannerErr {
+		service.ClearCurrentChannelAffinityCache(c)
+	}
 }

@@ -691,3 +691,64 @@ func TestResponsesWSErrorAttribution(t *testing.T) {
 		})
 	}
 }
+
+func TestUnbindFailedTurnDropsOnlyFailedSessions(t *testing.T) {
+	affinity := operation_setting.GetChannelAffinitySetting()
+	previousAffinity := *affinity
+	t.Cleanup(func() { *affinity = previousAffinity })
+	snapshot, err := model.BuildRequestPolicy(map[string]string{
+		"channel_affinity_setting.enabled":      "true",
+		"channel_affinity_setting.session_mode": "prefer",
+		"channel_affinity_setting.rules":        `[{"name":"session","model_regex":[".*"],"key_sources":[{"type":"request_header","key":"X-Session"}],"session_mode":"inherit"}]`,
+	})
+	require.NoError(t, err)
+	*affinity = snapshot.Affinity
+
+	bind := func(session string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		c.Request.Header.Set("X-Session", session)
+		service.GetPreferredChannelByAffinity(c, "ws-model", "default")
+		c.Set("channel_id", 7)
+		service.RecordChannelAffinity(c, 7)
+		t.Cleanup(func() { service.ClearCurrentChannelAffinityCache(c) })
+		return c
+	}
+	bound := func(session string) bool {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		c.Request.Header.Set("X-Session", session)
+		_, found := service.GetPreferredChannelByAffinity(c, "ws-model", "default")
+		return found
+	}
+
+	for _, tc := range []struct {
+		name      string
+		status    func() *relaycommon.StreamStatus
+		wantBound bool
+	}{
+		{"completed turn keeps the binding", func() *relaycommon.StreamStatus {
+			s := relaycommon.NewStreamStatus()
+			s.MarkCompleted()
+			return s
+		}, true},
+		{"response.failed turn drops the binding", func() *relaycommon.StreamStatus {
+			s := relaycommon.NewStreamStatus()
+			s.MarkFailed("server_error", "", 0)
+			return s
+		}, false},
+		{"broken upstream connection drops the binding", func() *relaycommon.StreamStatus {
+			s := relaycommon.NewStreamStatus()
+			s.SetEndReason(relaycommon.StreamEndReasonScannerErr, errors.New("upstream closed"))
+			return s
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := t.Name()
+			c := bind(session)
+			require.True(t, bound(session))
+			unbindFailedTurn(c, &relaycommon.RelayInfo{StreamStatus: tc.status()})
+			assert.Equal(t, tc.wantBound, bound(session))
+		})
+	}
+}
