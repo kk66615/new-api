@@ -39,7 +39,11 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 		a.info.ObserveResponseModel(event.Response.Model)
 	}
 	a.started = true
+	wasFailed := a.info.StreamStatus != nil && a.info.StreamStatus.ResponseFailed()
 	ObserveResponsesOutcome(a.info, event)
+	if !wasFailed && a.info.StreamStatus != nil && a.info.StreamStatus.ResponseFailed() && len(raw) > 0 {
+		a.info.ObserveUpstreamErrorFrame(string(raw))
+	}
 	switch event.Type {
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
@@ -96,15 +100,17 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 		a.imageCounter.Commit(a.info)
 		a.imageCommitted = true
 	}
-	if a.usage.CompletionTokens == 0 {
-		if output := a.outputText.String(); output != "" {
-			a.usage.CompletionTokens = tokenkit.Count(a.info.GetUpstreamModelName(), output)
-		}
+	output := a.outputText.String()
+	// Some relays send a lone " " delta before response.failed. Counting it as
+	// output used to bill the whole prompt for a request that produced nothing.
+	failedBlank := a.usage.CompletionTokens == 0 && a.info.StreamStatus.ResponseFailed() && strings.TrimSpace(output) == ""
+	if a.usage.CompletionTokens == 0 && !failedBlank && output != "" {
+		a.usage.CompletionTokens = tokenkit.Count(a.info.GetUpstreamModelName(), output)
 	}
 	// Upstream bills the prompt as soon as it starts generating, so a stream
 	// that produced any event but no usage still owes its input tokens unless
 	// upstream reported an explicit failure.
-	billsPrompt := a.usage.CompletionTokens != 0 || (a.started && !a.info.StreamStatus.ResponseFailed())
+	billsPrompt := !failedBlank && (a.usage.CompletionTokens != 0 || (a.started && !a.info.StreamStatus.ResponseFailed()))
 	if a.usage.PromptTokens == 0 && billsPrompt {
 		a.usage.PromptTokens = a.info.GetEstimatePromptTokens()
 	}

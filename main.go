@@ -232,12 +232,17 @@ func main() {
 	common.SysLog(common.LogText("received signal: %v, shutting down...", sig))
 
 	// SSE streams may run for minutes; give them time to finish before forced exit
+	// Write batched quota deltas first: the container runtime may kill the
+	// process before the graceful drain below finishes.
+	model.FlushBatchUpdates()
 	shutdownTimeout := time.Duration(common.GetEnvOrDefault("SHUTDOWN_TIMEOUT_SECONDS", 120)) * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	// requests that finished during the drain added more batched deltas
+	model.FlushBatchUpdates()
 	// write queued upstream audit evidence before exiting
 	model.FlushUpstreamEvidence(10 * time.Second)
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)

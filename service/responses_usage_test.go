@@ -320,6 +320,33 @@ func TestResponsesUsageAccumulatorMissingUsageEstimation(t *testing.T) {
 			},
 		},
 		{
+			name: "explicit failure after a lone blank delta bills nothing",
+			events: []dto.ResponsesStreamResponse{
+				{Type: "response.created", Response: inProgress},
+				{Type: "response.output_text.delta", Delta: " "},
+				{Type: "response.failed", Response: &dto.OpenAIResponsesResponse{Status: []byte(`"failed"`)}},
+			},
+		},
+		{
+			name: "explicit failure after real output bills prompt and output",
+			events: []dto.ResponsesStreamResponse{
+				{Type: "response.created", Response: inProgress},
+				{Type: "response.output_text.delta", Delta: "partial answer"},
+				{Type: "response.failed", Response: &dto.OpenAIResponsesResponse{Status: []byte(`"failed"`)}},
+			},
+			wantPrompt:     100,
+			wantCompletion: tokenkit.Count(model, "partial answer"),
+		},
+		{
+			name: "blank delta without failure keeps the old billing",
+			events: []dto.ResponsesStreamResponse{
+				{Type: "response.created", Response: inProgress},
+				{Type: "response.output_text.delta", Delta: " "},
+			},
+			wantPrompt:     100,
+			wantCompletion: tokenkit.Count(model, " "),
+		},
+		{
 			name: "no upstream events bills nothing",
 		},
 	} {
@@ -339,4 +366,21 @@ func TestResponsesUsageAccumulatorMissingUsageEstimation(t *testing.T) {
 			assert.Equal(t, tc.wantPrompt+tc.wantCompletion, usage.TotalTokens)
 		})
 	}
+}
+
+func TestResponsesUsageAccumulatorKeepsFirstFailureFrame(t *testing.T) {
+	info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
+	accumulator := NewResponsesUsageAccumulator(info)
+	created := []byte(`{"type":"response.created"}`)
+	firstFailure := []byte(`{"type":"error","message":"first"}`)
+	laterFailure := []byte(`{"type":"response.failed","response":{"status":"failed"}}`)
+
+	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.created", Response: &dto.OpenAIResponsesResponse{Status: []byte(`"in_progress"`)}}, created)
+	assert.Empty(t, info.UpstreamAudit.ErrorFrame, "a healthy frame is not an error frame")
+
+	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "error"}, firstFailure)
+	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.failed", Response: &dto.OpenAIResponsesResponse{Status: []byte(`"failed"`)}}, laterFailure)
+
+	assert.True(t, info.StreamStatus.ResponseFailed())
+	assert.Equal(t, string(firstFailure), info.UpstreamAudit.ErrorFrame, "the frame that first failed the stream is kept")
 }

@@ -125,7 +125,14 @@ func Distribute() func(c *gin.Context) {
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
-			service.RecordChannelAffinity(c, channel.Id)
+			// A Responses stream that fails upstream still answers HTTP 200. Re-binding
+			// would send the client's retry straight back to the failing channel, so
+			// drop the binding instead and let the retry pick a channel normally.
+			if service.RequestPolicy(c).UpstreamFailed {
+				service.ClearCurrentChannelAffinityCache(c)
+			} else {
+				service.RecordChannelAffinity(c, channel.Id)
+			}
 		}
 	}
 }

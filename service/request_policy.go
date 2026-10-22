@@ -48,8 +48,12 @@ type RequestPolicyState struct {
 	RuleName          string
 	Successful        bool
 	OutcomeRecorded   bool
-	mu                sync.Mutex
-	events            []PolicyEvent
+	// UpstreamFailed is set when the upstream ended the stream with an explicit
+	// failure (response.failed / error frame) or broke the connection. Client
+	// disconnects do not set it.
+	UpstreamFailed bool
+	mu             sync.Mutex
+	events         []PolicyEvent
 }
 
 func RequestPolicy(c *gin.Context) *RequestPolicyState {
@@ -133,6 +137,9 @@ func MarkRequestPolicySuccess(c *gin.Context, stream *relaycommon.StreamStatus) 
 	}
 	state.OutcomeRecorded = true
 	state.Successful = stream == nil || stream.IsNormalEnd() && !stream.HasErrors() && (stream.ResponseOutcome() == "" || stream.ResponseOutcome() == "completed")
+	if stream != nil {
+		state.UpstreamFailed = stream.ResponseFailed() || stream.OutcomeSnapshot().EndReason == relaycommon.StreamEndReasonScannerErr
+	}
 	decision := PolicyDecision{Action: "success", Reason: "request_completed", Source: "upstream"}
 	if !state.Successful {
 		decision = PolicyDecision{Action: "stop", Reason: "stream_not_successful", Source: "system"}

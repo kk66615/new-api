@@ -40,6 +40,17 @@ func InitBatchUpdater() {
 	})
 }
 
+// FlushBatchUpdates writes pending batched quota and count deltas right away.
+// Shutdown calls it so a restart does not drop up to one interval of charges.
+// batchUpdate swaps each store under its lock, so running it next to the
+// ticker goroutine never writes a delta twice.
+func FlushBatchUpdates() {
+	if !common.BatchUpdateEnabled {
+		return
+	}
+	batchUpdate()
+}
+
 func addNewRecord(type_ int, id int, value int) {
 	batchUpdateLocks[type_].Lock()
 	defer batchUpdateLocks[type_].Unlock()
