@@ -57,7 +57,7 @@ func TestChatCompletionsRequestToResponsesRequestImageDetail(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ChatCompletionsRequestToResponsesRequest(context.Background(), &dto.GeneralOpenAIRequest{
+			got, err := ChatCompletionsRequestToResponsesRequest(context.Background(), nil, &dto.GeneralOpenAIRequest{
 				Model: "gpt-test",
 				Messages: []dto.Message{{Role: "user", Content: []any{
 					map[string]any{"type": "image_url", "image_url": tt.imageURL},
