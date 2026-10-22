@@ -929,4 +929,8 @@ export const STATIC_I18N_KEYS = [
   'Relay-internal upstream key number',
   'Azure content-safety annotations',
   'Meaning unknown',
+  // Channel priority ordering API errors.
+  'Channel priorities changed. Refresh and try again.',
+  'Invalid channel priority move',
+  'Channel priority is outside the sortable range',
 ] as const
