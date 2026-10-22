@@ -454,6 +454,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 							state.closeCode = websocket.CloseInternalServerErr
 						}
 						ConsumeResponsesQuota(c, info, accumulator.Finish())
+						if info.StreamStatus.ResponseFailed() {
+							// The turn bound the session on its first response.* event;
+							// unbind it so the client's next connection re-selects.
+							service.ClearCurrentChannelAffinityCache(c)
+						}
 						return nil
 					}
 					if rejection.Error == nil {

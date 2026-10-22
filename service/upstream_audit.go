@@ -1476,4 +1476,5 @@ func digestNormalEvidence(ev *model.UpstreamEvidence) {
 	ev.ResponseExcerpt, cut = digest(ev.ResponseExcerpt)
 	ev.ExcerptTruncated = ev.ExcerptTruncated || cut
 	ev.ModelFrame, _ = digest(ev.ModelFrame)
+	ev.ErrorFrame, _ = digest(ev.ErrorFrame)
 }

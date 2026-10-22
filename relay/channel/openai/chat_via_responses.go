@@ -333,7 +333,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	})
 
 	if streamErr != nil {
-		if !upstreamFailed || state.UsageText() == "" {
+		if !upstreamFailed || strings.TrimSpace(state.UsageText()) == "" {
 			return nil, streamErr
 		}
 		// The upstream failed after output reached the client: bill the

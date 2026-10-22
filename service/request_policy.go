@@ -94,6 +94,7 @@ func (s *RequestPolicyState) BeginAttempt(channel *model.Channel, group string) 
 	s.Attempts++
 	s.Successful = false
 	s.OutcomeRecorded = false
+	s.UpstreamFailed = false
 	s.SelectedGroup = group
 	s.AddEvent(PolicyEvent{ChannelID: channel.Id, Decision: PolicyDecision{Action: "attempt", Reason: "channel_selected", Source: "routing"}})
 }
@@ -130,6 +131,21 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 	state.AddEvent(event)
 }
 
+// StreamFailedUpstream reports whether this request's stream ended in an
+// upstream failure even though HTTP answered 200: either the attempt's
+// stream status recorded one, or the final error was written into an already
+// started stream (keepalive committed the headers before upstream failed).
+func StreamFailedUpstream(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if RequestPolicy(c).UpstreamFailed {
+		return true
+	}
+	status, _ := common.GetContextKeyType[*relaycommon.StreamStatus](c, constant.ContextKeyResponseStreamStatus)
+	return status != nil && status.ResponseFailed()
+}
+
 func MarkRequestPolicySuccess(c *gin.Context, stream *relaycommon.StreamStatus) {
 	state := RequestPolicy(c)
 	if state.OutcomeRecorded {
@@ -137,9 +153,7 @@ func MarkRequestPolicySuccess(c *gin.Context, stream *relaycommon.StreamStatus) 
 	}
 	state.OutcomeRecorded = true
 	state.Successful = stream == nil || stream.IsNormalEnd() && !stream.HasErrors() && (stream.ResponseOutcome() == "" || stream.ResponseOutcome() == "completed")
-	if stream != nil {
-		state.UpstreamFailed = stream.ResponseFailed() || stream.OutcomeSnapshot().EndReason == relaycommon.StreamEndReasonScannerErr
-	}
+	state.UpstreamFailed = stream != nil && (stream.ResponseFailed() || stream.OutcomeSnapshot().EndReason == relaycommon.StreamEndReasonScannerErr)
 	decision := PolicyDecision{Action: "success", Reason: "request_completed", Source: "upstream"}
 	if !state.Successful {
 		decision = PolicyDecision{Action: "stop", Reason: "stream_not_successful", Source: "system"}
