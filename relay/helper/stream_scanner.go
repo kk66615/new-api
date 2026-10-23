@@ -85,6 +85,58 @@ func ExtendWriteDeadline(c *gin.Context) {
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 }
 
+// maxStreamSniffBytes bounds the leading whitespace skipped while deciding
+// whether a body labelled text/event-stream really is a stream.
+const maxStreamSniffBytes = 64
+
+// UpstreamAnswersWithStream reports whether the upstream answered a request
+// with a real event stream. Some upstreams label a complete JSON response
+// text/event-stream; trusting the Content-Type alone sends that body through a
+// stream handler, which finds no data event and fails the request although the
+// answer is complete. The first non-blank byte decides: a JSON object is a
+// plain response, so its Content-Type is corrected for the client and the body
+// stays intact for the regular handler. Callers ask only for non-stream requests.
+func UpstreamAnswersWithStream(c *gin.Context, resp *http.Response) bool {
+	if resp == nil || resp.Body == nil || !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		return false
+	}
+	// Nothing else watches the request while the first bytes are awaited, so
+	// bound the wait like the stream scanner does: idle timeout or client gone
+	// closes the upstream body, and the stream path then reports the failure.
+	body := resp.Body
+	if constant.StreamingTimeout > 0 {
+		idle := time.AfterFunc(time.Duration(constant.StreamingTimeout)*time.Second, func() { _ = body.Close() })
+		defer idle.Stop()
+	}
+	if c != nil && c.Request != nil {
+		stop := context.AfterFunc(c.Request.Context(), func() { _ = body.Close() })
+		defer stop()
+	}
+	reader := bufio.NewReader(body)
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{reader, body}
+	for n := 1; n <= maxStreamSniffBytes; n++ {
+		peeked, _ := reader.Peek(n)
+		if len(peeked) < n {
+			return true
+		}
+		switch peeked[n-1] {
+		case ' ', '\t', '\r', '\n', 0xEF, 0xBB, 0xBF: // whitespace and a UTF-8 byte order mark
+			continue
+		case '{':
+			resp.Header.Set("Content-Type", "application/json")
+			if c != nil {
+				logger.LogInfo(c, common.LogText("upstream labelled a JSON response text/event-stream; handling it as JSON"))
+			}
+			return false
+		}
+		return true
+	}
+	return true
+}
+
 // EmptyUpstreamStreamError turns a stream the upstream ended before sending a
 // single data event into a failed attempt: the client received no content, so
 // it must not be settled on locally estimated prompt tokens. Response handlers

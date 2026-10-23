@@ -42,6 +42,17 @@ require relay/channel/openai/chat_via_responses.go 'helper.EmptyUpstreamStreamEr
 require relay/channel/gemini/relay_responses.go 'info.StreamStatus.UpstreamSentNothing()' 'Gemini-to-Responses answers the failure instead of a response.failed stream'
 require controller/relay.go 'relayInfo.IsStream = clientIsStream' 'each retry restores the client request mode'
 require service/upstream_audit.go 'emptyStream := failed && relayInfo.StreamStatus.UpstreamSentNothing()' 'empty streams still get an evidence row'
+for f in relay/compatible_handler.go relay/claude_handler.go relay/gemini_handler.go relay/image_handler.go; do
+	require "$f" 'helper.UpstreamAnswersWithStream(c, httpResp)' 'a JSON answer labelled text/event-stream is not turned into a stream'
+done
+require relay/chat_completions_via_responses.go 'upstreamStream = helper.UpstreamAnswersWithStream(c, httpResp)' 'same for chat over the Responses API'
+# An upstream merge may bring back the bare Content-Type check (channel #148 labels JSON answers event-stream).
+raw=$(grep -rn --include='*.go' 'info.IsStream = info.IsStream || strings.HasPrefix(' relay | grep -v '_test.go')
+if [ -n "$raw" ]; then
+	echo "MISSING sniffing, IsStream widened on Content-Type alone:"
+	echo "$raw"
+	fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
 	echo "FAIL: empty-stream protection is incomplete; see the lines above"

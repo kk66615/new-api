@@ -138,7 +138,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		httpResp = resp.(*http.Response)
 		defer httpResp.Body.Close()
 
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		info.IsStream = info.IsStream || helper.UpstreamAnswersWithStream(c, httpResp)
 		if httpResp.StatusCode != http.StatusOK {
 			newAPIError = service.RelayErrorHandlerWithAudit(c.Request.Context(), info, httpResp, false)
 			// reset status code 重置状态码

@@ -828,6 +828,7 @@
   "upstream model update notification skipped in 24h window: changed_channels=%d failed_channels=%d": "24 小时内已发过相同内容的上游模型更新通知，本次不发送: changed_channels=%d failed_channels=%d",
   "upstream model update notifications sent: %d": "已发送 %d 条上游模型更新通知",
   "upstream model update task done: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d": "上游模型更新检查完成: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d",
+  "upstream labelled a JSON response text/event-stream; handling it as JSON": "上游把 JSON 响应标成了 text/event-stream，按 JSON 处理",
   "upstream model update task query failed: %v": "上游模型更新检查: 查询渠道失败: %v",
   "upstream stream ended without any data event: end_reason=%s non_data_lines=%d": "上游流在未发送任何数据事件时结束: end_reason=%s non_data_lines=%d",
   "upstream response body: %s": "上游响应体: %s",

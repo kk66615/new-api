@@ -7,12 +7,14 @@ Needs root on a Docker host that has the image (the s8 build host). It starts a
 throwaway new-api container from that image (own SQLite under /root/es-stage,
 host network on 127.0.0.1:3901, no production database or Redis) and two fake
 upstreams on 127.0.0.1:3902:
-  /a/...  answers 200 text/event-stream and closes without a byte (+ X-Codex-Turn-State)
+  /a/...  answers 200 text/event-stream and closes without a byte (+ X-Codex-Turn-State),
+          or (last scenario) sends a complete JSON answer labelled text/event-stream
   /b/...  answers normally (chat stream, chat JSON, Responses stream)
 and checks that an empty upstream stream is retried on another channel, is
 charged exactly once (only on the channel that answered), never leaks the
 failed upstream's headers, and is not charged at all when every channel is
-empty, with one error log and one empty_stream evidence row per empty attempt.
+empty, with one error log and one empty_stream evidence row per empty attempt;
+and that a JSON answer mislabelled as a stream is delivered as JSON at once.
 Everything it creates is removed at the end. Exit code 0 only if all checks pass.
 """
 import http.cookiejar
@@ -59,6 +61,15 @@ class Upstream(http.server.BaseHTTPRequestHandler):  # HTTP/1.0: the body ends w
             self.send_header("X-Codex-Turn-State", "stale-" + ch)
             self.send_header("X-Request-Id", f"up-{ch}-{len(HITS)}")
             self.end_headers()
+            return
+        if MODE[ch] == "mislabelled":  # channel #148 on 10-23: a complete JSON answer labelled text/event-stream
+            data = json.dumps({"id": "chatcmpl-" + ch, "object": "chat.completion", "created": 1, "model": "es-model",
+                               "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello from " + ch.upper()}, "finish_reason": "stop"}],
+                               "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if api.endswith("/chat/completions") and not stream:
             data = json.dumps({"id": "chatcmpl-b", "object": "chat.completion", "created": 1, "model": "es-model",
@@ -162,21 +173,22 @@ def setup_gateway(image):
 def run_scenarios(auth):
     channels = {r["name"]: r["id"] for r in query("select id, name from channels")}
     chat = {"model": "es-model", "messages": [{"role": "user", "content": "hi"}]}
-    scenarios = [
-        ("chat stream: A empty -> B", "/v1/chat/completions", dict(chat, stream=True), "ok"),
-        ("responses stream: A empty -> B", "/v1/responses", {"model": "es-model", "stream": True, "input": "hi"}, "ok"),
-        ("non-stream client, A answers empty SSE -> B JSON", "/v1/chat/completions", dict(chat, stream=False), "ok"),
-        ("all channels empty -> 502, no charge", "/v1/chat/completions", dict(chat, stream=True), "empty"),
+    scenarios = [  # name, path, payload, A's behaviour, B's behaviour
+        ("chat stream: A empty -> B", "/v1/chat/completions", dict(chat, stream=True), "empty", "ok"),
+        ("responses stream: A empty -> B", "/v1/responses", {"model": "es-model", "stream": True, "input": "hi"}, "empty", "ok"),
+        ("non-stream client, A answers empty SSE -> B JSON", "/v1/chat/completions", dict(chat, stream=False), "empty", "ok"),
+        ("all channels empty -> 502, no charge", "/v1/chat/completions", dict(chat, stream=True), "empty", "empty"),
+        ("non-stream client, A labels its JSON answer event-stream -> A answers", "/v1/chat/completions", dict(chat, stream=False), "mislabelled", "ok"),
     ]
-    for name, path, payload, b_mode in scenarios:
-        MODE["b"] = b_mode
+    for name, path, payload, a_mode, b_mode in scenarios:
+        MODE["a"], MODE["b"] = a_mode, b_mode
         HITS.clear()
         before = query("select quota from users where id=1")[0]["quota"]
         status, hdrs, body = call("POST", path, payload, auth, raw=True)
         request_id = hdrs.get("X-Oneapi-Request-Id", "")
         time.sleep(6)  # consume/error logs and the evidence writer flush asynchronously
         after = query("select quota from users where id=1")[0]["quota"]
-        logs = query("select type, channel_id, quota, content from logs where request_id=? order by id", request_id)
+        logs = query("select type, channel_id, quota, completion_tokens, content from logs where request_id=? order by id", request_id)
         evidence = query("select channel_id, note, response_headers from upstream_evidences where request_id=? order by id", request_id)
         consume = [l for l in logs if l["type"] == 2]
         errors = [l for l in logs if l["type"] == 5]
@@ -186,6 +198,16 @@ def run_scenarios(auth):
         a_errors = [l for l in errors if l["channel_id"] == channels["A-empty"]]
         a_evidence = [e for e in evidence if e["channel_id"] == channels["A-empty"] and "empty_stream" in (e["note"] or "")]
         check(name + ": upstream A tried first", HITS and HITS[0][0] == "a")
+        if a_mode == "mislabelled":
+            check(name + ": client got A's answer as JSON", status == 200 and "hello from A" in body and hdrs.get("Content-Type", "").startswith("application/json"),
+                  f"status={status} content_type={hdrs.get('Content-Type')}")
+            check(name + ": answered without a retry", HITS == [("a", "/v1/chat/completions", False)], f"hits={HITS}")
+            check(name + ": no error log", not errors)
+            check(name + ": exactly one consume log, on A, with upstream usage", len(consume) == 1 and consume[0]["channel_id"] == channels["A-empty"]
+                  and consume[0]["completion_tokens"] == 5, f"consume={consume}")
+            check(name + ": wallet charged once (= consume log)", consume and before - after == consume[0]["quota"] and consume[0]["quota"] > 0,
+                  f"delta={before - after} log={consume[0]['quota'] if consume else None}")
+            continue
         check(name + ": empty attempt on A logged as error", len(a_errors) == 1)
         check(name + ": evidence row for A with its headers", len(a_evidence) == 1 and "up-a-" in (a_evidence[0]["response_headers"] or ""))
         check(name + ": stale Codex turn header not sent", "stale-a" not in str(hdrs.get_all("X-Codex-Turn-State") or ""))

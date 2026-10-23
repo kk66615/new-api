@@ -714,3 +714,75 @@ func TestEmptyUpstreamStreamError(t *testing.T) {
 	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
 	assert.Nil(t, EmptyUpstreamStreamError(nil, info, &http.Response{}), "a status the scanner never owned has no data-event count")
 }
+
+// An upstream that labels a complete JSON answer text/event-stream must not
+// turn a non-stream request into a stream (which would find no data event and
+// fail): the body is a plain response, its Content-Type is corrected, and the
+// body reaches the handler byte for byte. Real streams keep the stream path.
+func TestUpstreamAnswersWithStream(t *testing.T) {
+	answer := `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"no"}}]}`
+	for _, test := range []struct {
+		name            string
+		contentType     string
+		body            string
+		wantStream      bool
+		wantContentType string
+	}{
+		{name: "JSON labelled event-stream", contentType: "text/event-stream", body: answer, wantContentType: "application/json"},
+		{name: "JSON after blank lines", contentType: "text/event-stream; charset=utf-8", body: "\r\n\n  " + answer, wantContentType: "application/json"},
+		{name: "real stream", contentType: "text/event-stream", body: "data: " + answer + "\n\ndata: [DONE]\n\n", wantStream: true, wantContentType: "text/event-stream"},
+		{name: "stream opening with a keepalive comment", contentType: "text/event-stream", body: ": ping\n\ndata: {}\n\n", wantStream: true, wantContentType: "text/event-stream"},
+		{name: "empty body stays on the stream path", contentType: "text/event-stream", body: "", wantStream: true, wantContentType: "text/event-stream"},
+		{name: "JSON content type is not sniffed", contentType: "application/json", body: answer, wantContentType: "application/json"},
+		{name: "JSON after a byte order mark", contentType: "Text/Event-Stream", body: "\xEF\xBB\xBF" + answer, wantContentType: "application/json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			resp := &http.Response{Header: http.Header{"Content-Type": {test.contentType}}, Body: io.NopCloser(strings.NewReader(test.body))}
+			assert.Equal(t, test.wantStream, UpstreamAnswersWithStream(c, resp))
+			assert.True(t, strings.HasPrefix(resp.Header.Get("Content-Type"), test.wantContentType), resp.Header.Get("Content-Type"))
+			got, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, test.body, string(got), "the sniffed bytes must stay in the body")
+			require.NoError(t, resp.Body.Close())
+		})
+	}
+}
+
+// The wait for the first bytes is bounded like the stream scanner's: an
+// upstream that sends nothing, or a client that leaves, closes the upstream
+// body and hands the request back to the stream path, which reports it.
+func TestUpstreamAnswersWithStreamGivesUpOnSilentUpstream(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+
+	for _, test := range []struct {
+		name      string
+		timeout   int
+		leaveFrom time.Duration
+	}{
+		{name: "idle timeout", timeout: 1},
+		{name: "client gone", timeout: 0, leaveFrom: 50 * time.Millisecond}, // no idle timer: only the client context can end the wait
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			constant.StreamingTimeout = test.timeout
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+			if test.leaveFrom > 0 {
+				time.AfterFunc(test.leaveFrom, cancel)
+			}
+			silent, writer := io.Pipe()
+			defer writer.Close()
+			resp := &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: silent}
+
+			started := time.Now()
+			assert.True(t, UpstreamAnswersWithStream(c, resp))
+			assert.Less(t, time.Since(started), time.Duration(test.timeout)*time.Second+2*time.Second)
+			_, err := io.ReadAll(resp.Body)
+			assert.Error(t, err, "the upstream body was closed")
+		})
+	}
+}
