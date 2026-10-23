@@ -123,6 +123,8 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
+	var dataFrames int
+	var errorFrame *types.OpenAIError
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
@@ -132,6 +134,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 		}
 		if len(data) > 0 {
+			dataFrames++
+			// an error object, or a non-empty error string; null, false and "" are not errors
+			if frameErr := gjson.Get(data, "error"); frameErr.IsObject() || (frameErr.Type == gjson.String && frameErr.Str != "") {
+				var frame dto.OpenAITextResponse
+				if common.UnmarshalJsonStr(data, &frame) == nil {
+					if oaiErr := frame.GetOpenAIError(); oaiErr != nil && (oaiErr.Message != "" || oaiErr.Type != "") {
+						errorFrame = oaiErr
+						info.ObserveUpstreamErrorFrame(data)
+					}
+				}
+			}
 			if lastStreamData != "" {
 				secondLastStreamData = lastStreamData
 			}
@@ -146,6 +159,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	})
 	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
 		return nil, apiErr
+	}
+	// The upstream answered the stream with a single error frame and nothing
+	// else: no content, and the last frame is still held back from the client,
+	// so fail the attempt (not billed, retryable) instead of settling it on the
+	// local prompt estimate.
+	if dataFrames == 1 && errorFrame != nil {
+		info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
+		return nil, types.WithOpenAIError(*errorFrame, http.StatusBadGateway)
 	}
 
 	info.StreamStatus.RequireTerminal()

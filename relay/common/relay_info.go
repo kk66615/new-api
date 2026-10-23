@@ -1032,6 +1032,14 @@ func (info *RelayInfo) SetFirstResponseTime() {
 	}
 }
 
+// ResetFirstResponse restores the first-response state a request starts with,
+// so a retry reports the timing of the attempt that answered rather than of a
+// failed one that only received an error frame.
+func (info *RelayInfo) ResetFirstResponse() {
+	info.FirstResponseTime = info.StartTime.Add(-time.Second)
+	info.isFirstResponse = true
+}
+
 func (info *RelayInfo) HasSendResponse() bool {
 	return info.FirstResponseTime.After(info.StartTime)
 }

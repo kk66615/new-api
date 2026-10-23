@@ -41,6 +41,7 @@ require relay/helper/stream_scanner.go 'info.StreamStatus.ObserveDataEvent()' 's
 require relay/helper/stream_scanner.go 'c.Writer.Header().Del(name)' 'retry does not inherit the failed upstream Codex headers'
 require relay/channel/openai/chat_via_responses.go 'helper.EmptyUpstreamStreamError(c, info, resp)' 'buffered Responses-to-chat path (own scanner loop)'
 require relay/channel/gemini/relay_responses.go 'info.StreamStatus.UpstreamSentNothing()' 'Gemini-to-Responses answers the failure instead of a response.failed stream'
+require relay/channel/openai/relay-openai.go 'if dataFrames == 1 && errorFrame != nil {' 'a chat stream of only an error frame fails instead of billing the prompt estimate'
 require controller/relay.go 'relayInfo.IsStream = clientIsStream' 'each retry restores the client request mode'
 require service/upstream_audit.go 'emptyStream := failed && relayInfo.StreamStatus.UpstreamSentNothing()' 'empty streams still get an evidence row'
 for f in relay/compatible_handler.go relay/claude_handler.go relay/gemini_handler.go relay/image_handler.go; do

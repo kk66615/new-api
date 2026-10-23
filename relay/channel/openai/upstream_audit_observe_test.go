@@ -177,3 +177,61 @@ func TestOaiStreamHandlerScansEveryFrameForAzureMarkers(t *testing.T) {
 	assert.True(t, info.UpstreamAudit.BodyMarkers.Has(relaycommon.BodyMarkerAzureContentFilter))
 	assert.NotContains(t, info.UpstreamResponseExcerpt, "content_filter", "the excerpt is the marker-free usage chunk")
 }
+
+// An upstream that answers a chat stream with a single error frame delivered
+// no content and the frame is still held back from the client, so the attempt
+// fails with the upstream's own message (not billed, retryable) instead of
+// being settled on the local prompt estimate. An error after content has
+// already been streamed keeps the regular path.
+func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+
+	const errorFrame = `{"error":{"message":"Service temporarily unavailable. Model: glm-5.3.","type":"invalid_request_error","code":"upstream_error"},"provider":"relay"}`
+	const content = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"content":"hello"}}]}`
+	for _, test := range []struct {
+		name    string
+		frames  []string
+		wantErr bool
+	}{
+		{name: "only an error frame", frames: []string{errorFrame}, wantErr: true},
+		{name: "error after streamed content", frames: []string{content, errorFrame}},
+		{name: "normal content", frames: []string{content}},
+		{name: "a null error field is not an error", frames: []string{`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","error":null,"choices":[{"index":0,"delta":{"content":"hi"}}]}`}},
+		{name: "a false error field is not an error", frames: []string{`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","error":false,"choices":[{"index":0,"delta":{"content":"hi"}}]}`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			info := &relaycommon.RelayInfo{
+				RelayMode:   relayconstant.RelayModeChatCompletions,
+				RelayFormat: types.RelayFormatOpenAI,
+				IsStream:    true,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "glm-5.3"},
+			}
+			var sse strings.Builder
+			for _, frame := range test.frames {
+				sse.WriteString("data: " + frame + "\n\n")
+			}
+			sse.WriteString("data: [DONE]\n\n")
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {"up-err-1"}}, Body: io.NopCloser(strings.NewReader(sse.String()))}
+
+			usage, apiErr := OaiStreamHandler(c, info, resp)
+			if !test.wantErr {
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Nil(t, usage)
+			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+			assert.Equal(t, "Service temporarily unavailable. Model: glm-5.3.", apiErr.Error())
+			assert.False(t, types.IsSkipRetryError(apiErr), "another channel may answer")
+			assert.False(t, c.Writer.Written(), "the held-back error frame never reached the client")
+			assert.Equal(t, errorFrame, info.UpstreamAudit.ErrorFrame)
+			assert.Contains(t, info.UpstreamResponseHeaders, "up-err-1")
+		})
+	}
+}
