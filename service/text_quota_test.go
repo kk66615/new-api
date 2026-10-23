@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1594,4 +1595,22 @@ func TestPostTextConsumeQuotaLogsMissingUsageAsStructuredContent(t *testing.T) {
 	assert.Equal(t, []any{
 		map[string]any{"key": "Upstream returned no usage, so nothing was charged (possibly an upstream timeout)"},
 	}, other["content_parts"])
+}
+
+// The refusal reason shown to the log owner keeps only the code shape: real
+// upstream codes pass unchanged, free text a third-party upstream may put in
+// place of Google's enum becomes OTHER, and an unexpected name is generic.
+func TestPublicRefusalReasonKeepsOnlyCodes(t *testing.T) {
+	for _, test := range []struct{ in, want string }{
+		{"gemini_finish_reason=IMAGE_SAFETY", "gemini_finish_reason=IMAGE_SAFETY"},
+		{"gemini_block_reason=PROHIBITED_CONTENT", "gemini_block_reason=PROHIBITED_CONTENT"},
+		{"claude_stop_reason=refusal", "claude_stop_reason=refusal"},
+		{"openai_finish_reason=content_filter", "openai_finish_reason=content_filter"},
+		{"gemini_empty_candidates", "gemini_empty_candidates"},
+		{"gemini_block_reason=Blocked by AcmeRelay, see https://acme.example/policy", "gemini_block_reason=OTHER"},
+		{"gemini_block_reason=" + strings.Repeat("A", 65), "gemini_block_reason=OTHER"},
+		{"Channel #172 policy=X", "upstream_refusal"},
+	} {
+		assert.Equal(t, test.want, publicRefusalReason(test.in), test.in)
+	}
 }

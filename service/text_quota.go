@@ -397,6 +397,25 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+// publicRefusalReason is the form of an upstream refusal reason shown to the
+// log owner: a lowercase reason name with an optional code value, e.g.
+// gemini_finish_reason=IMAGE_SAFETY or claude_stop_reason=refusal. A value that
+// is not a single code is reported as OTHER and an unexpected name as
+// upstream_refusal, so no upstream free text gets out.
+func publicRefusalReason(reason string) string {
+	name, value, hasValue := strings.Cut(reason, "=")
+	if name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz_") != "" {
+		return "upstream_refusal"
+	}
+	if !hasValue {
+		return name
+	}
+	if value == "" || len(value) > 64 || strings.Trim(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+		return name + "=OTHER"
+	}
+	return name + "=" + value
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
@@ -496,6 +515,12 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	appendUsageBillingPathForLog(other, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens), originUsage)
 	if adminRejectReason != "" {
 		other.SetAdmin("reject_reason", adminRejectReason)
+		// The log owner sees the refusal too: every writer of the reason records a
+		// code taken from the upstream response the client already received
+		// (bin/fork-checks keeps the writers to those response handlers). Only the
+		// code shape is public: a third-party upstream may put free text where
+		// Google sends an enum, so anything else is reported as OTHER.
+		other.SetPublic("refusal_reason", publicRefusalReason(adminRejectReason))
 	}
 	if summary.ImageTokens != 0 {
 		other.SetPublic("image", true)

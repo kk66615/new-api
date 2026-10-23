@@ -52,7 +52,14 @@ function makeLog(other: LogOtherData): UsageLog {
   }
 }
 
-function renderDetails(isAdmin: boolean): void {
+function renderDetails(
+  isAdmin: boolean,
+  other: LogOtherData = {
+    admin_info: {
+      reject_reason: 'blocked by channel policy',
+    },
+  }
+): void {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -63,11 +70,7 @@ function renderDetails(isAdmin: boolean): void {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
-        log={makeLog({
-          admin_info: {
-            reject_reason: 'blocked by channel policy',
-          },
-        })}
+        log={makeLog(other)}
         isAdmin={isAdmin}
         isRoot={false}
         open
@@ -97,5 +100,38 @@ describe('usage log reject reason', () => {
 
     expect(screen.queryByText('Reject Reason')).toBeNull()
     expect(screen.queryByText('blocked by channel policy')).toBeNull()
+  })
+  test('shows the public upstream refusal reason to non-admin users', () => {
+    renderDetails(false, {
+      refusal_reason: 'gemini_finish_reason=IMAGE_SAFETY',
+    })
+
+    expect(screen.getByText('Reject Reason')).toBeInTheDocument()
+    expect(
+      screen.getByText('gemini_finish_reason=IMAGE_SAFETY')
+    ).toBeInTheDocument()
+  })
+
+  test('shows admins the raw reason when the public copy was sanitized', () => {
+    renderDetails(true, {
+      refusal_reason: 'gemini_block_reason=OTHER',
+      admin_info: { reject_reason: 'gemini_block_reason=Relay policy' },
+    })
+
+    expect(
+      screen.getByText('gemini_block_reason=Relay policy')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('gemini_block_reason=OTHER')).toBeNull()
+  })
+
+  test('shows the refusal reason once when an admin row carries both copies', () => {
+    renderDetails(true, {
+      refusal_reason: 'gemini_block_reason=PROHIBITED_CONTENT',
+      admin_info: { reject_reason: 'gemini_block_reason=PROHIBITED_CONTENT' },
+    })
+
+    expect(
+      screen.getAllByText('gemini_block_reason=PROHIBITED_CONTENT')
+    ).toHaveLength(1)
   })
 })

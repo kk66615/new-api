@@ -10,6 +10,7 @@
 # the risk is a NEW handler that silently lacks the hook. This script fails if
 # any scanner call site has no hook, or if the other parts of the fix are gone.
 set -u
+export LC_ALL=C # stable sort/comm order whatever the terminal locale
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 # Image and audio streams settle on their own usage rules (see .agents/rules/billing.md).
@@ -52,6 +53,28 @@ if [ -n "$raw" ]; then
 	echo "MISSING sniffing, IsStream widened on Content-Type alone:"
 	echo "$raw"
 	fail=1
+fi
+
+# The refusal reason is shown to every log owner (service/text_quota.go
+# refusal_reason), so only upstream response handlers may write it: a new writer
+# from an upstream merge could put internal information into a public field.
+# (controller/relay.go only clears it at the start of every attempt.)
+require service/text_quota.go 'other.SetPublic("refusal_reason", publicRefusalReason(adminRejectReason))' 'refusal reason visible to the log owner, codes only'
+# Every line that writes the reason, counted per file: a new writer, even in an
+# already reviewed file, changes a count and must be reviewed before release.
+writers=$(grep -rn --include='*.go' -e 'ContextKeyAdminRejectReason' -e '"admin_reject_reason"' . | grep -v '_test.go' | grep -v 'GetContextKey' | grep -v '^./constant/context_key.go' | cut -d: -f1 | sed 's|^\./||' | sort | uniq -c | awk '{print $2"="$1}')
+expected='controller/relay.go=1
+relay/channel/claude/relay-claude.go=1
+relay/channel/gemini/relay-gemini-native.go=1
+relay/channel/gemini/relay-gemini.go=4
+relay/channel/gemini/relay_responses.go=2
+relay/channel/openai/relay-openai.go=1'
+if [ "$writers" != "$expected" ]; then
+	echo "REVIEW writers of the public refusal reason changed (each must record only a code from the upstream response; then update the expected counts):"
+	diff <(echo "$expected") <(echo "$writers")
+	fail=1
+else
+	echo "ok   refusal reason written only by the reviewed upstream response handlers"
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -157,6 +157,23 @@ func buildUsageFromGeminiResponse(c *gin.Context, info *relaycommon.RelayInfo, r
 	return *usage
 }
 
+// geminiOutputBlockReasons are the finish reasons Gemini reports when it
+// filtered the generated text or image after accepting the prompt.
+var geminiOutputBlockReasons = []string{"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION"}
+
+// observeGeminiOutputBlock marks a candidate whose output Gemini filtered as a
+// business rejection and records its finish reason the way a blocked prompt
+// records its block reason; the first reason recorded for a request is kept.
+func observeGeminiOutputBlock(c *gin.Context, info *relaycommon.RelayInfo, candidate dto.GeminiChatCandidate) {
+	if candidate.FinishReason == nil || !slices.Contains(geminiOutputBlockReasons, *candidate.FinishReason) {
+		return
+	}
+	info.PerformanceBusinessRejection = true
+	if common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason) == "" {
+		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_finish_reason="+*candidate.FinishReason)
+	}
+}
+
 func geminiResponseInlineImageCount(response *dto.GeminiChatResponse) int {
 	if response == nil {
 		return 0
@@ -230,10 +247,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			if candidate.FinishReason == nil || *candidate.FinishReason == "" || *candidate.FinishReason == "FINISH_REASON_UNSPECIFIED" {
 				continue
 			}
-			switch *candidate.FinishReason {
-			case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
-				info.PerformanceBusinessRejection = true
-			}
+			observeGeminiOutputBlock(c, info, candidate)
 			info.StreamStatus.MarkCompleted()
 		}
 
@@ -479,6 +493,9 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			})
 		}
 		return &usage, nil
+	}
+	for _, candidate := range geminiResponse.Candidates {
+		observeGeminiOutputBlock(c, info, candidate)
 	}
 	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = info.UpstreamModelName

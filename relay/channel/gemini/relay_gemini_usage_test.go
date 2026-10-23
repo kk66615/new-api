@@ -754,3 +754,65 @@ func TestGeminiHandlersCountGroundingQueries(t *testing.T) {
 		})
 	}
 }
+
+// Output Gemini filtered after accepting the prompt (IMAGE_SAFETY, SAFETY, …)
+// records gemini_finish_reason=<reason> as the request's refusal on every
+// handler, like a blocked prompt records gemini_block_reason; a reason already
+// recorded for the request is kept, and a normal finish records nothing.
+func TestGeminiHandlersRecordOutputBlockReason(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldStreamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 300
+	t.Cleanup(func() { constant.StreamingTimeout = oldStreamingTimeout })
+
+	const imageBlocked = `{"candidates":[{"content":{"role":"model"},"finishReason":"IMAGE_SAFETY","finishMessage":"Unable to show the generated image."}],"usageMetadata":{"promptTokenCount":2302,"totalTokenCount":2302},"modelVersion":"gemini-3.1-flash-lite-image"}`
+	const textBlocked = `{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-3-flash-preview"}`
+	const normal = `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-3-flash-preview"}`
+	native := func(c *gin.Context, info *relaycommon.RelayInfo, body string) {
+		_, apiErr := GeminiTextGenerationHandler(c, info, &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))})
+		require.Nil(t, apiErr)
+	}
+	stream := func(c *gin.Context, info *relaycommon.RelayInfo, body string) {
+		_, apiErr := geminiStreamHandler(c, info, &http.Response{Body: io.NopCloser(strings.NewReader("data: " + body + "\n\n"))}, func(string, *dto.GeminiChatResponse) bool { return true })
+		require.Nil(t, apiErr)
+	}
+	chat := func(c *gin.Context, info *relaycommon.RelayInfo, body string) {
+		info.RelayFormat = types.RelayFormatOpenAI
+		_, apiErr := GeminiChatHandler(c, info, &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))})
+		require.Nil(t, apiErr)
+	}
+	responses := func(c *gin.Context, info *relaycommon.RelayInfo, body string) {
+		info.RelayFormat = types.RelayFormatOpenAIResponses
+		_, apiErr := GeminiResponsesHandler(c, info, &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))})
+		require.Nil(t, apiErr)
+	}
+	for _, test := range []struct {
+		name       string
+		handle     func(*gin.Context, *relaycommon.RelayInfo, string)
+		body       string
+		earlier    string
+		wantReason string
+	}{
+		{name: "native image filtered", handle: native, body: imageBlocked, wantReason: "gemini_finish_reason=IMAGE_SAFETY"},
+		{name: "stream text filtered", handle: stream, body: textBlocked, wantReason: "gemini_finish_reason=SAFETY"},
+		{name: "chat image filtered", handle: chat, body: imageBlocked, wantReason: "gemini_finish_reason=IMAGE_SAFETY"},
+		{name: "responses image filtered", handle: responses, body: imageBlocked, wantReason: "gemini_finish_reason=IMAGE_SAFETY"},
+		{name: "earlier reason kept", handle: native, body: imageBlocked, earlier: "gemini_block_reason=OTHER", wantReason: "gemini_block_reason=OTHER"},
+		{name: "normal finish records nothing", handle: native, body: normal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini:generateContent", nil)
+			if test.earlier != "" {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, test.earlier)
+			}
+			info := &relaycommon.RelayInfo{OriginModelName: "gemini", ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gemini"}}
+			info.SetEstimatePromptTokens(10)
+
+			test.handle(c, info, test.body)
+
+			assert.Equal(t, test.wantReason, common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+			assert.Equal(t, test.wantReason != "", info.PerformanceBusinessRejection)
+		})
+	}
+}

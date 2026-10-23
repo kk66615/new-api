@@ -649,6 +649,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const showAdminIp =
     !!props.log.ip && (showTiming || (props.isAdmin && isTopup))
   const adminInfo = other?.admin_info
+  // admins read the raw upstream code; owners get the public, code-only copy
+  const rejectReason =
+    (props.isAdmin ? adminInfo?.reject_reason : undefined) ||
+    other?.refusal_reason
   // root-only audit block (root_info, with the pre-2026-09-20 admin_info fallback)
   const ursp = props.isRoot ? rootUpstreamResponseAudit(other) : undefined
   // weak authenticity signals, shown as one row; only ursp.replay is a verdict
@@ -1191,14 +1195,15 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Reject reason (admin only) */}
-        {props.isAdmin && adminInfo?.reject_reason && (
+        {/* Upstream refusal reason: public for the log owner; rows written
+            before it became public carry only the admin-only copy */}
+        {rejectReason && (
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
             label={t('Reject Reason')}
             variant='danger'
           >
-            <p className='text-xs wrap-break-word'>{adminInfo.reject_reason}</p>
+            <p className='text-xs wrap-break-word'>{rejectReason}</p>
           </DetailSection>
         )}
 

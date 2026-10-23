@@ -179,6 +179,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.IsStream = clientIsStream
+		// a refusal recorded by a failed attempt must not label the next one
+		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "")
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0

@@ -313,3 +313,32 @@ func TestUpstreamResponseAuditIsRootOnly(t *testing.T) {
 		assert.Equal(t, true, ursp["mismatch"])
 	})
 }
+
+// The upstream refusal reason is shown to the log owner as the public
+// refusal_reason, while the admin-only copy and every other admin_info field
+// stay hidden from them; administrators see both.
+func TestRefusalReasonIsVisibleToUsersWithoutAdminInfo(t *testing.T) {
+	other := NewLogOther()
+	other.SetPublic("refusal_reason", "gemini_finish_reason=IMAGE_SAFETY")
+	other.SetAdmin("reject_reason", "gemini_finish_reason=IMAGE_SAFETY")
+	other.SetAdmin("upstream_model_name", "vendor-internal-model")
+	newLogs := func() []*Log { return []*Log{{ChannelId: 172, Other: other.JSONString()}} }
+
+	user := newLogs()
+	formatUserLogs(user, 0)
+	parsed, err := common.StrToMap(user[0].Other)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini_finish_reason=IMAGE_SAFETY", parsed["refusal_reason"])
+	assert.NotContains(t, parsed, "admin_info")
+	assert.NotContains(t, parsed, "reject_reason")
+	assert.NotContains(t, user[0].Other, "vendor-internal-model")
+
+	admin := newLogs()
+	FormatAdminLogs(admin)
+	parsed, err = common.StrToMap(admin[0].Other)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini_finish_reason=IMAGE_SAFETY", parsed["refusal_reason"])
+	adminInfo, ok := parsed["admin_info"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "gemini_finish_reason=IMAGE_SAFETY", adminInfo["reject_reason"])
+}

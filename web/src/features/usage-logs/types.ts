@@ -228,7 +228,7 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
-    // Reject / intercept reason (admin only)
+    // Reject / intercept reason, admin-only copy (older rows carry only this)
     reject_reason?: string
     // Model the channel mapped the request to (admin only since the Claude
     // stream path could rewrite it to the upstream-declared model)
@@ -268,6 +268,9 @@ export interface LogOtherData {
     success?: boolean
     params?: Record<string, string>
   }
+  // Upstream refusal reason (e.g. gemini_finish_reason=IMAGE_SAFETY),
+  // visible to the log owner
+  refusal_reason?: string
   // Login audit fields (type=7); visible to the log owner
   login_method?: string
   user_agent?: string
