@@ -158,6 +158,11 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 		return sendChunk(geminiResponse)
 	})
 	if streamAPIError != nil {
+		// nothing reached the client yet: answer the failure itself, not a
+		// response.failed stream that would then be settled as a success
+		if info.StreamStatus.UpstreamSentNothing() {
+			return nil, streamAPIError
+		}
 		if failResponsesStream(streamAPIError) && streamErr == nil {
 			return usage, nil
 		}

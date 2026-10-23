@@ -377,6 +377,9 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 			sr.Stop(err)
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 	info.StreamStatus.RequireTerminal()
 	if err != nil {
 		return nil, err

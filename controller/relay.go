@@ -173,8 +173,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// handlers widen IsStream from an upstream's Content-Type; every attempt
+	// starts again from what the client asked for
+	clientIsStream := relayInfo.IsStream
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		relayInfo.IsStream = clientIsStream
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0

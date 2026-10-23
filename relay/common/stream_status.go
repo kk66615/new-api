@@ -35,6 +35,9 @@ const (
 
 const maxStreamErrorEntries = 20
 
+// maxSkippedLinePreview caps the first non-data line kept as forensic material.
+const maxSkippedLinePreview = 512
+
 type StreamErrorEntry struct {
 	Message   string
 	Timestamp time.Time
@@ -55,6 +58,13 @@ type StreamStatus struct {
 	errorStatus      int
 	incompleteReason string
 	expectsTerminal  bool
+
+	// scanned marks a status owned by the stream scanner, the only reader that
+	// counts data events; the counters below mean nothing for any other status.
+	scanned      bool
+	dataEvents   int
+	skippedLines int
+	firstSkipped string
 }
 
 // StreamOutcome holds classification facts only; upstream messages never
@@ -108,6 +118,72 @@ func (s *StreamStatus) RequireTerminal() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expectsTerminal = true
+}
+
+// BeginScan marks the status as owned by the stream scanner.
+func (s *StreamStatus) BeginScan() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scanned = true
+}
+
+// ObserveDataEvent counts a data event handed to the response handler.
+func (s *StreamStatus) ObserveDataEvent() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dataEvents++
+}
+
+// ObserveSkippedLine counts a non-empty line that carried no data event (SSE
+// comments, event:/id: fields, a non-SSE body) and keeps the first one.
+func (s *StreamStatus) ObserveSkippedLine(line string) {
+	if s == nil || line == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skippedLines++
+	if s.skippedLines == 1 {
+		s.firstSkipped = strings.ToValidUTF8(line[:min(len(line), maxSkippedLinePreview)], "")
+	}
+}
+
+// SkippedLines returns how many non-data lines arrived and the first of them.
+func (s *StreamStatus) SkippedLines() (int, string) {
+	if s == nil {
+		return 0, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.skippedLines, s.firstSkipped
+}
+
+// UpstreamSentNothing reports a scanned stream the upstream ended (EOF, a bare
+// [DONE], idle timeout or a read error) before a single data event arrived.
+// The client got no content, so the exchange is a failure and must not be
+// settled on locally estimated prompt tokens. A client disconnect is not the
+// upstream's doing and stays on the normal path.
+func (s *StreamStatus) UpstreamSentNothing() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	scanned, dataEvents := s.scanned, s.dataEvents
+	s.mu.Unlock()
+	if !scanned || dataEvents > 0 {
+		return false
+	}
+	switch s.EndReason {
+	case StreamEndReasonEOF, StreamEndReasonDone, StreamEndReasonTimeout, StreamEndReasonScannerErr:
+		return true
+	}
+	return false
 }
 
 // MarkCompleted, MarkIncomplete and MarkCancelled keep the first terminal seen;

@@ -77,6 +77,9 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			sr.Error(err)
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 
 	info.SetUpstreamResponseForensics(lastStreamData, nil)
 	info.FinishUpstreamOutput()

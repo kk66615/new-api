@@ -144,6 +144,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 
 	info.StreamStatus.RequireTerminal()
 

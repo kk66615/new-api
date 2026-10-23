@@ -8,8 +8,10 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
@@ -65,6 +67,55 @@ func TestOaiResponsesHandlerKeepsRawCreatedAtForSGLang(t *testing.T) {
 	require.Nil(t, apiErr)
 	assert.Contains(t, recorder.Body.String(), `"created_at":1788619663`, "the client receives the rewritten value")
 	assert.Equal(t, raw, info.UpstreamResponseExcerpt, "the evidence keeps the upstream's own bytes")
+}
+
+// An upstream stream that ends before any data event fails the attempt with
+// empty_response instead of settling on the local prompt estimate, and the
+// handler writes nothing to the client (no synthesized usage chunk, terminal
+// event or [DONE]), so the failure can still be answered cleanly.
+func TestStreamHandlersFailEmptyUpstreamStreamWithoutWriting(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+
+	for _, test := range []struct {
+		name    string
+		path    string
+		mode    int
+		format  types.RelayFormat
+		handler func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{name: "chat completions", path: "/v1/chat/completions", mode: relayconstant.RelayModeChatCompletions, format: types.RelayFormatOpenAI, handler: OaiStreamHandler},
+		{name: "responses", path: "/v1/responses", mode: relayconstant.RelayModeResponses, format: types.RelayFormatOpenAIResponses, handler: OaiResponsesStreamHandler},
+		{name: "non-stream chat over a forced responses stream", path: "/v1/chat/completions", mode: relayconstant.RelayModeChatCompletions, format: types.RelayFormatOpenAI, handler: OaiResponsesToChatBufferedStreamHandler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, test.path, nil)
+			info := &relaycommon.RelayInfo{
+				RelayMode:   test.mode,
+				RelayFormat: test.format,
+				IsStream:    true,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "glm-5.3"},
+			}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {"up-empty-1"}},
+				Body:       io.NopCloser(strings.NewReader(": keepalive\n\n")),
+			}
+
+			usage, apiErr := test.handler(c, info, resp)
+			require.NotNil(t, apiErr)
+			assert.Nil(t, usage)
+			assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+			assert.False(t, c.Writer.Written(), "nothing may reach the client before the failure is answered")
+			assert.Empty(t, recorder.Body.String())
+			assert.Contains(t, info.UpstreamResponseHeaders, "up-empty-1")
+			assert.Equal(t, ": keepalive", info.UpstreamResponseExcerpt)
+		})
+	}
 }
 
 // A stream that ends with a usage-only frame without a model keeps the frame

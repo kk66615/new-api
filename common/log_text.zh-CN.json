@@ -829,6 +829,7 @@
   "upstream model update notifications sent: %d": "已发送 %d 条上游模型更新通知",
   "upstream model update task done: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d": "上游模型更新检查完成: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d",
   "upstream model update task query failed: %v": "上游模型更新检查: 查询渠道失败: %v",
+  "upstream stream ended without any data event: end_reason=%s non_data_lines=%d": "上游流在未发送任何数据事件时结束: end_reason=%s non_data_lines=%d",
   "upstream response body: %s": "上游响应体: %s",
   "usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d": "从倒数第二条 SSE 数据中取得用量: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
   "user %d has enough quota, trusted without pre-consume (funding=%s)": "用户 %d 额度充足, 信任且不需要预扣费 (funding=%s)",

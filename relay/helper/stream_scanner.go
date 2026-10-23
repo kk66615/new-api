@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -52,12 +55,14 @@ func NewStreamScanner(reader io.Reader, maxBytes ...int) *bufio.Scanner {
 	return scanner
 }
 
+// codexSSEHeaders are the upstream response headers a Codex client reads.
+var codexSSEHeaders = []string{"X-Reasoning-Included", "X-Codex-Turn-State"}
+
 func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
 	if c == nil || c.Writer == nil || resp == nil {
 		return
 	}
-	// codex
-	for _, name := range []string{"X-Reasoning-Included", "X-Codex-Turn-State"} {
+	for _, name := range codexSSEHeaders {
 		values := resp.Header.Values(name)
 		if !service.ShouldCopyUpstreamHeader(c, name, values) {
 			continue
@@ -80,6 +85,36 @@ func ExtendWriteDeadline(c *gin.Context) {
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 }
 
+// EmptyUpstreamStreamError turns a stream the upstream ended before sending a
+// single data event into a failed attempt: the client received no content, so
+// it must not be settled on locally estimated prompt tokens. Response handlers
+// call it right after StreamScannerHandler, before they emit any synthesized
+// final frame, so the error stays retryable: the controller may answer the
+// request from another channel. The response headers and the first non-data
+// line are kept as evidence so the exchange can be traced with the upstream.
+func EmptyUpstreamStreamError(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) *types.NewAPIError {
+	if info == nil || !info.StreamStatus.UpstreamSentNothing() {
+		return nil
+	}
+	skipped, firstSkipped := info.StreamStatus.SkippedLines()
+	if resp != nil {
+		info.SetUpstreamResponseForensics(firstSkipped, resp.Header)
+	}
+	logger.LogWarn(c, common.LogText("upstream stream ended without any data event: end_reason=%s non_data_lines=%d", info.StreamStatus.EndReason, skipped))
+	// Headers copied from this upstream are still unsent: drop them so a retry
+	// on another channel neither duplicates nor inherits this upstream's turn state.
+	if c != nil && c.Writer != nil && !c.Writer.Written() {
+		for _, name := range codexSSEHeaders {
+			c.Writer.Header().Del(name)
+		}
+	}
+	return types.NewOpenAIError(
+		errors.New(i18n.T(c, i18n.MsgRelayUpstreamEmptyStream)),
+		types.ErrorCodeEmptyResponse,
+		http.StatusBadGateway,
+	)
+}
+
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
 
 	if resp == nil || dataHandler == nil {
@@ -94,6 +129,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	// 无条件新建 StreamStatus
 	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.BeginScan()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -264,19 +300,24 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
 			if len(data) < 6 {
+				info.StreamStatus.ObserveSkippedLine(data)
 				continue
 			}
 			if data[:5] != "data:" && data[:6] != "[DONE]" {
+				info.StreamStatus.ObserveSkippedLine(data)
 				continue
 			}
+			line := data
 			data = data[5:]
 			data = strings.TrimSpace(data)
 			if data == "" {
+				info.StreamStatus.ObserveSkippedLine(line)
 				continue
 			}
 			if !strings.HasPrefix(data, "[DONE]") {
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
+				info.StreamStatus.ObserveDataEvent()
 
 				select {
 				case dataChan <- data:

@@ -209,6 +209,9 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 	info.SetUpstreamResponseForensics(lastStreamData, nil)
 	info.ObserveUpstreamOutput(state.UsageText())
 

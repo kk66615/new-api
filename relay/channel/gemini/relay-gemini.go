@@ -275,6 +275,9 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			sr.Stop(streamErr)
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 	info.StreamStatus.RequireTerminal()
 	info.ObserveUpstreamOutput(responseText.String())
 

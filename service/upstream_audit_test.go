@@ -1166,6 +1166,38 @@ func TestRelayErrorHandlerWithAuditObservesErrorBodies(t *testing.T) {
 	assert.Equal(t, body, queued.ResponseExcerpt)
 }
 
+// An empty upstream stream has no body or model to judge, but the failed
+// attempt still gets an evidence row: its headers carry the upstream's request
+// id, the only handle for tracing it with the upstream. A failure that is not
+// a scanned empty stream and observed only headers still writes none.
+func TestAuditRecordsEvidenceForEmptyUpstreamStream(t *testing.T) {
+	isolatedAuditKey(t, 987690, "glm")
+	var queued *model.UpstreamEvidence
+	original := enqueueUpstreamEvidence
+	enqueueUpstreamEvidence = func(e *model.UpstreamEvidence) bool { queued = e; return true }
+	t.Cleanup(func() { enqueueUpstreamEvidence = original })
+
+	info := &relaycommon.RelayInfo{StartTime: time.Now(), IsStream: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "glm-5.3", ChannelId: 987690}}
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.BeginScan()
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	info.SetUpstreamResponseForensics("", map[string][]string{"X-Request-Id": {"up-req-9"}})
+
+	AppendUpstreamResponseAuditForError(nil, info, model.NewLogOther(), "new_api_error")
+	require.NotNil(t, queued)
+	assert.Equal(t, 987690, queued.ChannelId)
+	assert.True(t, queued.IsStream)
+	assert.Contains(t, queued.ResponseHeaders, "up-req-9")
+	assert.Contains(t, queued.Note, "error: new_api_error")
+	assert.Contains(t, queued.Note, "empty_stream: end_reason=eof non_data_lines=0")
+
+	queued = nil
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	AppendUpstreamResponseAuditForError(nil, info, model.NewLogOther(), "new_api_error")
+	assert.Nil(t, queued)
+}
+
 // Owner decision 2026-09-28: a pinned build answered by the bare alias (the
 // official DeepSeek behaviour) is recorded but is not a mismatch.
 func TestAuditPinnedToAliasIsRecordedNotMismatch(t *testing.T) {

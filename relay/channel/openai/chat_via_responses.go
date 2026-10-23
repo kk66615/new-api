@@ -72,26 +72,34 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	info.SetUpstreamResponseForensics("", resp.Header)
 
 	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.BeginScan()
 	info.StreamStatus.RequireTerminal()
 	accumulator := relayconvert.NewResponsesBufferedAccumulator()
 	var finalResponse *dto.OpenAIResponsesResponse
 	var streamErr *types.NewAPIError
+	dataEvents := 0
+	sawDone := false
 
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) < 6 || line[:5] != "data:" {
+			info.StreamStatus.ObserveSkippedLine(line)
 			continue
 		}
 		data := line[5:]
 		data = strings.TrimSpace(data)
 		if data == "" || data == "[DONE]" {
 			if data == "[DONE]" {
+				sawDone = true
 				break
 			}
+			info.StreamStatus.ObserveSkippedLine(line)
 			continue
 		}
+		dataEvents++
+		info.StreamStatus.ObserveDataEvent()
 
 		var streamResp dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {
@@ -139,6 +147,18 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+	if dataEvents == 0 {
+		// this handler reads the stream itself; record how the upstream ended
+		// only here, so the end reason of streams with data stays as before
+		endReason := relaycommon.StreamEndReasonEOF
+		if sawDone {
+			endReason = relaycommon.StreamEndReasonDone
+		}
+		info.StreamStatus.SetEndReason(endReason, nil)
+		if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+			return nil, apiErr
+		}
 	}
 	if finalResponse == nil {
 		finalResponse = &dto.OpenAIResponsesResponse{
@@ -331,6 +351,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
+		return nil, apiErr
+	}
 
 	if streamErr != nil {
 		if !upstreamFailed || strings.TrimSpace(state.UsageText()) == "" {

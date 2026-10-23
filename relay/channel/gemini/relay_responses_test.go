@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -165,6 +166,31 @@ func TestGeminiResponsesStreamHandlerReturnsOpenAIResponsesSSE(t *testing.T) {
 		`event: response.output_text.done`,
 		`event: response.completed`,
 	)
+}
+
+// An empty Gemini stream on the Responses path is answered as the failure
+// itself: no response.failed stream reaches the client, so the request is not
+// settled as a success on a nil usage (which would bill the prompt estimate).
+func TestGeminiResponsesStreamHandlerFailsEmptyUpstreamStream(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	oldStreamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 300
+	t.Cleanup(func() { constant.StreamingTimeout = oldStreamingTimeout })
+
+	usage, newAPIError := GeminiResponsesStreamHandler(c, newGeminiResponsesRelayInfo(true), &http.Response{
+		Header: http.Header{"Content-Type": {"text/event-stream"}},
+		Body:   io.NopCloser(strings.NewReader("")),
+	})
+	require.NotNil(t, newAPIError)
+	assert.Nil(t, usage)
+	assert.Equal(t, types.ErrorCodeEmptyResponse, newAPIError.GetErrorCode())
+	assert.False(t, c.Writer.Written())
+	assert.Empty(t, recorder.Body.String())
 }
 
 func newGeminiResponsesRelayInfo(isStream bool) *relaycommon.RelayInfo {

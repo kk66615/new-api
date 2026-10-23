@@ -1196,7 +1196,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		ursp["err"] = errorType // this attempt failed; the observation is of its error response
 	}
 	respModel := relayInfo.UpstreamResponseModel
-	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" {
+	// an empty upstream stream carries no body to judge, but its headers (the
+	// upstream's request id) are what tracing it with the upstream needs
+	emptyStream := failed && relayInfo.StreamStatus.UpstreamSentNothing()
+	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" && !emptyStream {
 		// nothing to judge: record only that it was not observed
 		if sentModel != "" {
 			ursp["sent"] = sentModel
@@ -1402,6 +1405,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		if failed {
 			notes = append(notes, "error: "+errorType)
+		}
+		if emptyStream {
+			skipped, _ := relayInfo.StreamStatus.SkippedLines()
+			notes = append(notes, "empty_stream: end_reason="+string(relayInfo.StreamStatus.EndReason)+" non_data_lines="+strconv.Itoa(skipped))
 		}
 		if channelTest {
 			notes = append(notes, "channel_test")

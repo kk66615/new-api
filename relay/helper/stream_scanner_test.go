@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -657,4 +660,57 @@ func TestNewStreamScannerCallerLimit(t *testing.T) {
 	require.True(t, scanner.Scan())
 	assert.Equal(t, "data: ok", scanner.Text())
 	require.NoError(t, scanner.Err())
+}
+
+// A stream the upstream ends before any data event leaves the client with
+// nothing: it becomes a retryable 502 empty_response failure that keeps the
+// response headers and the first non-data line as evidence, and drops the
+// unsent headers copied from that upstream so a retry does not inherit them.
+// One data event, or a status the scanner never owned, is not an empty stream.
+func TestEmptyUpstreamStreamError(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, test := range []struct {
+		name        string
+		body        string
+		wantEmpty   bool
+		wantEnd     relaycommon.StreamEndReason
+		wantSkipped int
+		wantExcerpt string
+	}{
+		{name: "no bytes", body: "", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF},
+		{name: "keepalive comments only", body: ": PING\n\n: PING\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 2, wantExcerpt: ": PING"},
+		{name: "bare done", body: "data: [DONE]\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonDone},
+		{name: "empty data payload", body: "data: \n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 1, wantExcerpt: "data: "},
+		{name: "non-SSE error body", body: `{"error":{"message":"busy"}}`, wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 1, wantExcerpt: `{"error":{"message":"busy"}}`},
+		{name: "one data event", body: "data: {\"id\":1}\n\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, resp, info := setupStreamTest(t, strings.NewReader(test.body))
+			resp.Header = http.Header{"X-Request-Id": {"up-123"}, "X-Codex-Turn-State": {"turn-1"}}
+			StreamScannerHandler(c, resp, info, func(string, *StreamResult) {})
+
+			apiErr := EmptyUpstreamStreamError(c, info, resp)
+			if !test.wantEmpty {
+				assert.Nil(t, apiErr)
+				assert.Empty(t, info.UpstreamResponseHeaders)
+				assert.Equal(t, "turn-1", c.Writer.Header().Get("X-Codex-Turn-State"))
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+			assert.Equal(t, "retry", service.DecideRelayRetry(c, apiErr, 1).Action)
+			assert.Empty(t, c.Writer.Header().Values("X-Codex-Turn-State"))
+			assert.NotContains(t, apiErr.Error(), "non_data_lines", "internal details stay in the server log and evidence")
+			assert.Equal(t, test.wantEnd, info.StreamStatus.EndReason)
+			skipped, _ := info.StreamStatus.SkippedLines()
+			assert.Equal(t, test.wantSkipped, skipped)
+			assert.Equal(t, test.wantExcerpt, info.UpstreamResponseExcerpt)
+			assert.Contains(t, info.UpstreamResponseHeaders, "up-123")
+		})
+	}
+
+	info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	assert.Nil(t, EmptyUpstreamStreamError(nil, info, &http.Response{}), "a status the scanner never owned has no data-event count")
 }

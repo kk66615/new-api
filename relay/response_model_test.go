@@ -165,8 +165,11 @@ func TestResponseModelDoesNotRecordSynthesizedModel(t *testing.T) {
 		OriginModelName: "requested", RelayFormat: types.RelayFormatOpenAI,
 		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "mapped"},
 	}
+	// data without a terminal event: the handler synthesizes the response (a
+	// stream with no data event at all is an empty-stream failure instead)
 	_, apiErr := openai.OaiResponsesToChatBufferedStreamHandler(c, info, &http.Response{
-		StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		StatusCode: http.StatusOK, Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: [DONE]\n\n")),
 	})
 	require.Nil(t, apiErr)
 	assert.Nil(t, info.ResponseModel)
