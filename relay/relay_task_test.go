@@ -131,6 +131,25 @@ func TestRealtimeFetchRefundsTaskItFindsFailed(t *testing.T) {
 	assert.Equal(t, 1100, user.Quota)
 }
 
+func TestVideoFetchByIDHidesChannel(t *testing.T) {
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.Task{}))
+	require.NoError(t, database.Create(&model.Task{TaskID: "public-task", UserId: 7, ChannelId: 9, Status: model.TaskStatusInProgress}).Error)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/video/generations/public-task", nil)
+	c.Params = gin.Params{{Key: "task_id", Value: "public-task"}}
+	c.Set("id", 7)
+
+	body, taskErr := videoFetchByIDRespBodyBuilder(c)
+
+	require.Nil(t, taskErr)
+	var response dto.TaskResponse[*dto.TaskDto]
+	require.NoError(t, common.Unmarshal(body, &response))
+	require.NotNil(t, response.Data)
+	assert.Equal(t, "public-task", response.Data.TaskID)
+	assert.Zero(t, response.Data.ChannelId, "the client does not see which channel served the task")
+}
+
 func TestApplyChannelPinPreservesOriginTasksAndRetryMode(t *testing.T) {
 	database := setupRelayChannelDB(t)
 	channel := &model.Channel{Name: "origin-channel", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeDoubaoVideo}

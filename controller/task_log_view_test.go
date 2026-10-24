@@ -6,14 +6,16 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTaskLogDTOSeparatesUserAdminAndRootDetails(t *testing.T) {
 	task := &model.Task{
-		TaskID:   "task_public",
-		Platform: "document-parser",
+		TaskID:    "task_public",
+		Platform:  "document-parser",
+		ChannelId: 7,
 		PrivateData: model.TaskPrivateData{
 			Key:            "channel-secret-canary",
 			UpstreamTaskID: "upstream-private",
@@ -39,8 +41,10 @@ func TestTaskLogDTOSeparatesUserAdminAndRootDetails(t *testing.T) {
 	userView := tasksToDto([]*model.Task{task}, false, common.RoleCommonUser)[0]
 	assert.Nil(t, userView.AdminInfo)
 	assert.Nil(t, userView.RootInfo)
+	assert.Zero(t, userView.ChannelId, "users do not see which channel served the task")
 
 	adminView := tasksToDto([]*model.Task{task}, false, common.RoleAdminUser)[0]
+	assert.Equal(t, 7, adminView.ChannelId)
 	require.NotNil(t, adminView.AdminInfo)
 	require.NotNil(t, adminView.AdminInfo.TaskPlugin)
 	assert.Equal(t, "document-parser", adminView.AdminInfo.TaskPlugin.Key)
@@ -134,4 +138,19 @@ func TestTaskLogDTOKeepsFailureReasonAndDoesNotMarkPluginTaskLegacy(t *testing.T
 	assert.False(t, pluginView.LegacyVideoAvailable)
 	assert.Empty(t, pluginView.ResultURL)
 	assert.Empty(t, pluginView.FailReason)
+}
+
+func TestUserMidjourneyListHidesChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Midjourney{}))
+	require.NoError(t, db.Create(&model.Midjourney{UserId: 1, MjId: "mj-1", ChannelId: 7}).Error)
+
+	listed := callLogHandler(t, GetUserMidjourney, 1, common.RoleCommonUser, "")[0]
+	require.Equal(t, true, listed["success"])
+	items := listed["data"].(map[string]any)["items"].([]any)
+	require.Len(t, items, 1)
+	assert.Equal(t, "mj-1", items[0].(map[string]any)["mj_id"])
+	assert.EqualValues(t, 0, items[0].(map[string]any)["channel_id"], "users do not see which channel served the task")
 }

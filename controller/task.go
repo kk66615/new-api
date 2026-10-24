@@ -466,6 +466,10 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 				item.FailReason = ""
 			}
 		}
+		if viewerRole < common.RoleAdminUser {
+			// Users do not see which channel served them, as in the user log list.
+			item.ChannelId = 0
+		}
 		if viewerRole >= common.RoleAdminUser {
 			adminInfo := &dto.TaskAdminInfo{}
 			if execution := task.PrivateData.Execution; execution != nil {

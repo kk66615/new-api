@@ -317,6 +317,10 @@ func GetUserMidjourney(c *gin.Context) {
 	items := model.GetAllUserTask(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
 	total := model.CountAllUserTask(userId, queryParams)
 
+	// Users do not see which channel served them, as in the user log list.
+	for _, midjourney := range items {
+		midjourney.ChannelId = 0
+	}
 	if setting.MjForwardUrlEnabled {
 		for i, midjourney := range items {
 			midjourney.ImageUrl = system_setting.ServerAddress + "/mj/image/" + midjourney.MjId
