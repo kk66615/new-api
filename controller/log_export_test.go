@@ -148,6 +148,22 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.EqualValues(t, 9, all[2]["channel"])
 			assert.Contains(t, all[2]["other"], "admin_info")
 			assert.Equal(t, true, all[3]["success"])
+
+			// A user's stat sums only their own logs, matched by id (so it includes
+			// logs written under a former username), and ignores a channel filter
+			// that would reveal which channels served them.
+			require.NoError(t, model.LOG_DB.Create(&model.Log{UserId: 1, Username: "alice-old", CreatedAt: now - 120, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, Quota: 5, RequestId: "a-renamed"}).Error)
+			statQuota := func(handler gin.HandlerFunc, userId int, role int, query string) any {
+				stat := callLogHandler(t, handler, userId, role, query)[0]
+				require.Equal(t, true, stat["success"])
+				return stat["data"].(map[string]any)["quota"]
+			}
+			assert.EqualValues(t, 15, statQuota(GetLogsSelfStat, 1, common.RoleCommonUser, query))
+			assert.EqualValues(t, 15, statQuota(GetLogsSelfStat, 1, common.RoleCommonUser, query+"&channel=5"))
+			assert.EqualValues(t, 20, statQuota(GetLogsSelfStat, 2, common.RoleCommonUser, query))
+			assert.EqualValues(t, 35, statQuota(GetLogsStat, 3, common.RoleAdminUser, query+"&channel=9"))
+			assert.EqualValues(t, 0, statQuota(GetLogsStat, 3, common.RoleAdminUser, query+"&channel=5"))
+			assert.EqualValues(t, 10, statQuota(GetLogsStat, 3, common.RoleAdminUser, query+"&username=alice"))
 		})
 	}
 }

@@ -209,7 +209,7 @@ func GetLogsStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, 0, username, tokenName, channel, group)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -227,8 +227,11 @@ func GetLogsStat(c *gin.Context) {
 	return
 }
 
+// GetLogsSelfStat sums the caller's own logs. Like the user log list, it
+// matches the caller by id and takes no channel filter: a username containing
+// "%" would match other users' logs, and a channel filter would reveal which
+// channels served the caller.
 func GetLogsSelfStat(c *gin.Context) {
-	username := c.GetString("username")
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -241,9 +244,8 @@ func GetLogsSelfStat(c *gin.Context) {
 	}
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, c.GetInt("id"), "", tokenName, 0, group)
 	if err != nil {
 		common.ApiError(c, err)
 		return
