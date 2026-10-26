@@ -169,6 +169,8 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if !gate.Open() {
 		if errorFrame != nil {
 			info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
+			logger.LogWarn(c, common.LogText("upstream stream carried an error and no content: end_reason=%s", info.StreamStatus.EndReason))
+			helper.DropUnsentUpstreamHeaders(c)
 			return nil, types.WithOpenAIError(*errorFrame, http.StatusBadGateway)
 		}
 		if apiErr := helper.ContentlessUpstreamStreamError(c, info, resp, lastStreamData); apiErr != nil {

@@ -208,14 +208,19 @@ func ContentlessUpstreamStreamError(c *gin.Context, info *relaycommon.RelayInfo,
 	return upstreamStreamWithoutContentError(c)
 }
 
-func upstreamStreamWithoutContentError(c *gin.Context) *types.NewAPIError {
-	// Headers copied from this upstream are still unsent: drop them so a retry
-	// on another channel neither duplicates nor inherits this upstream's turn state.
+// DropUnsentUpstreamHeaders removes the headers copied from a failed upstream
+// that are still unsent, so a retry on another channel neither duplicates nor
+// inherits this upstream's turn state.
+func DropUnsentUpstreamHeaders(c *gin.Context) {
 	if c != nil && c.Writer != nil && !c.Writer.Written() {
 		for _, name := range codexSSEHeaders {
 			c.Writer.Header().Del(name)
 		}
 	}
+}
+
+func upstreamStreamWithoutContentError(c *gin.Context) *types.NewAPIError {
+	DropUnsentUpstreamHeaders(c)
 	return types.NewOpenAIError(
 		errors.New(i18n.T(c, i18n.MsgRelayUpstreamEmptyStream)),
 		types.ErrorCodeEmptyResponse,

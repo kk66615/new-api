@@ -219,7 +219,7 @@ func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
 				sse.WriteString("data: " + frame + "\n\n")
 			}
 			sse.WriteString("data: [DONE]\n\n")
-			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {"up-err-1"}}, Body: io.NopCloser(strings.NewReader(sse.String()))}
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {"up-err-1"}, "X-Codex-Turn-State": {"stale"}}, Body: io.NopCloser(strings.NewReader(sse.String()))}
 
 			usage, apiErr := OaiStreamHandler(c, info, resp)
 			if !test.wantErr {
@@ -233,6 +233,7 @@ func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
 			assert.Equal(t, "Service temporarily unavailable. Model: glm-5.3.", apiErr.Error())
 			assert.False(t, types.IsSkipRetryError(apiErr), "another channel may answer")
 			assert.False(t, c.Writer.Written(), "the held-back error frame never reached the client")
+			assert.Empty(t, c.Writer.Header().Values("X-Codex-Turn-State"), "a retry does not inherit the failed upstream's turn state")
 			assert.Equal(t, errorFrame, info.UpstreamAudit.ErrorFrame)
 			assert.Contains(t, info.UpstreamResponseHeaders, "up-err-1")
 		})
