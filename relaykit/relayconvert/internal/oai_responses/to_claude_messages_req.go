@@ -236,10 +236,11 @@ func appendClaudeReasoning(messages []dto.ClaudeMessage, reasoning string) []dto
 func responsesFunctionDeclarationsToClaudeTools(functions []dto.FunctionRequest) []any {
 	tools := make([]any, 0, len(functions))
 	for _, function := range functions {
+		inputSchema, _ := sharedclaude.FunctionParametersToInputSchema(function.Parameters)
 		tools = append(tools, &dto.Tool{
 			Name:        function.Name,
 			Description: function.Description,
-			InputSchema: sharedclaude.FunctionParametersToInputSchema(function.Parameters),
+			InputSchema: inputSchema,
 		})
 	}
 	return tools
