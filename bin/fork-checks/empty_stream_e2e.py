@@ -15,7 +15,8 @@ charged exactly once (only on the channel that answered), never leaks the
 failed upstream's headers, and is not charged at all when every channel is
 empty, with one error log and one empty_stream evidence row per empty attempt;
 that a JSON answer mislabelled as a stream is delivered as JSON at once, and that
-a stream of only an error frame is retried on another channel and not billed.
+a stream of only an error frame, or of only role and usage frames, is retried
+on another channel and not billed, and the client never sees those frames.
 Everything it creates is removed at the end. Exit code 0 only if all checks pass.
 """
 import http.cookiejar
@@ -70,6 +71,17 @@ class Upstream(http.server.BaseHTTPRequestHandler):  # HTTP/1.0: the body ends w
             self.end_headers()
             frame = {"error": {"message": "Service temporarily unavailable.", "type": "invalid_request_error", "code": "upstream_error"}}
             self.wfile.write(("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode())
+            return
+        if MODE[ch] == "metadata_only":  # issue #7957: a role frame and a usage frame, then the upstream closes
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("X-Request-Id", f"up-{ch}-{len(HITS)}")
+            self.end_headers()
+            frames = [{"id": "chatcmpl-meta-" + ch, "object": "chat.completion.chunk", "created": 1, "model": "es-model",
+                       "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]},
+                      {"id": "chatcmpl-meta-" + ch, "object": "chat.completion.chunk", "created": 1, "model": "es-model", "choices": [],
+                       "usage": {"prompt_tokens": 481801, "completion_tokens": 0, "total_tokens": 481801}}]
+            self.wfile.write("".join("data: " + json.dumps(f) + "\n\n" for f in frames).encode())
             return
         if MODE[ch] == "mislabelled":  # channel #148 on 10-23: a complete JSON answer labelled text/event-stream
             data = json.dumps({"id": "chatcmpl-" + ch, "object": "chat.completion", "created": 1, "model": "es-model",
@@ -189,6 +201,7 @@ def run_scenarios(auth):
         ("all channels empty -> 502, no charge", "/v1/chat/completions", dict(chat, stream=True), "empty", "empty"),
         ("non-stream client, A labels its JSON answer event-stream -> A answers", "/v1/chat/completions", dict(chat, stream=False), "mislabelled", "ok"),
         ("chat stream: A streams only an error frame -> B", "/v1/chat/completions", dict(chat, stream=True), "error_frame", "ok"),
+        ("chat stream: A streams only role and usage frames -> B", "/v1/chat/completions", dict(chat, stream=True), "metadata_only", "ok"),
     ]
     for name, path, payload, a_mode, b_mode in scenarios:
         MODE["a"], MODE["b"] = a_mode, b_mode
@@ -218,8 +231,9 @@ def run_scenarios(auth):
             check(name + ": wallet charged once (= consume log)", consume and before - after == consume[0]["quota"] and consume[0]["quota"] > 0,
                   f"delta={before - after} log={consume[0]['quota'] if consume else None}")
             continue
-        if a_mode == "error_frame":
-            check(name + ": error-frame attempt on A logged as error, not billed", len(a_errors) == 1 and a_errors[0]["quota"] == 0)
+        if a_mode in ("error_frame", "metadata_only"):
+            check(name + ": attempt on A logged as error, not billed", len(a_errors) == 1 and a_errors[0]["quota"] == 0)
+            check(name + ": none of A's frames reached the client", "chatcmpl-meta-a" not in body and "temporarily unavailable" not in body)
             check(name + ": evidence row for A with its headers", any(e["channel_id"] == channels["A-empty"] and "up-a-" in (e["response_headers"] or "") for e in evidence))
             check(name + ": client got B's answer", status == 200 and "hello from B" in body, f"status={status}")
             check(name + ": exactly one consume log, on B", len(consume) == 1 and consume[0]["channel_id"] == channels["B-ok"])

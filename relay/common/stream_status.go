@@ -179,6 +179,15 @@ func (s *StreamStatus) UpstreamSentNothing() bool {
 	if !scanned || dataEvents > 0 {
 		return false
 	}
+	return s.EndedByUpstream()
+}
+
+// EndedByUpstream reports a stream the upstream ended: EOF, [DONE], idle
+// timeout or a read error, not a client disconnect or a handler stop.
+func (s *StreamStatus) EndedByUpstream() bool {
+	if s == nil {
+		return false
+	}
 	switch s.EndReason {
 	case StreamEndReasonEOF, StreamEndReasonDone, StreamEndReasonTimeout, StreamEndReasonScannerErr:
 		return true

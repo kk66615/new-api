@@ -184,6 +184,7 @@ func TestOaiStreamHandlerScansEveryFrameForAzureMarkers(t *testing.T) {
 // being settled on the local prompt estimate. An error after content has
 // already been streamed keeps the regular path.
 func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	previousTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 30
 	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
@@ -196,6 +197,8 @@ func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "only an error frame", frames: []string{errorFrame}, wantErr: true},
+		{name: "a role frame before the error frame", frames: []string{`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`, errorFrame}, wantErr: true},
+		{name: "a usage frame after the error frame", frames: []string{errorFrame, `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[],"usage":{"prompt_tokens":4000,"completion_tokens":0,"total_tokens":4000}}`}, wantErr: true},
 		{name: "error after streamed content", frames: []string{content, errorFrame}},
 		{name: "normal content", frames: []string{content}},
 		{name: "a null error field is not an error", frames: []string{`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","error":null,"choices":[{"index":0,"delta":{"content":"hi"}}]}`}},
@@ -233,5 +236,103 @@ func TestOaiStreamHandlerFailsStreamOfOnlyAnErrorFrame(t *testing.T) {
 			assert.Equal(t, errorFrame, info.UpstreamAudit.ErrorFrame)
 			assert.Contains(t, info.UpstreamResponseHeaders, "up-err-1")
 		})
+	}
+}
+
+func TestOaiStreamHandlerHoldsFramesWithoutOutput(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+
+	const (
+		role      = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`
+		usage     = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[],"usage":{"prompt_tokens":481801,"completion_tokens":0,"total_tokens":481801}}`
+		blank     = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"content":"  \n"}}]}`
+		reasoning = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}`
+		content   = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{"content":"hello"}}]}`
+		finish    = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+		usageEnd  = `{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"glm-5.3","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`
+	)
+	for _, test := range []struct {
+		name      string
+		frames    []string
+		wantEmpty bool
+		// frames the client must receive, in this order
+		wantOrder []string
+	}{
+		{name: "role and usage frames only", frames: []string{role, usage}, wantEmpty: true},
+		{name: "blank content only", frames: []string{role, blank, usage}, wantEmpty: true},
+		{name: "held role frame goes out before the first content", frames: []string{role, usage, content, finish, usageEnd}, wantOrder: []string{"assistant", "hello", `"stop"`}},
+		{name: "reasoning streams at once", frames: []string{role, reasoning, content, finish, usageEnd}, wantOrder: []string{"assistant", "thinking", "hello"}},
+		{name: "reasoning without content is delivered output", frames: []string{role, reasoning}, wantOrder: []string{"assistant", "thinking"}},
+		{name: "a finish reason alone is output", frames: []string{role, finish, usageEnd}, wantOrder: []string{"assistant", `"stop"`}},
+		{name: "a frame of an unknown shape streams as before", frames: []string{`{"type":"content_block_delta","text":"hi"}`}, wantOrder: []string{"content_block_delta"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			info := &relaycommon.RelayInfo{
+				RelayMode:   relayconstant.RelayModeChatCompletions,
+				RelayFormat: types.RelayFormatOpenAI,
+				IsStream:    true,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "glm-5.3"},
+			}
+			var sse strings.Builder
+			for _, frame := range test.frames {
+				sse.WriteString("data: " + frame + "\n\n")
+			}
+			// no [DONE]: the upstream just closes the stream
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sse.String()))}
+
+			usage, apiErr := OaiStreamHandler(c, info, resp)
+			if test.wantEmpty {
+				require.NotNil(t, apiErr)
+				assert.Nil(t, usage)
+				assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+				assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+				assert.False(t, types.IsSkipRetryError(apiErr), "another channel may answer")
+				assert.False(t, c.Writer.Written(), "nothing reached the client")
+				assert.Empty(t, recorder.Body.String())
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			body := recorder.Body.String()
+			last := -1
+			for _, want := range test.wantOrder {
+				at := strings.Index(body, want)
+				require.GreaterOrEqual(t, at, 0, "client got %q", want)
+				assert.Greater(t, at, last, "%q arrives in stream order", want)
+				last = at
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamFrameCarriesOutput(t *testing.T) {
+	for _, test := range []struct {
+		frame string
+		want  bool
+	}{
+		{`{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null,"logprobs":null}]}`, false},
+		{`{"choices":[],"usage":{"prompt_tokens":10}}`, false},
+		{`{"object":"chat.completion.chunk","id":"x","model":"m"}`, false},
+		{`{"error":{"message":"busy"}}`, false},
+		{`{"choices":[{"index":0,"delta":{"content":" \n\t"}}]}`, false},
+		{`{"choices":[{"index":0,"delta":{"reasoning_content":"","tool_calls":[]}}]}`, false},
+		{`{"choices":[{"index":0,"delta":{"content":"hi"}}]}`, true},
+		{`{"choices":[{"index":0,"delta":{"reasoning_content":"x"}}]}`, true},
+		{`{"choices":[{"index":0,"delta":{"reasoning":"x"}}]}`, true},
+		{`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"f"}}]}}]}`, true},
+		{`{"choices":[{"index":0,"delta":{"audio":{"data":"AAAA"}}}]}`, true},
+		{`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, true},
+		{`{"choices":[{"index":0,"message":{"content":"hi"}}]}`, true},
+		{`{"type":"content_block_delta"}`, true},
+		{`not json`, true},
+		{`[1,2]`, true},
+	} {
+		assert.Equal(t, test.want, openAIStreamFrameCarriesOutput(test.frame), test.frame)
 	}
 }

@@ -123,18 +123,20 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
-	var dataFrames int
 	var errorFrame *types.OpenAIError
+	var gate outputGate
+	writeFrame := func(frame string) error {
+		return HandleStreamFormat(c, info, frame, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+	}
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if lastStreamData != "" {
-			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+		for _, frame := range gate.Pass(lastStreamData, data) {
+			if err := writeFrame(frame); err != nil {
 				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
 				sr.Error(err)
 			}
 		}
 		if len(data) > 0 {
-			dataFrames++
 			// an error object, or a non-empty error string; null, false and "" are not errors
 			if frameErr := gjson.Get(data, "error"); frameErr.IsObject() || (frameErr.Type == gjson.String && frameErr.Str != "") {
 				var frame dto.OpenAITextResponse
@@ -160,13 +162,24 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if apiErr := helper.EmptyUpstreamStreamError(c, info, resp); apiErr != nil {
 		return nil, apiErr
 	}
-	// The upstream answered the stream with a single error frame and nothing
-	// else: no content, and the last frame is still held back from the client,
-	// so fail the attempt (not billed, retryable) instead of settling it on the
-	// local prompt estimate.
-	if dataFrames == 1 && errorFrame != nil {
-		info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
-		return nil, types.WithOpenAIError(*errorFrame, http.StatusBadGateway)
+	// No frame with output arrived, so the client has been sent nothing: fail
+	// the attempt (not billed, retryable) instead of settling it on the
+	// reported or locally estimated prompt tokens. An error frame among them
+	// is the upstream's own reason.
+	if !gate.Open() {
+		if errorFrame != nil {
+			info.SetUpstreamResponseForensics(lastStreamData, resp.Header)
+			return nil, types.WithOpenAIError(*errorFrame, http.StatusBadGateway)
+		}
+		if apiErr := helper.ContentlessUpstreamStreamError(c, info, resp, lastStreamData); apiErr != nil {
+			return nil, apiErr
+		}
+		// the client went away: deliver what was held and settle as before
+		for _, frame := range gate.Release() {
+			if err := writeFrame(frame); err != nil {
+				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
+			}
+		}
 	}
 
 	info.StreamStatus.RequireTerminal()

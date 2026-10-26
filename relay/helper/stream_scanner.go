@@ -153,6 +153,26 @@ func EmptyUpstreamStreamError(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		info.SetUpstreamResponseForensics(firstSkipped, resp.Header)
 	}
 	logger.LogWarn(c, common.LogText("upstream stream ended without any data event: end_reason=%s non_data_lines=%d", info.StreamStatus.EndReason, skipped))
+	return upstreamStreamWithoutContentError(c)
+}
+
+// ContentlessUpstreamStreamError fails an attempt whose upstream ended a stream
+// that carried data events but no output (only role, usage or blank frames),
+// none of them written to the client yet: the same retryable empty_response as
+// a stream without data events. lastFrame is kept as forensic material. It
+// returns nil for a client disconnect, which stays on the normal path.
+func ContentlessUpstreamStreamError(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, lastFrame string) *types.NewAPIError {
+	if info == nil || !info.StreamStatus.EndedByUpstream() {
+		return nil
+	}
+	if resp != nil {
+		info.SetUpstreamResponseForensics(lastFrame, resp.Header)
+	}
+	logger.LogWarn(c, common.LogText("upstream stream ended without any content: end_reason=%s", info.StreamStatus.EndReason))
+	return upstreamStreamWithoutContentError(c)
+}
+
+func upstreamStreamWithoutContentError(c *gin.Context) *types.NewAPIError {
 	// Headers copied from this upstream are still unsent: drop them so a retry
 	// on another channel neither duplicates nor inherits this upstream's turn state.
 	if c != nil && c.Writer != nil && !c.Writer.Written() {
