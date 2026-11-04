@@ -1984,14 +1984,15 @@ func TestAuditSwitchNoteKeepsBackendBeforeHeaders(t *testing.T) {
 func TestBackendSignatureBoundsTheVendor(t *testing.T) {
 	assert.Equal(t, "gpt_relay/"+strings.Repeat("a", 32), backendSignature("gpt_relay", strings.Repeat("a", 150)))
 	assert.Equal(t, "gpt_relay/openrouter", backendSignature("gpt_relay", "openrouter"))
-	assert.Equal(t, "gpt_relay/"+strings.Repeat("_", 32), backendSignature("gpt_relay", strings.Repeat("é", 40)), "ASCII identifiers only")
+	assert.Equal(t, "gpt_relay/"+strings.Repeat("ue9", 10), backendSignature("gpt_relay", strings.Repeat("é", 40)), "ASCII only, bounded")
+	assert.NotEqual(t, backendSignature("gpt_relay", "官转"), backendSignature("gpt_relay", "逆向"), "different vendors never collapse")
 	assert.Equal(t, "gpt_relay", backendSignature("gpt_relay", "\x00\x00"), "nothing left after sanitizing is no vendor")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a b"), "one token: the watchdog splits a -> b on whitespace")
 	assert.Equal(t, "gpt_relay/ab", backendSignature("gpt_relay", "a\u200bb"), "what reads the same compares the same")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a;b"))
 	assert.Equal(t, "gpt_relay/openai-_azure", backendSignature("gpt_relay", "openai->azure"), "no arrow inside a vendor")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a\tb"), "whitespace of any kind is a separator")
-	assert.Equal(t, "gpt_relay/openai_", backendSignature("gpt_relay", "openai\ufe0f"), "a variation selector does not hide")
+	assert.Equal(t, "gpt_relay/openaiufe0f", backendSignature("gpt_relay", "openai\ufe0f"), "a variation selector is spelled out, not hidden")
 	assert.Equal(t, "gpt_relay/mistral-ai", backendSignature("gpt_relay", "Mistral-AI"), "real slugs are kept (lowercased)")
 }
 

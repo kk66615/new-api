@@ -1090,23 +1090,31 @@ func backendSignature(backendShape, prefix string) string {
 	if i := strings.LastIndex(vendor, "."); i >= 0 {
 		vendor = vendor[i+1:]
 	}
-	// The prefix is upstream text. Vendor slugs (openrouter, Bedrock, HF orgs)
-	// are ASCII identifiers, so that is all a vendor may be: no whitespace or
-	// arrows the watchdog would read as "a -> b", and nothing invisible or
-	// look-alike, so what reads the same compares the same. Bounded, so tracker
-	// state and switch notes stay bounded.
-	vendor = strings.Map(func(r rune) rune {
+	// The prefix is upstream text. A vendor is written in ASCII only: no
+	// whitespace or arrows the watchdog would read as "a -> b", nothing
+	// invisible or look-alike. Any other character is spelled as its code point
+	// (u5b98), so two different vendors never collapse into one. Bounded, so
+	// tracker state and switch notes stay bounded.
+	const maxVendor = 32
+	var vb strings.Builder
+	for _, r := range vendor {
+		var tok string
 		switch {
 		case r < 0x80 && (r == '_' || r == '.' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)):
-			return r
-		case unicode.IsSpace(r): // before the control check: a tab separates words
-			return '_'
+			tok = string(r)
+		case unicode.IsSpace(r), r == ';', r == '|', r == '<', r == '>':
+			tok = "_"
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
-			return -1
+			continue // invisible: dropped, so what reads the same compares the same
+		default:
+			tok = "u" + strconv.FormatInt(int64(r), 16)
 		}
-		return '_'
-	}, vendor)
-	vendor, _ = common.TruncateAuditBytes(vendor, 32)
+		if vb.Len()+len(tok) > maxVendor {
+			break // whole characters only
+		}
+		vb.WriteString(tok)
+	}
+	vendor = vb.String()
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
 	}
