@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1188,6 +1189,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 	audit := &relayInfo.UpstreamAudit
 	failed := errorType != ""
+	// A stream that ended in an upstream failure (Responses response.failed)
+	// is not an error attempt here, yet its frames describe the failure, not
+	// the backend, and its placeholder ids (resp_pv_503) repeat across
+	// requests: it feeds neither the switch trackers nor the replay memory.
+	streamFailed := !failed && relayInfo.StreamStatus.ResponseFailed()
 	sentModel := relayInfo.UpstreamSentModel
 	if sentModel == "" && relayInfo.ChannelMeta != nil {
 		sentModel = relayInfo.UpstreamModelName
@@ -1203,7 +1209,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	// an empty upstream stream carries no body to judge, but its headers (the
 	// upstream's request id) are what tracing it with the upstream needs
 	emptyStream := failed && relayInfo.StreamStatus.UpstreamSentNothing()
-	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" && !emptyStream {
+	// a stream that failed with only an error event still needs its evidence
+	// row: the stream_failed note is that failure's only alert path
+	if respModel == "" && relayInfo.UpstreamResponseId == "" && relayInfo.UpstreamResponseExcerpt == "" && !emptyStream && !streamFailed {
 		// nothing to judge: record only that it was not observed
 		if sentModel != "" {
 			ursp["sent"] = sentModel
@@ -1240,11 +1248,6 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		channelType = relayInfo.ChannelMeta.ChannelType
 	}
 	channelTest := relayInfo.IsChannelTest
-	// A stream that ended in an upstream failure (Responses response.failed)
-	// is not an error attempt here, yet its frames describe the failure, not
-	// the backend, and its placeholder ids (resp_pv_503) repeat across
-	// requests: it feeds neither the switch trackers nor the replay memory.
-	streamFailed := !failed && relayInfo.StreamStatus.ResponseFailed()
 	feedTrackers := !failed && !streamFailed && !channelTest
 
 	// ccmax evidence: a visible injection labels this request; the channel
@@ -1354,9 +1357,18 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		// vendor's headers through on one path and strip them on another
 		// (non-stream with x-goog-*, stream without). Each path is compared
 		// only with its own history, so a change on a path is still reported
-		// once while the difference between paths never is.
+		// once while the difference between paths never is. The stream flag is
+		// the client's: handlers widen IsStream when an upstream answers with
+		// a stream, and an upstream that starts doing so is itself a change
+		// to report against the request's own history.
+		clientStream := relayInfo.IsStream
+		if ctx != nil {
+			if v, ok := ctx.Get(string(constant.ContextKeyIsStream)); ok {
+				clientStream, _ = v.(bool)
+			}
+		}
 		srcKey := key
-		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(relayInfo.IsStream)
+		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(clientStream)
 		from, flipped = trackSourceFlip(srcKey, src)
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
@@ -1424,9 +1436,17 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		if streamFailed {
 			// the watchdog alerts on these: the log row itself reads as a
-			// zero-billed success
+			// zero-billed success. The code is upstream-controlled: it must not
+			// carry note separators or control characters, and stays short.
 			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
-			notes = append(notes, "stream_failed: "+cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown"))
+			code := strings.Map(func(r rune) rune {
+				if r == ';' || r == '|' || unicode.IsControl(r) {
+					return '_'
+				}
+				return r
+			}, cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown"))
+			code, _ = common.TruncateAuditBytes(code, 64)
+			notes = append(notes, "stream_failed: "+code)
 		}
 		if emptyStream {
 			skipped, _ := relayInfo.StreamStatus.SkippedLines()

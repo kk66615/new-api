@@ -682,7 +682,11 @@ type auditExchange struct {
 	useChannels []string
 	errorType   string
 	format      types.RelayFormat
-	streamFail  string // upstream failure code delivered inside a 200 stream
+	// an upstream failure delivered inside a 200 stream (code and/or type)
+	streamFail     string
+	streamFailType string
+	upgraded       bool // the client asked for no stream; the upstream answered with one
+	bare           bool // no response object at all (an error-only stream)
 }
 
 // runAuditExchange feeds one exchange through appendUpstreamResponseAudit and
@@ -697,6 +701,8 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Set(common.RequestIdKey, x.requestId)
+	// what the client asked for, as genRelayInfo records it
+	ctx.Set(string(constant.ContextKeyIsStream), x.stream && !x.upgraded)
 	if x.useChannels != nil {
 		ctx.Set("use_channel", x.useChannels)
 	}
@@ -722,9 +728,10 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	if !x.startedAt.IsZero() {
 		info.StartTime = x.startedAt
 	}
-	if x.streamFail != "" {
+	if x.streamFail != "" || x.streamFailType != "" {
 		info.StreamStatus = relaycommon.NewStreamStatus()
-		info.StreamStatus.MarkFailed(x.streamFail, "invalid_request_error", 0)
+		info.StreamStatus.MarkFailed(x.streamFail, x.streamFailType, 0)
+		info.ObserveUpstreamErrorFrame(`{"type":"error","code":"` + x.streamFail + `"}`)
 	}
 	info.SetEstimatePromptTokens(x.estimate)
 	info.MarkUpstreamObserver(x.handler)
@@ -741,7 +748,9 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	if excerpt == "" {
 		excerpt = `{"id":"` + x.id + `","object":"chat.completion","model":"x","choices":[]}`
 	}
-	info.SetUpstreamResponseForensics(excerpt, x.headers)
+	if !x.bare {
+		info.SetUpstreamResponseForensics(excerpt, x.headers)
+	}
 	info.ObserveUpstreamOutput(x.output)
 	info.ObserveUpstreamCompletionTokens(x.completion)
 	other := model.NewLogOther()
@@ -1854,7 +1863,8 @@ func TestAuditFailedStreamFeedsNoTrackers(t *testing.T) {
 	ok("ok-1")
 	for _, req := range []string{"fail-1", "fail-2"} {
 		ursp, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "glm-5.3",
-			id: "resp_pv_invalid_request", stream: true, streamFail: "invalid_request"})
+			id: "resp_pv_invalid_request", stream: true, streamFail: "invalid_request", streamFailType: "invalid_request_error"})
+		require.NotNil(t, ev)
 		assert.NotContains(t, ursp, "src_flip")
 		assert.NotContains(t, ursp, "backend_flip")
 		assert.NotContains(t, ursp, "dup_id", "a failure placeholder id is not a replayed answer")
@@ -1864,4 +1874,44 @@ func TestAuditFailedStreamFeedsNoTrackers(t *testing.T) {
 	ursp := ok("ok-2")
 	assert.NotContains(t, ursp, "src_flip", "the failures must not have moved the tracker")
 	assert.NotContains(t, ursp, "backend_flip")
+}
+
+// What the stream_failed note carries in the other failure shapes.
+func TestAuditFailedStreamNote(t *testing.T) {
+	const ch = 987702
+	isolatedAuditKey(t, ch, "gpt")
+	cases := []struct {
+		name string
+		x    auditExchange
+		note string
+	}{
+		{"type when there is no code", auditExchange{id: "resp_a", streamFailType: "server_error"}, "stream_failed: server_error"},
+		{"upstream code cannot forge note segments", auditExchange{id: "resp_b", streamFail: "x; signals: dup_id\nFAKE " + strings.Repeat("y", 80)},
+			"stream_failed: x_ signals: dup_id_FAKE " + strings.Repeat("y", 64-len("x_ signals: dup_id_FAKE "))},
+		{"an error-only stream still leaves a row", auditExchange{bare: true, streamFail: "503"}, "stream_failed: 503"},
+		{"an error attempt is labelled as such only", auditExchange{id: "resp_c", streamFail: "503", errorType: "upstream_error"}, "error: upstream_error"},
+	}
+	for i, c := range cases {
+		c.x.channelId, c.x.requestId, c.x.stream = ch, "n-"+strconv.Itoa(i), true
+		_, ev := runAuditExchange(t, c.x)
+		require.NotNil(t, ev, c.name)
+		assert.Equal(t, c.note, ev.Note, c.name)
+	}
+}
+
+// An upstream that starts answering a non-stream request with a stream is
+// compared with that request type's history, not seeded as a new path.
+func TestAuditUpgradedStreamIsComparedWithTheClientsPath(t *testing.T) {
+	const ch = 987703
+	isolatedAuditKey(t, ch, "gemini")
+	google := map[string][]string{"X-Goog-Request-Id": {"g"}}
+	relay := map[string][]string{"X-New-Api-Version": {"v1"}}
+	run := func(req string, upgraded bool, headers map[string][]string) map[string]any {
+		ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "gemini-3-flash-preview",
+			models: []string{"gemini-3-flash-preview"}, id: "resp-" + req + "-0001", stream: upgraded, upgraded: upgraded, headers: headers})
+		return ursp
+	}
+	run("u-1", false, google)
+	run("u-2", false, google)
+	assert.Equal(t, "google->newapi_relay", run("u-3", true, relay)["src_flip"])
 }
