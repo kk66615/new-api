@@ -789,6 +789,7 @@ type flipTrackerKey struct {
 type channelSrcState struct {
 	mu   sync.Mutex
 	last string
+	keys []string // source-naming header keys of the last answer (see sourceHeaderKeys)
 }
 
 var srcTracker sync.Map     // flipTrackerKey -> *channelSrcState
@@ -1012,21 +1013,69 @@ func isEvidenceBackedBy(by string) bool {
 }
 
 // trackSourceFlip watches the hop label (src) of a tracker key; a change
-// between two known labels of different families is a flip.
-func trackSourceFlip(key flipTrackerKey, src string) (from string, flipped bool) {
+// between two known labels of different families is a flip. headerKeys are
+// the answer's source-naming header keys; on a flip the previous answer's are
+// returned so the evidence can say which headers changed.
+func trackSourceFlip(key flipTrackerKey, src string, headerKeys []string) (from string, prevKeys []string, flipped bool) {
 	if key.channelId == 0 || src == "" || src == "unknown" {
-		return "", false
+		return "", nil, false
 	}
 	v, _ := srcTracker.LoadOrStore(key, &channelSrcState{})
 	st := v.(*channelSrcState)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	prev := st.last
-	st.last = src
+	prev, prevKeys := st.last, st.keys
+	st.last, st.keys = src, headerKeys
 	if prev == "" || srcFamily(prev) == srcFamily(src) {
-		return "", false
+		return "", nil, false
 	}
-	return prev, true
+	return prev, prevKeys, true
+}
+
+// sourceHeaderKeys lists, sorted, the response header names that on their own
+// name a source (a vendor's or a relay software's header).
+func sourceHeaderKeys(channelType int, h map[string]string) []string {
+	var keys []string
+	for k := range h {
+		if upstreamHeaderSource(channelType, map[string]string{k: ""}) != "" {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// sourceHeaderChange renders which source-naming headers disappeared (-) and
+// appeared (+) between two answers, at most four of each: the first thing to
+// read when judging whether a source flip is a header-forwarding change or a
+// different backend.
+func sourceHeaderChange(prev, cur []string) string {
+	const maxEach = 4
+	var gone, came []string
+	for _, k := range prev {
+		if !slices.Contains(cur, k) && len(gone) < maxEach {
+			gone = append(gone, "-"+k)
+		}
+	}
+	for _, k := range cur {
+		if !slices.Contains(prev, k) && len(came) < maxEach {
+			came = append(came, "+"+k)
+		}
+	}
+	return strings.Join(append(gone, came...), " ")
+}
+
+// auditNoteSegment makes one segment of an evidence note safe: upstream text
+// (model names, error codes, header names, vendor prefixes) must not add
+// segments (';' '|') or lines, or disguise the alert text the watchdog builds
+// from the note (Cf: bidi overrides, zero-width characters; Zl/Zp: U+2028/9).
+func auditNoteSegment(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ';' || r == '|' || unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // backendSignature is what the backend tracker compares: the wire shape plus
@@ -1261,7 +1310,8 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if failed {
 		markers = 0
 	}
-	headerSource := upstreamHeaderSource(channelType, headerKeysLower(relayInfo.UpstreamResponseHeaders))
+	responseHeaders := headerKeysLower(relayInfo.UpstreamResponseHeaders)
+	headerSource := upstreamHeaderSource(channelType, responseHeaders)
 	// src is the direct hop: channel type, then headers; without either, a
 	// NewAPI usage field still identifies a NewAPI hop, else the wire shape
 	src := channelTypeBackend(channelType)
@@ -1346,7 +1396,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 
 	key := auditTrackerKey(relayInfo, sentModel)
-	var from string
+	var from, headerChange string
 	var flipped bool
 	var backendEvent backendTrackEvent
 	// the tracker follows the decided backend, with hysteresis for answers
@@ -1369,8 +1419,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		srcKey := key
 		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(clientStream)
-		from, flipped = trackSourceFlip(srcKey, src)
+		curKeys := sourceHeaderKeys(channelType, responseHeaders)
+		var prevKeys []string
+		from, prevKeys, flipped = trackSourceFlip(srcKey, src, curKeys)
 		if flipped {
+			headerChange = sourceHeaderChange(prevKeys, curKeys)
 			ursp["src_flip"] = from + "->" + src
 		}
 		backendEvent = trackBackendFlip(key, backendSig, decision.by, decision.weakVendors())
@@ -1379,16 +1432,16 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 	}
 	// one evidence row per exchange: a source flip and a backend event on the
-	// same answer share it, joined in one note
-	flipNote := ""
+	// same answer share it, as segments of one note
+	var flipSegs []string
 	if flipped {
-		flipNote = from + " -> " + src
+		flipSegs = append(flipSegs, from+" -> "+src)
+		if headerChange != "" {
+			flipSegs = append(flipSegs, "headers: "+headerChange)
+		}
 	}
 	if backendEvent.note != "" {
-		if flipNote != "" {
-			flipNote += "; "
-		}
-		flipNote += backendEvent.note
+		flipSegs = append(flipSegs, backendEvent.note)
 	}
 	flipped = flipped || backendEvent.flip != ""
 
@@ -1416,9 +1469,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		kind = "provider_switch"
 	}
 	if kind == "provider_switch" {
-		// exactly the flip, as before: the watchdog groups and renders these
-		// notes as the source change text
-		notes = append(notes, flipNote)
+		// exactly the flip: the watchdog groups on the "a -> b" segments and
+		// renders the headers segment separately
+		notes = append(notes, flipSegs...)
 	} else {
 		// the trigger reasons come first so the 255-char cut never drops
 		// them; the watchdog's notification text is built from the note
@@ -1436,18 +1489,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		if streamFailed {
 			// the watchdog alerts on these: the log row itself reads as a
-			// zero-billed success. The code is upstream-controlled: it must not
-			// carry note separators, control or format characters, and stays short.
+			// zero-billed success. The upstream-controlled code stays short.
 			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
-			code := strings.Map(func(r rune) rune {
-				// Cf: bidi overrides and zero-width characters that disguise the
-				// alert text; Zl/Zp: U+2028/U+2029 line and paragraph separators
-				if r == ';' || r == '|' || unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-					return '_'
-				}
-				return r
-			}, cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown"))
-			code, _ = common.TruncateAuditBytes(code, 64)
+			code, _ := common.TruncateAuditBytes(auditNoteSegment(cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown")), 64)
 			notes = append(notes, "stream_failed: "+code)
 		}
 		if emptyStream {
@@ -1457,14 +1501,17 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if channelTest {
 			notes = append(notes, "channel_test")
 		}
-		if flipNote != "" {
-			notes = append(notes, "provider also flipped: "+flipNote)
+		if len(flipSegs) > 0 {
+			notes = append(notes, "provider also flipped: "+strings.Join(flipSegs, ", "))
 		}
 		if midStreamChange {
 			notes = append(notes, "mid_stream_change: "+strings.Join(audit.Models, " -> "))
 		}
 	}
 
+	for i, seg := range notes {
+		notes[i] = auditNoteSegment(seg)
+	}
 	ev := &model.UpstreamEvidence{
 		CreatedAt:         common.GetTimestamp(),
 		Kind:              kind,
@@ -1497,8 +1544,8 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	}
 	// built before the hand-off: once queued, the row belongs to the writer
 	// goroutine, which sanitizes it in place
-	logLine := "[upstream-audit] " + kind + " queued: sent=" + ev.SentModel +
-		" got=" + ev.ResponseModel + " src=" + src + " " + ev.Note
+	logLine := "[upstream-audit] " + kind + " queued: sent=" + auditNoteSegment(ev.SentModel) +
+		" got=" + auditNoteSegment(ev.ResponseModel) + " src=" + src + " " + ev.Note
 	if enqueueUpstreamEvidence(ev) && kind != "normal" { // normal rows are high-volume — no per-row logging
 		common.SysLog(logLine)
 	}

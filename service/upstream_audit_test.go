@@ -411,14 +411,14 @@ func TestInjectionDetected(t *testing.T) {
 
 func TestSourceFlipFamily(t *testing.T) {
 	ch := isolatedAuditKey(t, 987655, "claude")
-	trackSourceFlip(ch, "claude_relay")
-	if _, flipped := trackSourceFlip(ch, "ccmax"); flipped {
+	trackSourceFlip(ch, "claude_relay", nil)
+	if _, _, flipped := trackSourceFlip(ch, "ccmax", nil); flipped {
 		t.Error("claude_relay -> ccmax is the same relay, must not count as a flip")
 	}
-	if _, flipped := trackSourceFlip(ch, "claude_relay"); flipped {
+	if _, _, flipped := trackSourceFlip(ch, "claude_relay", nil); flipped {
 		t.Error("ccmax -> claude_relay must not count as a flip either")
 	}
-	if from, flipped := trackSourceFlip(ch, "gpt_relay"); !flipped || from != "claude_relay" {
+	if from, _, flipped := trackSourceFlip(ch, "gpt_relay", nil); !flipped || from != "claude_relay" {
 		t.Errorf("claude_relay -> gpt_relay must flip, got from=%q flipped=%v", from, flipped)
 	}
 }
@@ -426,30 +426,30 @@ func TestSourceFlipFamily(t *testing.T) {
 func TestTrackSourceFlip(t *testing.T) {
 	ch := isolatedAuditKey(t, 987654, "gpt")
 	// first observation seeds silently
-	if _, flipped := trackSourceFlip(ch, "azure"); flipped {
+	if _, _, flipped := trackSourceFlip(ch, "azure", nil); flipped {
 		t.Error("first observation must not flip")
 	}
 	// same source: no flip
-	if _, flipped := trackSourceFlip(ch, "azure"); flipped {
+	if _, _, flipped := trackSourceFlip(ch, "azure", nil); flipped {
 		t.Error("same source must not flip")
 	}
 	// flip azure -> gpt_relay
-	from, flipped := trackSourceFlip(ch, "gpt_relay")
+	from, _, flipped := trackSourceFlip(ch, "gpt_relay", nil)
 	if !flipped || from != "azure" {
 		t.Errorf("expected flip from azure, got from=%q flipped=%v", from, flipped)
 	}
 	// flip back gpt_relay -> azure
-	from, flipped = trackSourceFlip(ch, "azure")
+	from, _, flipped = trackSourceFlip(ch, "azure", nil)
 	if !flipped || from != "gpt_relay" {
 		t.Errorf("expected flip back, got from=%q flipped=%v", from, flipped)
 	}
 	// repeat flip azure -> gpt_relay: no rate limiting — every flip reported
-	from, flipped = trackSourceFlip(ch, "gpt_relay")
+	from, _, flipped = trackSourceFlip(ch, "gpt_relay", nil)
 	if !flipped || from != "azure" {
 		t.Errorf("expected repeat flip reported, got from=%q flipped=%v", from, flipped)
 	}
 	// unknown never participates
-	if _, flipped := trackSourceFlip(ch, "unknown"); flipped {
+	if _, _, flipped := trackSourceFlip(ch, "unknown", nil); flipped {
 		t.Error("unknown must not flip")
 	}
 }
@@ -494,12 +494,12 @@ func TestInferBackendShapeLooksThroughRelayHeaders(t *testing.T) {
 func TestTrackBackendFlipIsIndependentOfSource(t *testing.T) {
 	ch := isolatedAuditKey(t, 987653, "claude")
 	assert.Empty(t, trackBackendFlip(ch, "aws", BackendByIdShape, nil).flip, "seed must not flip")
-	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
+	if _, _, f := trackSourceFlip(ch, "newapi_relay", nil); f {
 		t.Fatal("source seed must not flip")
 	}
 	// msg_bdrk_ → msg_: the id shape is on every answer, so its change is real
 	assert.Equal(t, "aws->claude_relay", trackBackendFlip(ch, "claude_relay", BackendByFallback, nil).flip)
-	if _, f := trackSourceFlip(ch, "newapi_relay"); f {
+	if _, _, f := trackSourceFlip(ch, "newapi_relay", nil); f {
 		t.Fatal("source unchanged must not flip when only backend moved")
 	}
 }
@@ -1318,9 +1318,10 @@ func TestAuditNoteFormats(t *testing.T) {
 	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "n-2", models: []string{"gpt-5"}, id: "chatcmpl-note00001",
 		headers: relay, created: now - 30*86400, output: "fresh"})
 	assert.Equal(t, "provider_switch", ev.Kind)
-	// one row: the source flip; losing the Azure headers once is not a
-	// backend switch (hysteresis), so the note is the source flip alone
-	assert.Equal(t, "azure -> newapi_relay", ev.Note)
+	// one row: the source flip and the headers behind it; losing the Azure
+	// headers once is not a backend switch (hysteresis), so there is no
+	// backend segment
+	assert.Equal(t, "azure -> newapi_relay; headers: -apim-request-id +x-new-api-version", ev.Note)
 
 	models := make([]string, 0, 8)
 	for i := range 8 {
@@ -1849,6 +1850,7 @@ func TestAuditSourceTrackerComparesEachPathWithItself(t *testing.T) {
 	require.NotNil(t, ev)
 	assert.Equal(t, "google->newapi_relay", ursp["src_flip"])
 	assert.Equal(t, "provider_switch", ev.Kind)
+	assert.Equal(t, "google -> newapi_relay; headers: -x-goog-request-id", ev.Note, "the note says which header went away")
 }
 
 // response.failed inside a 200 stream (#194: placeholder ids resp_pv_503,
@@ -1919,4 +1921,35 @@ func TestAuditUpgradedStreamIsComparedWithTheClientsPath(t *testing.T) {
 	run("u-1", false, google)
 	run("u-2", false, google)
 	assert.Equal(t, "google->newapi_relay", run("u-3", true, relay)["src_flip"])
+}
+
+func TestSourceHeaderChange(t *testing.T) {
+	cases := []struct {
+		prev, cur []string
+		want      string
+	}{
+		{[]string{"x-goog-request-id", "x-new-api-version"}, []string{"x-new-api-version"}, "-x-goog-request-id"},
+		{[]string{"x-new-api-version"}, []string{"apim-request-id", "x-ms-region"}, "-x-new-api-version +apim-request-id +x-ms-region"},
+		{nil, []string{"openai-version"}, "+openai-version"},
+		{[]string{"a"}, []string{"a"}, ""},
+		{[]string{"a", "b", "c", "d", "e"}, nil, "-a -b -c -d"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, sourceHeaderChange(c.prev, c.cur), "%v -> %v", c.prev, c.cur)
+	}
+	// only headers that name a source on their own are compared
+	h := map[string]string{"x-goog-request-id": "1", "content-type": "x", "x-new-api-version": "v", "date": "d"}
+	assert.Equal(t, []string{"x-goog-request-id", "x-new-api-version"}, sourceHeaderKeys(constant.ChannelTypeGemini, h))
+}
+
+// Upstream-declared model names reach the note (mid_stream_change) and must
+// not add segments or lines the watchdog would render as its own.
+func TestAuditNoteSegmentsAreSanitized(t *testing.T) {
+	const ch = 987704
+	isolatedAuditKey(t, ch, "gpt")
+	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "inj-1", sent: "gpt-5",
+		models: []string{"gpt-5", "evil;signals: replay\u2028x|y\nz"}, id: "chatcmpl-inj00001"})
+	require.NotNil(t, ev)
+	assert.Equal(t, "model_mismatch", ev.Kind)
+	assert.Equal(t, "mid_stream_change: gpt-5 -> evil_signals: replay_x_y_z", ev.Note)
 }
