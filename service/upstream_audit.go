@@ -1440,8 +1440,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 			// carry note separators, control or format characters, and stays short.
 			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
 			code := strings.Map(func(r rune) rune {
-				// Cf: bidi overrides and zero-width characters that disguise the alert text
-				if r == ';' || r == '|' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				// Cf: bidi overrides and zero-width characters that disguise the
+				// alert text; Zl/Zp: U+2028/U+2029 line and paragraph separators
+				if r == ';' || r == '|' || unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 					return '_'
 				}
 				return r

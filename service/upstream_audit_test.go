@@ -1893,7 +1893,7 @@ func TestAuditFailedStreamNote(t *testing.T) {
 		{"upstream code cannot forge note segments", auditExchange{id: "resp_b", streamFail: "x; signals: dup_id\nFAKE " + strings.Repeat("y", 80)},
 			"stream_failed: x_ signals: dup_id_FAKE " + strings.Repeat("y", 64-len("x_ signals: dup_id_FAKE "))},
 		{"an error-only stream still leaves a row", auditExchange{bare: true, streamFail: "503"}, "stream_failed: 503"},
-		{"bidi and zero-width characters are replaced", auditExchange{id: "resp_d", streamFail: "a\u202eb\u200bc"}, "stream_failed: a_b_c"},
+		{"bidi and zero-width characters are replaced", auditExchange{id: "resp_d", streamFail: "a\u202eb\u200bc\u2028d"}, "stream_failed: a_b_c_d"},
 		{"an error attempt is labelled as such only", auditExchange{id: "resp_c", streamFail: "503", errorType: "upstream_error"}, "error: upstream_error"},
 	}
 	for i, c := range cases {
