@@ -685,6 +685,7 @@ type auditExchange struct {
 	// an upstream failure delivered inside a 200 stream (code and/or type)
 	streamFail     string
 	streamFailType string
+	streamFailBare bool // a failure with neither code nor type
 	upgraded       bool // the client asked for no stream; the upstream answered with one
 	bare           bool // no response object at all (an error-only stream)
 }
@@ -728,7 +729,7 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	if !x.startedAt.IsZero() {
 		info.StartTime = x.startedAt
 	}
-	if x.streamFail != "" || x.streamFailType != "" {
+	if x.streamFail != "" || x.streamFailType != "" || x.streamFailBare {
 		info.StreamStatus = relaycommon.NewStreamStatus()
 		info.StreamStatus.MarkFailed(x.streamFail, x.streamFailType, 0)
 		info.ObserveUpstreamErrorFrame(`{"type":"error","code":"` + x.streamFail + `"}`)
@@ -1836,6 +1837,7 @@ func TestAuditSourceTrackerComparesEachPathWithItself(t *testing.T) {
 		headers map[string][]string
 	}{{false, google}, {true, relay}, {false, google}, {true, relay}} {
 		ursp, ev := run("alt-"+strconv.Itoa(i), x.stream, types.RelayFormatGemini, x.headers)
+		require.NotNil(t, ev)
 		assert.NotContains(t, ursp, "src_flip", "alternating paths %d", i)
 		assert.Equal(t, "normal", ev.Kind)
 	}
@@ -1844,6 +1846,7 @@ func TestAuditSourceTrackerComparesEachPathWithItself(t *testing.T) {
 
 	// the vendor headers disappear on the path that always carried them
 	ursp, ev := run("gone-1", false, types.RelayFormatGemini, relay)
+	require.NotNil(t, ev)
 	assert.Equal(t, "google->newapi_relay", ursp["src_flip"])
 	assert.Equal(t, "provider_switch", ev.Kind)
 }
@@ -1886,9 +1889,11 @@ func TestAuditFailedStreamNote(t *testing.T) {
 		note string
 	}{
 		{"type when there is no code", auditExchange{id: "resp_a", streamFailType: "server_error"}, "stream_failed: server_error"},
+		{"unknown when there is neither", auditExchange{id: "resp_e", streamFailBare: true}, "stream_failed: unknown"},
 		{"upstream code cannot forge note segments", auditExchange{id: "resp_b", streamFail: "x; signals: dup_id\nFAKE " + strings.Repeat("y", 80)},
 			"stream_failed: x_ signals: dup_id_FAKE " + strings.Repeat("y", 64-len("x_ signals: dup_id_FAKE "))},
 		{"an error-only stream still leaves a row", auditExchange{bare: true, streamFail: "503"}, "stream_failed: 503"},
+		{"bidi and zero-width characters are replaced", auditExchange{id: "resp_d", streamFail: "a\u202eb\u200bc"}, "stream_failed: a_b_c"},
 		{"an error attempt is labelled as such only", auditExchange{id: "resp_c", streamFail: "503", errorType: "upstream_error"}, "error: upstream_error"},
 	}
 	for i, c := range cases {

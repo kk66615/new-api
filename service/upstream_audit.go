@@ -1437,10 +1437,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		if streamFailed {
 			// the watchdog alerts on these: the log row itself reads as a
 			// zero-billed success. The code is upstream-controlled: it must not
-			// carry note separators or control characters, and stays short.
+			// carry note separators, control or format characters, and stays short.
 			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
 			code := strings.Map(func(r rune) rune {
-				if r == ';' || r == '|' || unicode.IsControl(r) {
+				// Cf: bidi overrides and zero-width characters that disguise the alert text
+				if r == ';' || r == '|' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 					return '_'
 				}
 				return r
