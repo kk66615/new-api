@@ -1095,9 +1095,11 @@ func backendSignature(backendShape, prefix string) string {
 	// whitespace or arrows the watchdog would read as "a -> b", nothing
 	// invisible or look-alike. Any other character is spelled as "~" and six hex
 	// digits (~005b98): '~' is never kept as itself, so every escape is
-	// unambiguous and different characters stay different. Kept to 32 bytes of
-	// whole characters, so tracker state and switch notes stay bounded (vendors
-	// equal in those 32 bytes compare equal).
+	// unambiguous and different characters stay different. Only the whole
+	// characters that fit in 32 bytes are kept (an escape is 7 bytes: 4 CJK
+	// characters), so tracker state and switch notes stay bounded; vendors equal
+	// in what is kept compare equal. A longer bound would push the header list
+	// out of a switch note, which is cut at 255 characters.
 	const maxVendor = 32
 	var vb strings.Builder
 	for _, r := range vendor {
