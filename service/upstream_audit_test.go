@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1983,4 +1984,43 @@ func TestAuditSwitchNoteKeepsBackendBeforeHeaders(t *testing.T) {
 func TestBackendSignatureBoundsTheVendor(t *testing.T) {
 	assert.Equal(t, "gpt_relay/"+strings.Repeat("a", 32), backendSignature("gpt_relay", strings.Repeat("a", 150)))
 	assert.Equal(t, "gpt_relay/openrouter", backendSignature("gpt_relay", "openrouter"))
+	assert.Equal(t, "gpt_relay/"+strings.Repeat("é", 16), backendSignature("gpt_relay", strings.Repeat("é", 40)), "cut on a character boundary")
+	assert.Equal(t, "gpt_relay", backendSignature("gpt_relay", "\x00\x00"), "nothing left after sanitizing is no vendor")
+	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a b"), "one token: the watchdog splits a -> b on whitespace")
+}
+
+// Non-switch rows carry a flip as one "provider also flipped" segment without
+// the header list, and a note never ends in a cut segment: segments that do
+// not fit the 255-character column are left out whole.
+func TestAuditNoteKeepsWholeSegmentsWithinTheColumn(t *testing.T) {
+	const ch = 987706
+	isolatedAuditKey(t, ch, "gpt")
+	azure := map[string][]string{"Apim-Request-Id": {"a"}, "X-Ms-Region-Long-Header": {"r"}}
+	aws := map[string][]string{"X-Amzn-Requestid": {"b"}}
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "w-1", models: []string{"gpt-5"}, id: "chatcmpl-whole0001", headers: azure})
+	long := strings.Repeat("m", 120)
+	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "w-2", models: []string{"gpt-5", long + "-1", long + "-2"},
+		id: "chatcmpl-whole0002", headers: aws})
+	require.NotNil(t, ev)
+	assert.Equal(t, "model_mismatch", ev.Kind)
+	segs := strings.Split(ev.Note, "; ")
+	require.NotEmpty(t, segs)
+	assert.Equal(t, "provider also flipped: azure -> aws, backend: azure -> aws", segs[0], ev.Note)
+	assert.NotContains(t, ev.Note, "headers:", "the header list belongs to provider_switch rows only")
+	assert.LessOrEqual(t, utf8.RuneCountInString(ev.Note), 255)
+	for _, seg := range segs[1:] {
+		assert.True(t, strings.HasPrefix(seg, "mid_stream_change: "), "only whole segments: %q", seg)
+	}
+	assert.Len(t, segs, 1, "the 250-character model sequence does not fit and is left out whole")
+}
+
+// A websocket turn is its own path: headers seen over SSE do not flip it.
+func TestAuditWebsocketTurnIsItsOwnPath(t *testing.T) {
+	const ch = 987707
+	isolatedAuditKey(t, ch, "gpt")
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "ws-1", models: []string{"gpt-5"}, id: "resp_ws00001", stream: true,
+		handler: "openai_responses_stream", headers: map[string][]string{"Openai-Organization": {"o"}}})
+	ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: "ws-2", models: []string{"gpt-5"}, id: "resp_ws00002", stream: true,
+		handler: "responses_ws", headers: map[string][]string{"X-New-Api-Version": {"v"}}})
+	assert.NotContains(t, ursp, "src_flip")
 }

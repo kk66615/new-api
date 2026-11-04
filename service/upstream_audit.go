@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1089,12 +1090,12 @@ func backendSignature(backendShape, prefix string) string {
 	if i := strings.LastIndex(vendor, "."); i >= 0 {
 		vendor = vendor[i+1:]
 	}
+	// the prefix is upstream text: one whitespace-free token (the watchdog reads
+	// "a -> b" by whitespace) bounded so tracker state and switch notes stay bounded
+	vendor, _ = common.TruncateAuditBytes(strings.Join(strings.Fields(vendor), "_"), 32)
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
 	}
-	// the prefix is upstream text: bounded so the tracker state and the
-	// switch note (cut at 255 characters when stored) stay bounded
-	vendor, _ = common.TruncateAuditBytes(vendor, 32)
 	return backendShape + "/" + vendor
 }
 
@@ -1422,6 +1423,10 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		srcKey := key
 		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(clientStream)
+		if relayInfo.UpstreamAudit.Handler == "responses_ws" {
+			// a websocket turn is answered over another transport than SSE
+			srcKey.path += "|ws"
+		}
 		// headerSource is empty exactly when no header names a source, and a
 		// channel-type source never flips: only then is there anything to list
 		var curKeys []string
@@ -1523,9 +1528,27 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 	}
 
-	for i, seg := range notes {
-		notes[i] = auditNoteSegment(seg)
+	// The stored note is cut at 255 characters. Segments are kept whole, in
+	// order, while they fit: a cut inside one would leave a fragment the
+	// watchdog reads as a segment of its own. Only a lone first segment that
+	// is longer than the budget is cut.
+	const noteBudget = 255
+	kept, used := notes[:0], 0
+	for _, seg := range notes {
+		seg = auditNoteSegment(seg)
+		cost := utf8.RuneCountInString(seg)
+		if len(kept) > 0 {
+			cost += 2 // "; "
+		}
+		if used+cost > noteBudget {
+			if len(kept) == 0 {
+				kept = append(kept, common.TruncateAuditRunes(seg, noteBudget))
+			}
+			break
+		}
+		kept, used = append(kept, seg), used+cost
 	}
+	notes = kept
 	ev := &model.UpstreamEvidence{
 		CreatedAt:         common.GetTimestamp(),
 		Kind:              kind,
