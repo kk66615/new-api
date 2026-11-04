@@ -2,6 +2,7 @@ package service
 
 import (
 	"cmp"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1092,9 +1093,11 @@ func backendSignature(backendShape, prefix string) string {
 	}
 	// The prefix is upstream text. A vendor is written in ASCII only: no
 	// whitespace or arrows the watchdog would read as "a -> b", nothing
-	// invisible or look-alike. Any other character is spelled as its code point
-	// (u5b98), so two different vendors never collapse into one. Bounded, so
-	// tracker state and switch notes stay bounded.
+	// invisible or look-alike. Any other character is spelled as "~" and six hex
+	// digits (~005b98): '~' is never kept as itself, so every escape is
+	// unambiguous and different characters stay different. Kept to 32 bytes of
+	// whole characters, so tracker state and switch notes stay bounded (vendors
+	// equal in those 32 bytes compare equal).
 	const maxVendor = 32
 	var vb strings.Builder
 	for _, r := range vendor {
@@ -1107,7 +1110,7 @@ func backendSignature(backendShape, prefix string) string {
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			continue // invisible: dropped, so what reads the same compares the same
 		default:
-			tok = "u" + strconv.FormatInt(int64(r), 16)
+			tok = fmt.Sprintf("~%06x", r)
 		}
 		if vb.Len()+len(tok) > maxVendor {
 			break // whole characters only
