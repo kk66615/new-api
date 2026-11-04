@@ -1984,13 +1984,15 @@ func TestAuditSwitchNoteKeepsBackendBeforeHeaders(t *testing.T) {
 func TestBackendSignatureBoundsTheVendor(t *testing.T) {
 	assert.Equal(t, "gpt_relay/"+strings.Repeat("a", 32), backendSignature("gpt_relay", strings.Repeat("a", 150)))
 	assert.Equal(t, "gpt_relay/openrouter", backendSignature("gpt_relay", "openrouter"))
-	assert.Equal(t, "gpt_relay/"+strings.Repeat("é", 16), backendSignature("gpt_relay", strings.Repeat("é", 40)), "cut on a character boundary")
+	assert.Equal(t, "gpt_relay/"+strings.Repeat("_", 32), backendSignature("gpt_relay", strings.Repeat("é", 40)), "ASCII identifiers only")
 	assert.Equal(t, "gpt_relay", backendSignature("gpt_relay", "\x00\x00"), "nothing left after sanitizing is no vendor")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a b"), "one token: the watchdog splits a -> b on whitespace")
 	assert.Equal(t, "gpt_relay/ab", backendSignature("gpt_relay", "a\u200bb"), "what reads the same compares the same")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a;b"))
 	assert.Equal(t, "gpt_relay/openai-_azure", backendSignature("gpt_relay", "openai->azure"), "no arrow inside a vendor")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a\tb"), "whitespace of any kind is a separator")
+	assert.Equal(t, "gpt_relay/openai_", backendSignature("gpt_relay", "openai\ufe0f"), "a variation selector does not hide")
+	assert.Equal(t, "gpt_relay/mistral-ai", backendSignature("gpt_relay", "Mistral-AI"), "real slugs are kept (lowercased)")
 }
 
 // Non-switch rows carry a flip as one "provider also flipped" segment without
@@ -2018,6 +2020,14 @@ func TestAuditNoteFitsTheColumn(t *testing.T) {
 	}
 	require.Len(t, segs, 2, ev.Note)
 	assert.Equal(t, "mid_stream_change: gpt-5 -> "+long+"-1", segs[1], "cut after the last whole model")
+
+	// not even the first model fits: the segment is left out, never cut mid-name
+	_, ev = runAuditExchange(t, auditExchange{channelId: ch, requestId: "w-3", models: []string{strings.Repeat("p", 200), strings.Repeat("q", 200)},
+		id: "chatcmpl-whole0003", headers: azure})
+	require.NotNil(t, ev)
+	for _, seg := range strings.Split(ev.Note, "; ") {
+		assert.False(t, strings.HasPrefix(seg, "mid_stream_change: ") && !strings.Contains(seg, " -> "), "half a model: %q", seg)
+	}
 }
 
 // A websocket turn is its own path: headers seen over SSE do not flip it.

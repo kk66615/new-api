@@ -1090,18 +1090,21 @@ func backendSignature(backendShape, prefix string) string {
 	if i := strings.LastIndex(vendor, "."); i >= 0 {
 		vendor = vendor[i+1:]
 	}
-	// The prefix is upstream text: one token with no whitespace and no '<' '>'
-	// (the watchdog reads "a -> b" by whitespace and arrows), bounded so tracker
-	// state and switch notes stay bounded. Invisible characters are dropped (what
-	// reads the same compares the same); whitespace and note separators become '_'.
+	// The prefix is upstream text. Vendor slugs (openrouter, Bedrock, HF orgs)
+	// are ASCII identifiers, so that is all a vendor may be: no whitespace or
+	// arrows the watchdog would read as "a -> b", and nothing invisible or
+	// look-alike, so what reads the same compares the same. Bounded, so tracker
+	// state and switch notes stay bounded.
 	vendor = strings.Map(func(r rune) rune {
 		switch {
-		case unicode.IsSpace(r), r == ';', r == '|', r == '<', r == '>':
+		case r < 0x80 && (r == '_' || r == '.' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)):
+			return r
+		case unicode.IsSpace(r): // before the control check: a tab separates words
 			return '_'
-		case unicode.IsControl(r), unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			return -1
 		}
-		return r
+		return '_'
 	}, vendor)
 	vendor, _ = common.TruncateAuditBytes(vendor, 32)
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
@@ -1565,11 +1568,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 			if len(kept) == 0 {
 				kept = append(kept, common.TruncateAuditRunes(seg, noteBudget))
 			} else if room := noteBudget - used - 2; strings.HasPrefix(seg, midStreamPrefix) && room > len(midStreamPrefix) {
+				// never end on half a model name: cut after the last whole one, or
+				// leave the segment out when not even the first one fits
 				cut := common.TruncateAuditRunes(seg, room)
 				if i := strings.LastIndex(cut, " -> "); i > len(midStreamPrefix) {
-					cut = cut[:i] // never end on half a model name
+					kept = append(kept, cut[:i])
 				}
-				kept = append(kept, cut)
 			}
 			break
 		}
