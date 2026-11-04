@@ -1989,12 +1989,15 @@ func TestBackendSignatureBoundsTheVendor(t *testing.T) {
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a b"), "one token: the watchdog splits a -> b on whitespace")
 	assert.Equal(t, "gpt_relay/ab", backendSignature("gpt_relay", "a\u200bb"), "what reads the same compares the same")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a;b"))
+	assert.Equal(t, "gpt_relay/openai-_azure", backendSignature("gpt_relay", "openai->azure"), "no arrow inside a vendor")
+	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a\tb"), "whitespace of any kind is a separator")
 }
 
 // Non-switch rows carry a flip as one "provider also flipped" segment without
-// the header list, and a note never ends in a cut segment: segments that do
-// not fit the 255-character column are left out whole.
-func TestAuditNoteKeepsWholeSegmentsWithinTheColumn(t *testing.T) {
+// the header list, and a note fits the 255-character column: segments that do
+// not fit are left out whole, except a trailing model sequence, which is cut
+// after its last whole model.
+func TestAuditNoteFitsTheColumn(t *testing.T) {
 	const ch = 987706
 	isolatedAuditKey(t, ch, "gpt")
 	azure := map[string][]string{"Apim-Request-Id": {"a"}, "X-Ms-Region-Long-Header": {"r"}}
@@ -2014,7 +2017,7 @@ func TestAuditNoteKeepsWholeSegmentsWithinTheColumn(t *testing.T) {
 		assert.True(t, strings.HasPrefix(seg, "mid_stream_change: "), "only whole segments: %q", seg)
 	}
 	require.Len(t, segs, 2, ev.Note)
-	assert.True(t, strings.HasPrefix(segs[1], "mid_stream_change: gpt-5 -> mmm"), "the model sequence is cut, not dropped")
+	assert.Equal(t, "mid_stream_change: gpt-5 -> "+long+"-1", segs[1], "cut after the last whole model")
 }
 
 // A websocket turn is its own path: headers seen over SSE do not flip it.

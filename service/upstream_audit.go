@@ -1090,20 +1090,20 @@ func backendSignature(backendShape, prefix string) string {
 	if i := strings.LastIndex(vendor, "."); i >= 0 {
 		vendor = vendor[i+1:]
 	}
-	// the prefix is upstream text: one whitespace-free token (the watchdog reads
-	// "a -> b" by whitespace) bounded so tracker state and switch notes stay bounded
-	// invisible characters are dropped (what reads the same compares the same),
-	// note separators become '_'
+	// The prefix is upstream text: one token with no whitespace and no '<' '>'
+	// (the watchdog reads "a -> b" by whitespace and arrows), bounded so tracker
+	// state and switch notes stay bounded. Invisible characters are dropped (what
+	// reads the same compares the same); whitespace and note separators become '_'.
 	vendor = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return -1
-		}
-		if r == ';' || r == '|' {
+		switch {
+		case unicode.IsSpace(r), r == ';', r == '|', r == '<', r == '>':
 			return '_'
+		case unicode.IsControl(r), unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+			return -1
 		}
 		return r
 	}, vendor)
-	vendor, _ = common.TruncateAuditBytes(strings.Join(strings.Fields(vendor), "_"), 32)
+	vendor, _ = common.TruncateAuditBytes(vendor, 32)
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
 	}
@@ -1548,8 +1548,8 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 
 	// The stored note is cut at 255 characters. Segments are kept whole, in
 	// order, while they fit: a cut inside one would leave a fragment the
-	// watchdog reads as a segment of its own. Only a lone first segment that
-	// is longer than the budget is cut.
+	// watchdog reads as a segment of its own. Only a lone first segment, or a
+	// trailing model sequence (cut after its last whole model), is shortened.
 	const noteBudget = 255
 	kept, used := notes[:0], 0
 	for _, seg := range notes {
@@ -1565,7 +1565,11 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 			if len(kept) == 0 {
 				kept = append(kept, common.TruncateAuditRunes(seg, noteBudget))
 			} else if room := noteBudget - used - 2; strings.HasPrefix(seg, midStreamPrefix) && room > len(midStreamPrefix) {
-				kept = append(kept, common.TruncateAuditRunes(seg, room))
+				cut := common.TruncateAuditRunes(seg, room)
+				if i := strings.LastIndex(cut, " -> "); i > len(midStreamPrefix) {
+					cut = cut[:i] // never end on half a model name
+				}
+				kept = append(kept, cut)
 			}
 			break
 		}
