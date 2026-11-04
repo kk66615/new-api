@@ -1092,6 +1092,17 @@ func backendSignature(backendShape, prefix string) string {
 	}
 	// the prefix is upstream text: one whitespace-free token (the watchdog reads
 	// "a -> b" by whitespace) bounded so tracker state and switch notes stay bounded
+	// invisible characters are dropped (what reads the same compares the same),
+	// note separators become '_'
+	vendor = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return -1
+		}
+		if r == ';' || r == '|' {
+			return '_'
+		}
+		return r
+	}, vendor)
 	vendor, _ = common.TruncateAuditBytes(strings.Join(strings.Fields(vendor), "_"), 32)
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
@@ -1510,7 +1521,14 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 			// the watchdog alerts on these: the log row itself reads as a
 			// zero-billed success. The upstream-controlled code stays short.
 			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
-			code, _ := common.TruncateAuditBytes(auditNoteSegment(cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown")), 64)
+			// it reaches a phone alert: an identifier, nothing that reads as prose
+			code := strings.Map(func(r rune) rune {
+				if r < 0x80 && (r == '_' || r == '.' || r == ':' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+					return r
+				}
+				return '_'
+			}, cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown"))
+			code, _ = common.TruncateAuditBytes(code, 64)
 			notes = append(notes, "stream_failed: "+code)
 		}
 		if emptyStream {
@@ -1541,8 +1559,13 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 			cost += 2 // "; "
 		}
 		if used+cost > noteBudget {
+			// a lone first segment, or a trailing model sequence, is cut instead of
+			// dropped: either still starts with its own prefix
+			const midStreamPrefix = "mid_stream_change: "
 			if len(kept) == 0 {
 				kept = append(kept, common.TruncateAuditRunes(seg, noteBudget))
+			} else if room := noteBudget - used - 2; strings.HasPrefix(seg, midStreamPrefix) && room > len(midStreamPrefix) {
+				kept = append(kept, common.TruncateAuditRunes(seg, room))
 			}
 			break
 		}

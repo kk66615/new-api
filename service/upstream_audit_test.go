@@ -1893,8 +1893,8 @@ func TestAuditFailedStreamNote(t *testing.T) {
 	}{
 		{"type when there is no code", auditExchange{id: "resp_a", streamFailType: "server_error"}, "stream_failed: server_error"},
 		{"unknown when there is neither", auditExchange{id: "resp_e", streamFailBare: true}, "stream_failed: unknown"},
-		{"upstream code cannot forge note segments", auditExchange{id: "resp_b", streamFail: "x; signals: dup_id\nFAKE " + strings.Repeat("y", 80)},
-			"stream_failed: x_ signals: dup_id_FAKE " + strings.Repeat("y", 64-len("x_ signals: dup_id_FAKE "))},
+		{"upstream code is reduced to an identifier", auditExchange{id: "resp_b", streamFail: "x; signals: dup_id\nok -> official " + strings.Repeat("y", 80)},
+			"stream_failed: x__signals:_dup_id_ok_-__official_" + strings.Repeat("y", 64-len("x__signals:_dup_id_ok_-__official_"))},
 		{"an error-only stream still leaves a row", auditExchange{bare: true, streamFail: "503"}, "stream_failed: 503"},
 		{"bidi and zero-width characters are replaced", auditExchange{id: "resp_d", streamFail: "a\u202eb\u200bc\u2028d"}, "stream_failed: a_b_c_d"},
 		{"an error attempt is labelled as such only", auditExchange{id: "resp_c", streamFail: "503", errorType: "upstream_error"}, "error: upstream_error"},
@@ -1987,6 +1987,8 @@ func TestBackendSignatureBoundsTheVendor(t *testing.T) {
 	assert.Equal(t, "gpt_relay/"+strings.Repeat("é", 16), backendSignature("gpt_relay", strings.Repeat("é", 40)), "cut on a character boundary")
 	assert.Equal(t, "gpt_relay", backendSignature("gpt_relay", "\x00\x00"), "nothing left after sanitizing is no vendor")
 	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a b"), "one token: the watchdog splits a -> b on whitespace")
+	assert.Equal(t, "gpt_relay/ab", backendSignature("gpt_relay", "a\u200bb"), "what reads the same compares the same")
+	assert.Equal(t, "gpt_relay/a_b", backendSignature("gpt_relay", "a;b"))
 }
 
 // Non-switch rows carry a flip as one "provider also flipped" segment without
@@ -2011,7 +2013,8 @@ func TestAuditNoteKeepsWholeSegmentsWithinTheColumn(t *testing.T) {
 	for _, seg := range segs[1:] {
 		assert.True(t, strings.HasPrefix(seg, "mid_stream_change: "), "only whole segments: %q", seg)
 	}
-	assert.Len(t, segs, 1, "the 250-character model sequence does not fit and is left out whole")
+	require.Len(t, segs, 2, ev.Note)
+	assert.True(t, strings.HasPrefix(segs[1], "mid_stream_change: gpt-5 -> mmm"), "the model sequence is cut, not dropped")
 }
 
 // A websocket turn is its own path: headers seen over SSE do not flip it.
