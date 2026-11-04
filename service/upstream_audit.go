@@ -1092,6 +1092,9 @@ func backendSignature(backendShape, prefix string) string {
 	if backendShape == "" || backendShape == "unknown" || vendor == "" || vendor == "models" {
 		return backendShape
 	}
+	// the prefix is upstream text: bounded so the tracker state and the
+	// switch note (cut at 255 characters when stored) stay bounded
+	vendor, _ = common.TruncateAuditBytes(vendor, 32)
 	return backendShape + "/" + vendor
 }
 

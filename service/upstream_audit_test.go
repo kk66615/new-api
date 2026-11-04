@@ -1977,3 +1977,10 @@ func TestAuditSwitchNoteKeepsBackendBeforeHeaders(t *testing.T) {
 	assert.LessOrEqual(t, len(segs[2]), 96)
 	assert.LessOrEqual(t, len(ev.Note), 255)
 }
+
+// The vendor segment comes from the upstream's model prefix: it is bounded, so
+// a switch note with both segments and a header list still fits 255 characters.
+func TestBackendSignatureBoundsTheVendor(t *testing.T) {
+	assert.Equal(t, "gpt_relay/"+strings.Repeat("a", 32), backendSignature("gpt_relay", strings.Repeat("a", 150)))
+	assert.Equal(t, "gpt_relay/openrouter", backendSignature("gpt_relay", "openrouter"))
+}
