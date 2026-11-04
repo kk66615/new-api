@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/audit_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 
@@ -680,6 +681,8 @@ type auditExchange struct {
 	handler     string
 	useChannels []string
 	errorType   string
+	format      types.RelayFormat
+	streamFail  string // upstream failure code delivered inside a 200 stream
 }
 
 // runAuditExchange feeds one exchange through appendUpstreamResponseAudit and
@@ -710,6 +713,7 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 		StartTime:     time.Now().Add(-x.elapsed),
 		IsStream:      x.stream,
 		IsChannelTest: x.channelTest,
+		RelayFormat:   x.format,
 		ChannelMeta: &relaycommon.ChannelMeta{
 			UpstreamModelName: x.sent, ChannelId: x.channelId, ChannelType: 1,
 			ChannelIsMultiKey: x.multiKey, ChannelMultiKeyIndex: x.keyIndex,
@@ -717,6 +721,10 @@ func runAuditExchange(t *testing.T, x auditExchange) (map[string]any, *model.Ups
 	}
 	if !x.startedAt.IsZero() {
 		info.StartTime = x.startedAt
+	}
+	if x.streamFail != "" {
+		info.StreamStatus = relaycommon.NewStreamStatus()
+		info.StreamStatus.MarkFailed(x.streamFail, "invalid_request_error", 0)
 	}
 	info.SetEstimatePromptTokens(x.estimate)
 	info.MarkUpstreamObserver(x.handler)
@@ -1799,4 +1807,61 @@ func TestTrackBackendFlipEvidenceForAnotherVendorAfterLost(t *testing.T) {
 	ev := trackBackendFlip(key, "aws", BackendByBody, nil)
 	assert.Equal(t, "azure->aws", ev.flip)
 	assert.Equal(t, "backend: azure -> aws (after evidence lost)", ev.note)
+}
+
+// A relay that passes the vendor's headers through on one path and strips
+// them on another (#172: non-stream with x-goog-*, stream without) is not
+// switching on every alternation; the same change on one path still is.
+func TestAuditSourceTrackerComparesEachPathWithItself(t *testing.T) {
+	const ch = 987673
+	isolatedAuditKey(t, ch, "gemini")
+	google := map[string][]string{"X-Goog-Request-Id": {"g"}, "X-New-Api-Version": {"v0.0.0"}}
+	relay := map[string][]string{"X-New-Api-Version": {"v0.0.0"}}
+	run := func(req string, stream bool, format types.RelayFormat, headers map[string][]string) (map[string]any, *model.UpstreamEvidence) {
+		return runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "gemini-3-flash-preview",
+			models: []string{"gemini-3-flash-preview"}, id: "resp-" + req + "-0001", stream: stream, format: format, headers: headers})
+	}
+
+	for i, x := range []struct {
+		stream  bool
+		headers map[string][]string
+	}{{false, google}, {true, relay}, {false, google}, {true, relay}} {
+		ursp, ev := run("alt-"+strconv.Itoa(i), x.stream, types.RelayFormatGemini, x.headers)
+		assert.NotContains(t, ursp, "src_flip", "alternating paths %d", i)
+		assert.Equal(t, "normal", ev.Kind)
+	}
+	ursp, _ := run("fmt-1", false, types.RelayFormatOpenAI, relay)
+	assert.NotContains(t, ursp, "src_flip", "another request format is another path")
+
+	// the vendor headers disappear on the path that always carried them
+	ursp, ev := run("gone-1", false, types.RelayFormatGemini, relay)
+	assert.Equal(t, "google->newapi_relay", ursp["src_flip"])
+	assert.Equal(t, "provider_switch", ev.Kind)
+}
+
+// response.failed inside a 200 stream (#194: placeholder ids resp_pv_503,
+// no model) is recorded for the watchdog but moves no switch tracker and no
+// replay memory.
+func TestAuditFailedStreamFeedsNoTrackers(t *testing.T) {
+	const ch = 987701
+	isolatedAuditKey(t, ch, "glm")
+	official := map[string][]string{"Openai-Organization": {"org-x"}}
+	ok := func(req string) map[string]any {
+		ursp, _ := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "glm-5.3", models: []string{"z-ai/glm-5.3"},
+			id: "chatcmpl-" + req + "-0001", stream: true, headers: official})
+		return ursp
+	}
+	ok("ok-1")
+	for _, req := range []string{"fail-1", "fail-2"} {
+		ursp, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: req, sent: "glm-5.3",
+			id: "resp_pv_invalid_request", stream: true, streamFail: "invalid_request"})
+		assert.NotContains(t, ursp, "src_flip")
+		assert.NotContains(t, ursp, "backend_flip")
+		assert.NotContains(t, ursp, "dup_id", "a failure placeholder id is not a replayed answer")
+		assert.Equal(t, "normal", ev.Kind)
+		assert.Equal(t, "stream_failed: invalid_request", ev.Note)
+	}
+	ursp := ok("ok-2")
+	assert.NotContains(t, ursp, "src_flip", "the failures must not have moved the tracker")
+	assert.NotContains(t, ursp, "backend_flip")
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"regexp"
 	"slices"
 	"strconv"
@@ -779,6 +780,9 @@ type flipTrackerKey struct {
 	channelId int
 	family    string
 	keyIndex  int
+	// path partitions the source tracker only (see its call site); the
+	// backend tracker leaves it empty.
+	path string
 }
 
 type channelSrcState struct {
@@ -1236,7 +1240,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		channelType = relayInfo.ChannelMeta.ChannelType
 	}
 	channelTest := relayInfo.IsChannelTest
-	feedTrackers := !failed && !channelTest
+	// A stream that ended in an upstream failure (Responses response.failed)
+	// is not an error attempt here, yet its frames describe the failure, not
+	// the backend, and its placeholder ids (resp_pv_503) repeat across
+	// requests: it feeds neither the switch trackers nor the replay memory.
+	streamFailed := !failed && relayInfo.StreamStatus.ResponseFailed()
+	feedTrackers := !failed && !streamFailed && !channelTest
 
 	// ccmax evidence: a visible injection labels this request; the channel
 	// becomes sticky only after repeated evidence (see ccmaxObserve)
@@ -1341,7 +1350,14 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	// that carry no vendor evidence (see trackBackendFlip)
 	backendSig := backendSignature(backend, respPrefix)
 	if feedTrackers {
-		from, flipped = trackSourceFlip(key, src)
+		// The source comes from response headers, and a relay can pass the
+		// vendor's headers through on one path and strip them on another
+		// (non-stream with x-goog-*, stream without). Each path is compared
+		// only with its own history, so a change on a path is still reported
+		// once while the difference between paths never is.
+		srcKey := key
+		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(relayInfo.IsStream)
+		from, flipped = trackSourceFlip(srcKey, src)
 		if flipped {
 			ursp["src_flip"] = from + "->" + src
 		}
@@ -1368,7 +1384,7 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 	if ctx != nil {
 		requestId = ctx.GetString(common.RequestIdKey)
 	}
-	signals := evaluateReplaySignals(relayInfo, channelId, requestId, !failed, feedTrackers)
+	signals := evaluateReplaySignals(relayInfo, channelId, requestId, !failed && !streamFailed, feedTrackers)
 	signals.apply(ursp)
 	// root-only projection: LogOther strips root_info for admin and user
 	// readers alike (user decision 2026-09-19: upstream-declared model data
@@ -1405,6 +1421,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		if failed {
 			notes = append(notes, "error: "+errorType)
+		}
+		if streamFailed {
+			// the watchdog alerts on these: the log row itself reads as a
+			// zero-billed success
+			outcome := relayInfo.StreamStatus.OutcomeSnapshot()
+			notes = append(notes, "stream_failed: "+cmp.Or(outcome.ErrorCode, outcome.ErrorType, "unknown"))
 		}
 		if emptyStream {
 			skipped, _ := relayInfo.StreamStatus.SkippedLines()
