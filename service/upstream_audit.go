@@ -1419,7 +1419,12 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 		srcKey := key
 		srcKey.path = string(relayInfo.GetFinalRequestRelayFormat()) + "|" + strconv.FormatBool(clientStream)
-		curKeys := sourceHeaderKeys(channelType, responseHeaders)
+		// headerSource is empty exactly when no header names a source, and a
+		// channel-type source never flips: only then is there anything to list
+		var curKeys []string
+		if headerSource != "" && channelTypeBackend(channelType) == "" {
+			curKeys = sourceHeaderKeys(channelType, responseHeaders)
+		}
 		var prevKeys []string
 		from, prevKeys, flipped = trackSourceFlip(srcKey, src, curKeys)
 		if flipped {
@@ -1432,16 +1437,19 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		}
 	}
 	// one evidence row per exchange: a source flip and a backend event on the
-	// same answer share it, as segments of one note
+	// same answer share it, as segments of one note. The note is cut at 255
+	// characters when stored, so the bounded change segments come first and the
+	// header list, the only open-ended part, comes last and is capped itself.
 	var flipSegs []string
 	if flipped {
 		flipSegs = append(flipSegs, from+" -> "+src)
-		if headerChange != "" {
-			flipSegs = append(flipSegs, "headers: "+headerChange)
-		}
 	}
 	if backendEvent.note != "" {
 		flipSegs = append(flipSegs, backendEvent.note)
+	}
+	headersSeg := ""
+	if flipped && headerChange != "" {
+		headersSeg, _ = common.TruncateAuditBytes("headers: "+headerChange, 96)
 	}
 	flipped = flipped || backendEvent.flip != ""
 
@@ -1472,6 +1480,9 @@ func appendUpstreamResponseAudit(ctx *gin.Context, relayInfo *relaycommon.RelayI
 		// exactly the flip: the watchdog groups on the "a -> b" segments and
 		// renders the headers segment separately
 		notes = append(notes, flipSegs...)
+		if headersSeg != "" {
+			notes = append(notes, headersSeg)
+		}
 	} else {
 		// the trigger reasons come first so the 255-char cut never drops
 		// them; the watchdog's notification text is built from the note

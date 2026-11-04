@@ -1953,3 +1953,27 @@ func TestAuditNoteSegmentsAreSanitized(t *testing.T) {
 	assert.Equal(t, "model_mismatch", ev.Kind)
 	assert.Equal(t, "mid_stream_change: gpt-5 -> evil_signals: replay_x_y_z", ev.Note)
 }
+
+// The note is cut at 255 characters when stored: a long header list must never
+// push the backend segment out (review: anthropic-ratelimit-* lists reached 389).
+func TestAuditSwitchNoteKeepsBackendBeforeHeaders(t *testing.T) {
+	const ch = 987705
+	isolatedAuditKey(t, ch, "gpt")
+	azure := map[string][]string{"Apim-Request-Id": {"a"}}
+	aws := map[string][]string{"X-Amzn-Requestid": {"b"}}
+	for i := range 6 {
+		azure["X-Ms-Region-"+strings.Repeat("long-header-name-", 2)+strconv.Itoa(i)] = []string{"v"}
+		aws["X-Amz-Bedrock-"+strings.Repeat("long-header-name-", 2)+strconv.Itoa(i)] = []string{"v"}
+	}
+	runAuditExchange(t, auditExchange{channelId: ch, requestId: "h-1", models: []string{"gpt-5"}, id: "chatcmpl-hdr00001", headers: azure})
+	_, ev := runAuditExchange(t, auditExchange{channelId: ch, requestId: "h-2", models: []string{"gpt-5"}, id: "chatcmpl-hdr00002", headers: aws})
+	require.NotNil(t, ev)
+	assert.Equal(t, "provider_switch", ev.Kind)
+	segs := strings.Split(ev.Note, "; ")
+	require.Len(t, segs, 3, ev.Note)
+	assert.Equal(t, "azure -> aws", segs[0])
+	assert.Equal(t, "backend: azure -> aws", segs[1])
+	assert.True(t, strings.HasPrefix(segs[2], "headers: -apim-request-id -x-ms-region-"), ev.Note)
+	assert.LessOrEqual(t, len(segs[2]), 96)
+	assert.LessOrEqual(t, len(ev.Note), 255)
+}
