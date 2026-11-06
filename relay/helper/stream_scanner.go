@@ -410,22 +410,18 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
-			if len(data) < 6 {
-				info.StreamStatus.ObserveSkippedLine(data)
-				continue
-			}
-			if data[:5] != "data:" && data[:6] != "[DONE]" {
-				info.StreamStatus.ObserveSkippedLine(data)
-				continue
-			}
 			line := data
-			data = data[5:]
+			data, hasDataPrefix := strings.CutPrefix(data, "data:")
 			data = strings.TrimSpace(data)
+			if !hasDataPrefix && data != "[DONE]" {
+				info.StreamStatus.ObserveSkippedLine(line)
+				continue
+			}
 			if data == "" {
 				info.StreamStatus.ObserveSkippedLine(line)
 				continue
 			}
-			if !strings.HasPrefix(data, "[DONE]") {
+			if data != "[DONE]" {
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
 				info.StreamStatus.ObserveDataEvent()
