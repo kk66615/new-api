@@ -701,6 +701,8 @@ func TestEmptyUpstreamStreamError(t *testing.T) {
 		{name: "no bytes", body: "", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF},
 		{name: "keepalive comments only", body: ": PING\n\n: PING\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 2, wantExcerpt: ": PING"},
 		{name: "bare done", body: "data: [DONE]\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonDone},
+		{name: "done without data prefix", body: "[DONE]\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonDone},
+		{name: "malformed done without data prefix", body: "[DONE]x\n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 1, wantExcerpt: "[DONE]x"},
 		{name: "empty data payload", body: "data: \n\n", wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 1, wantExcerpt: "data: "},
 		{name: "non-SSE error body", body: `{"error":{"message":"busy"}}`, wantEmpty: true, wantEnd: relaycommon.StreamEndReasonEOF, wantSkipped: 1, wantExcerpt: `{"error":{"message":"busy"}}`},
 		{name: "one data event", body: "data: {\"id\":1}\n\n"},
