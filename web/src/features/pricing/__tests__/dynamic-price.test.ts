@@ -316,6 +316,44 @@ describe('task dynamic pricing', () => {
     assert.equal(getBillingModeLabelKey(countModel), 'Task billing')
   })
 
+  test('treats a withheld expression as unconfigured instead of pricing by legacy fields', () => {
+    for (const legacy of [
+      { quota_type: 0, model_ratio: 37.5 },
+      { quota_type: 1, model_price: 0.5 },
+    ]) {
+      const model = pricingModel({
+        billing_mode: 'tiered_expr',
+        billing_expr: '',
+        ...legacy,
+      })
+
+      assert.equal(isUnconfiguredTaskUsageModel(model), true)
+      assert.equal(getDynamicPricingSummary(model, summaryOptions), null)
+    }
+  })
+
+  test('prices a server-folded group expression like the same expression without the group condition', () => {
+    const peak =
+      '(hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12 ? 2 : 1)'
+    const written = pricingModel({
+      billing_mode: 'tiered_expr',
+      billing_expr: `(tier("base", p * 1 + c * 4 + cr * 0.02)) * ${peak}`,
+    })
+    const folded = pricingModel({
+      billing_mode: 'tiered_expr',
+      billing_expr: `tier("base", p * 1 + c * 4 + cr * 0.02) * ${peak}`,
+    })
+
+    const summary = getDynamicPricingSummary(folded, summaryOptions)
+    const expected = getDynamicPricingSummary(written, summaryOptions)
+    assert.ok(summary)
+    assert.ok(expected)
+    assert.deepEqual(
+      { ...summary, rawExpression: '' },
+      { ...expected, rawExpression: '' }
+    )
+  })
+
   test('does not mark configured task usage pricing as unconfigured', () => {
     const model = pricingModel({
       billing_mode: 'tiered_expr',

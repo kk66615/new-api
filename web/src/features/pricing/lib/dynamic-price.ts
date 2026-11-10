@@ -167,6 +167,9 @@ export function isUnconfiguredTaskUsageModel(model: PricingModel): boolean {
         : !variant.billing_expr
     )
   }
+  // The server withholds an expression it cannot show to this viewer; the
+  // legacy ratio and per-request fields say nothing about such a model's price.
+  if (model.billing_mode === 'tiered_expr' && !model.billing_expr) return true
   return (
     model.quota_type !== 1 &&
     hasTaskUsageSchema(model) &&

@@ -3,6 +3,7 @@ package billingexpr_test
 import (
 	"math"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -1078,6 +1079,73 @@ func TestLen_StandardTier(t *testing.T) {
 	}
 	if trace.MatchedTier != "standard" {
 		t.Errorf("tier = %q, want standard", trace.MatchedTier)
+	}
+}
+
+func TestHideGroupsRemovesHiddenNamesAndKeepsVisiblePrices(t *testing.T) {
+	hidden := []string{"night", "staff", "谷价国模", "ai", ""}
+	const base = `tier("base", p * 1 + c * 4)`
+	const fast = `param("fast") == true`
+	const peak = `hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12`
+	for _, tc := range []struct {
+		name       string
+		expression string
+		want       string
+	}{
+		{"leading condition of a chain", `(` + base + `) * (group != "谷价国模" && ` + peak + ` ? 2 : 1)`, base + ` * (` + peak + ` ? 2 : 1)`},
+		{"trailing condition", base + ` * (` + fast + ` && group != 'night' ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"reversed operands and keyword operator", base + ` * ("night" != group and ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"alternative that never matches", base + ` * (group == "night" || ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"two hidden groups", base + ` * (group != "night" && group != "staff" && ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"parenthesized and negated condition", base + ` * (!(group == "night") && ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"word right after the condition", base + ` * (c > 0 and group != "night"or (p > 0) ? 2 : 1)`, base + ` * (c > 0 or p > 0 ? 2 : 1)`},
+		{"condition on its own keeps the visible branch", base + ` * (group == "night" ? 1 : 2)`, base + ` * 2`},
+		{"hidden branch goes with its tier name", `group == "night" ? tier("night-rate", p * 0.5) : ` + base, base},
+		{"membership list", base + ` * (group in ["vip", "night"] ? 1 : 2)`, base + ` * (group in ["vip"] ? 1 : 2)`},
+		{"membership list of hidden groups only", base + ` * (group not in ["night", "staff"] && ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"comment is dropped with the condition", "/* night stays cheap */ " + base + ` * (group != "night" && ` + fast + ` ? 2 : 1)`, base + ` * (` + fast + ` ? 2 : 1)`},
+		{"comment alone", "/* night users take another model */ " + base, base},
+		{"visible group and version prefix stay", `v1:` + base + ` * (group != "vip" && group != "night" ? 2 : 1)`, `v1:` + base + ` * (group != "vip" ? 2 : 1)`},
+		{"visible name containing a hidden one is kept verbatim", `(` + base + `) * (group != "main" && ` + fast + ` ? 2 : 1)`, `(` + base + `) * (group != "main" && ` + fast + ` ? 2 : 1)`},
+		{"time zone containing a hidden name is kept verbatim", `(` + base + `) * (` + peak + ` ? 2 : 1)`, `(` + base + `) * (` + peak + ` ? 2 : 1)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := billingexpr.HideGroups(tc.expression, hidden)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, got)
+			for _, group := range []string{"default", "vip", "main"} {
+				for _, body := range []string{`{"fast":true}`, `{}`} {
+					request := billingexpr.RequestInput{Group: group, Body: []byte(body)}
+					params := billingexpr.TokenParams{P: 1000, C: 500}
+					original, _, err := billingexpr.RunExprWithRequest(tc.expression, params, request)
+					require.NoError(t, err)
+					shown, _, err := billingexpr.RunExprWithRequest(got, params, request)
+					require.NoError(t, err)
+					if !strings.Contains(tc.expression, "hour(") {
+						assert.Equal(t, original, shown, "group %s body %s", group, body)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHideGroupsWithholdsExpressionsItCannotClean(t *testing.T) {
+	for name, expression := range map[string]string{
+		"prefix match":                `tier("base", p * 1) * (group startsWith "night" ? 1 : 2)`,
+		"name inside a pattern":       `tier("base", p * 1) * (group matches "^(night|staff)$" ? 1 : 2)`,
+		"name inside a searched text": `tier("base", p * 1) * ("night,staff" contains group ? 1 : 2)`,
+		"name inside a helper call":   `tier("base", p * 1) * (has("night,staff", group) ? 1 : 2)`,
+		"name as a variable":          `let night = group == "night"; tier("base", p * 1) * (night ? 1 : 2)`,
+		"name as a visible tier":      `tier("night", p * 1) * (group != "night" && c > 0 ? 2 : 1)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := billingexpr.CompileFromCache(expression)
+			require.NoError(t, err, "the case must be an expression an administrator can save")
+			shown, ok := billingexpr.HideGroups(expression, []string{"night"})
+			assert.False(t, ok)
+			assert.Empty(t, shown)
+		})
 	}
 }
 

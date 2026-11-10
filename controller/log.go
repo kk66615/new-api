@@ -88,6 +88,10 @@ func GetUserLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	hiddenGroups := requesterHiddenGroups(c)
+	for _, log := range logs {
+		hideGroupsInLog(log, hiddenGroups)
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
@@ -139,8 +143,14 @@ func exportLogs(c *gin.Context, all bool) {
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(http.StatusOK)
 
+	// The administrator export keeps every log as stored.
+	var hiddenGroups []string
+	if !all {
+		hiddenGroups = requesterHiddenGroups(c)
+	}
 	count := 0
 	writeLog := func(log *model.Log) error {
+		hideGroupsInLog(log, hiddenGroups)
 		line, err := common.Marshal(log)
 		if err != nil {
 			return err
@@ -192,6 +202,11 @@ func GetLogByKey(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+	// A token key proves no role, so its reader is treated as an ordinary user.
+	hiddenGroups := hiddenGroupsOutside(requesterUsableGroups(c))
+	for _, log := range logs {
+		hideGroupsInLog(log, hiddenGroups)
 	}
 	c.JSON(200, gin.H{
 		"success": true,

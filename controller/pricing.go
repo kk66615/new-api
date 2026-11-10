@@ -2,16 +2,21 @@ package controller
 
 import (
 	"maps"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 )
 
-func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string]string) []model.Pricing {
+// filterPricingByUsableGroups keeps the models the viewer can use. Groups the
+// viewer cannot use are hidden from each model, by name and in its expression,
+// unless showHiddenGroups is set (administrators).
+func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string]string, showHiddenGroups bool) []model.Pricing {
 	if len(pricing) == 0 {
 		return pricing
 	}
@@ -21,16 +26,42 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 
 	filtered := make([]model.Pricing, 0, len(pricing))
 	for _, item := range pricing {
-		if common.StringsContains(item.EnableGroup, "all") {
-			filtered = append(filtered, item)
-			continue
-		}
+		// item is a copy of the shared pricing cache entry; assign a fresh
+		// slice so the cached EnableGroup is never mutated across requests.
+		usableEnableGroups := make([]string, 0, len(item.EnableGroup))
 		for _, group := range item.EnableGroup {
-			if _, ok := usableGroup[group]; ok {
-				filtered = append(filtered, item)
-				break
+			if _, ok := usableGroup[group]; ok || group == "all" {
+				usableEnableGroups = append(usableEnableGroups, group)
 			}
 		}
+		if len(usableEnableGroups) == 0 {
+			continue
+		}
+		if !showHiddenGroups {
+			item.EnableGroup = usableEnableGroups
+		}
+		filtered = append(filtered, item)
+	}
+	if showHiddenGroups {
+		return filtered
+	}
+	// A group condition in an expression names its group, so show each
+	// expression as it applies to the groups this viewer can use.
+	hiddenGroups := hiddenGroupsOutside(usableGroup)
+	if len(hiddenGroups) == 0 {
+		return filtered
+	}
+	for i := range filtered {
+		// An expression that cannot be shown without a hidden name is withheld.
+		filtered[i].BillingExpr, _ = billingexpr.HideGroups(filtered[i].BillingExpr, hiddenGroups)
+		if len(filtered[i].BillingPluginVariants) == 0 {
+			continue
+		}
+		variants := slices.Clone(filtered[i].BillingPluginVariants)
+		for j := range variants {
+			variants[j].BillingExpr, _ = billingexpr.HideGroups(variants[j].BillingExpr, hiddenGroups)
+		}
+		filtered[i].BillingPluginVariants = variants
 	}
 	return filtered
 }
@@ -56,7 +87,7 @@ func GetPricing(c *gin.Context) {
 	}
 
 	usableGroup = service.GetUserUsableGroups(group)
-	pricing = filterPricingByUsableGroups(pricing, usableGroup)
+	pricing = filterPricingByUsableGroups(pricing, usableGroup, requesterSeesAllGroups(c))
 	// check groupRatio contains usableGroup
 	for group := range ratio_setting.GetGroupRatioCopy() {
 		if _, ok := usableGroup[group]; !ok {
