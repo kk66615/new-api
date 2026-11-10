@@ -1176,3 +1176,132 @@ func TestSamePriceCacheReadsRemainInInput(t *testing.T) {
 		})
 	}
 }
+
+// Off-peak group is billed at half the price of every other group.
+const groupExpr = `group == "offpeak" ? tier("offpeak", p) : tier("peak", p * 2)`
+
+func makeGroupRelayInfo(estimatedGroup, usingGroup string) *relaycommon.RelayInfo {
+	info := makeRelayInfo(groupExpr, 1, 1_000_000, 0)
+	cost, trace, err := billingexpr.RunExprWithRequest(groupExpr, billingexpr.TokenParams{P: 1_000_000}, billingexpr.RequestInput{Group: estimatedGroup})
+	if err != nil {
+		panic(err)
+	}
+	info.TieredBillingSnapshot.EstimatedQuotaBeforeGroup = cost / 1_000_000 * testQuotaPerUnit
+	info.TieredBillingSnapshot.EstimatedQuotaAfterGroup = billingexpr.QuotaRound(info.TieredBillingSnapshot.EstimatedQuotaBeforeGroup)
+	info.TieredBillingSnapshot.EstimatedTier = trace.MatchedTier
+	info.FinalPreConsumedQuota = info.TieredBillingSnapshot.EstimatedQuotaAfterGroup
+	info.BillingRequestInput = &billingexpr.RequestInput{Group: estimatedGroup}
+	info.UsingGroup = usingGroup
+	info.PriceData = types.PriceData{GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1}}
+	return info
+}
+
+func TestTryTieredSettleUsesSelectedGroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		group     string
+		wantTier  string
+		wantQuota int
+	}{
+		{name: "offpeak group", group: "offpeak", wantTier: "offpeak", wantQuota: 500_000},
+		{name: "other group", group: "default", wantTier: "peak", wantQuota: 1_000_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Settlement follows the current group even if the frozen input lags.
+			info := makeGroupRelayInfo("stale", tt.group)
+
+			ok, quota, result := TryTieredSettle(info, billingexpr.TokenParams{P: 1_000_000})
+
+			require.True(t, ok)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.wantQuota, quota)
+			assert.Equal(t, tt.wantTier, result.MatchedTier)
+		})
+	}
+}
+
+func TestPrepareTieredBillingForSelectedGroupReestimatesGroupPrice(t *testing.T) {
+	t.Run("cheaper group keeps the reservation", func(t *testing.T) {
+		info := makeGroupRelayInfo("default", "offpeak")
+		billing := &recordingBillingSettler{preConsumedQuota: 1_000_000}
+		info.Billing = billing
+
+		require.Nil(t, PrepareTieredBillingForSelectedGroup(nil, info))
+
+		snap := info.TieredBillingSnapshot
+		assert.Equal(t, "offpeak", info.BillingRequestInput.Group)
+		assert.Equal(t, "offpeak", snap.EstimatedTier)
+		assert.Equal(t, 500_000, snap.EstimatedQuotaAfterGroup)
+		// Reserve only raises; the surplus is refunded at settlement.
+		assert.Equal(t, 1_000_000, billing.preConsumedQuota)
+
+		ok, quota, _ := TryTieredSettle(info, billingexpr.TokenParams{P: 1_000_000})
+		require.True(t, ok)
+		assert.Equal(t, 500_000, quota)
+	})
+
+	t.Run("pricier group raises the reservation", func(t *testing.T) {
+		info := makeGroupRelayInfo("offpeak", "default")
+		billing := &recordingBillingSettler{preConsumedQuota: 500_000}
+		info.Billing = billing
+
+		require.Nil(t, PrepareTieredBillingForSelectedGroup(nil, info))
+
+		assert.Equal(t, "peak", info.TieredBillingSnapshot.EstimatedTier)
+		assert.Equal(t, []int{1_000_000}, billing.reserveTargets)
+		assert.Equal(t, 1_000_000, info.FinalPreConsumedQuota)
+	})
+
+	t.Run("token estimate keeps the pre-consume multiplier", func(t *testing.T) {
+		info := makeGroupRelayInfo("default", "offpeak")
+		info.TieredBillingSnapshot.PreConsumeMultiplier = 2
+		info.Billing = &recordingBillingSettler{preConsumedQuota: 2_000_000}
+
+		require.Nil(t, PrepareTieredBillingForSelectedGroup(nil, info))
+
+		assert.Equal(t, 1_000_000.0, info.TieredBillingSnapshot.EstimatedQuotaBeforeGroup)
+		assert.Equal(t, 1_000_000, info.TieredBillingSnapshot.EstimatedQuotaAfterGroup)
+	})
+
+	t.Run("request-priced group ignores the multiplier and bills per image", func(t *testing.T) {
+		const expr = `(group == "flat" ? tier("flat", fixed(0.04)) : tier("tokens", p * 2)) * image_count`
+		imageCount := 3
+		snap := makeSnapshot(expr, 1, 1_000_000, 0)
+		snap.PreConsumeMultiplier = 2
+		snap.EstimatedImageCount = &imageCount
+		snap.EstimatedBillingUnit = billingexpr.BillingUnitToken
+		billing := &recordingBillingSettler{}
+		info := &relaycommon.RelayInfo{
+			TieredBillingSnapshot: snap,
+			BillingRequestInput:   &billingexpr.RequestInput{Group: "default"},
+			Billing:               billing,
+			PriceData:             types.PriceData{GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1}},
+		}
+		info.UsingGroup = "flat"
+
+		require.Nil(t, PrepareTieredBillingForSelectedGroup(nil, info))
+
+		assert.Equal(t, billingexpr.BillingUnitRequest, snap.EstimatedBillingUnit)
+		require.NotNil(t, snap.EstimatedFixedPrice)
+		assert.Equal(t, 0.04, *snap.EstimatedFixedPrice)
+		assert.Equal(t, "flat", snap.EstimatedTier)
+		// 3 images at $0.04, not doubled by the token pre-consume multiplier.
+		assert.Equal(t, 60_000, snap.EstimatedQuotaAfterGroup)
+		assert.Equal(t, []int{60_000}, billing.reserveTargets)
+	})
+
+	t.Run("group-free expression only follows the ratio", func(t *testing.T) {
+		info := makeRelayInfo(flatExpr, 1, 1000, 0)
+		info.Billing = &recordingBillingSettler{preConsumedQuota: info.FinalPreConsumedQuota}
+		info.BillingRequestInput = &billingexpr.RequestInput{Group: "default"}
+		info.UsingGroup = "offpeak"
+		info.PriceData = types.PriceData{GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1}}
+		before := *info.TieredBillingSnapshot
+
+		require.Nil(t, PrepareTieredBillingForSelectedGroup(nil, info))
+
+		assert.Equal(t, "offpeak", info.BillingRequestInput.Group)
+		assert.Equal(t, before, *info.TieredBillingSnapshot)
+	})
+}

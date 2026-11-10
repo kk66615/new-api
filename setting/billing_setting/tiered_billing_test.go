@@ -32,6 +32,12 @@ func TestSmokeTestTaskExprValidatesDeclaredUsageVectors(t *testing.T) {
 			expectedError: "fixed pricing is not supported for task usage expressions",
 		},
 		{
+			name:          "group is not part of task snapshots",
+			schema:        videoSchema,
+			expression:    `group == "offpeak" ? tier("offpeak", u("seconds") * 0.2) : tier("peak", u("seconds") * 0.4)`,
+			expectedError: "group is not supported for task usage expressions",
+		},
+		{
 			name:       "declared numeric and enum facts",
 			schema:     videoSchema,
 			expression: `u("mode") == "pro" ? tier("pro", u("seconds") * 0.8) : tier("std", u("seconds") * 0.4)`,
@@ -108,4 +114,37 @@ func TestSmokeTestExprRejectsTaskUsageWithoutSchema(t *testing.T) {
 	assert.ErrorContains(t, err, "no task plugin usage schema")
 
 	require.NoError(t, SmokeTestExpr(`tier("base", p * 2 + c * 8)`))
+}
+
+func TestSmokeTestExprExercisesGroupOnlyBranches(t *testing.T) {
+	tests := []struct {
+		name          string
+		expression    string
+		expectedError string
+	}{
+		{
+			name:       "group price structure",
+			expression: `tier("base", p * 1 + c * 4) * (group != "谷价国模" && hour("Asia/Shanghai") >= 9 ? 2 : 1)`,
+		},
+		{
+			name:          "negative price reachable only for one group",
+			expression:    `group == "谷价国模" ? tier("offpeak", p * 1 - c * 4) : tier("peak", p * 2 + c * 8)`,
+			expectedError: "result must be finite and non-negative",
+		},
+		{
+			name:          "negative price in a group list",
+			expression:    `group in ["vip", "svip"] ? tier("vip", 0 - p) : tier("base", p)`,
+			expectedError: "result must be finite and non-negative",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := SmokeTestExpr(testCase.expression)
+			if testCase.expectedError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, testCase.expectedError)
+		})
+	}
 }

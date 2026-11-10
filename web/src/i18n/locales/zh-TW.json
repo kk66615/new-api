@@ -7447,6 +7447,7 @@
     "Relay-internal upstream key number": "中轉內部的上游金鑰編號",
     "Azure content-safety annotations": "Azure 內容安全標註",
     "Meaning unknown": "含義未知",
-    "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "上游在標準協定之外新增的頂層欄位，通常由中轉軟體新增；可用於識別中轉，不能作為模型真偽的證據。"
+    "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "上游在標準協定之外新增的頂層欄位，通常由中轉軟體新增；可用於識別中轉，不能作為模型真偽的證據。",
+    "Group name used by group conditions in the expression": "運算式中 group 條件使用的分組名稱"
   }
 }

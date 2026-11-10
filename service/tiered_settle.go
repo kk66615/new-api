@@ -185,12 +185,43 @@ func refreshTieredBillingGroup(relayInfo *relaycommon.RelayInfo) (*billingexpr.B
 	}
 
 	groupRatio := relayInfo.PriceData.GroupRatioInfo.GroupRatio
-	if snap.GroupRatio == groupRatio {
+	if relayInfo.BillingRequestInput == nil {
+		relayInfo.BillingRequestInput = &billingexpr.RequestInput{}
+	}
+	input := relayInfo.BillingRequestInput
+	groupChanged := input.Group != relayInfo.UsingGroup
+	input.Group = relayInfo.UsingGroup
+	// An expression that reads group may price the new group differently, so
+	// its estimate is rerun; other expressions only follow the group ratio.
+	repriced := groupChanged && billingexpr.UsedVarsByHash(snap.ExprString, snap.ExprHash)["group"]
+	if !repriced && snap.GroupRatio == groupRatio {
 		return snap, nil
 	}
 
-	estimatedQuotaAfterGroup := snap.EstimatedQuotaBeforeGroup * groupRatio
-	estimatedQuota, err := billingexpr.QuotaRoundStrict(estimatedQuotaAfterGroup)
+	if repriced {
+		request := *input
+		if snap.EstimatedImageCount != nil {
+			request.ImageCount = snap.EstimatedImageCount
+		}
+		cost, trace, err := billingexpr.RunExprByHashWithRequest(snap.ExprString, snap.ExprHash, billingexpr.TokenParams{
+			P:   float64(snap.EstimatedPromptTokens),
+			C:   float64(snap.EstimatedCompletionTokens),
+			Len: float64(snap.EstimatedPromptTokens),
+		}, request)
+		if err != nil {
+			return nil, err
+		}
+		quotaBeforeGroup := cost / 1_000_000 * snap.QuotaPerUnit
+		if trace.BillingUnit != billingexpr.BillingUnitRequest && snap.PreConsumeMultiplier != 0 {
+			quotaBeforeGroup *= snap.PreConsumeMultiplier
+		}
+		snap.EstimatedQuotaBeforeGroup = quotaBeforeGroup
+		snap.EstimatedTier = trace.MatchedTier
+		snap.EstimatedBillingUnit = trace.BillingUnit
+		snap.EstimatedFixedPrice = trace.FixedPrice
+	}
+
+	estimatedQuota, err := billingexpr.QuotaRoundStrict(snap.EstimatedQuotaBeforeGroup * groupRatio)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +282,8 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	if relayInfo.BillingRequestInput != nil {
 		requestInput = *relayInfo.BillingRequestInput
 	}
+	// Like the group ratio, the group follows the final routing selection.
+	requestInput.Group = relayInfo.UsingGroup
 	if relayInfo.BillingImageCount != nil {
 		requestInput.ImageCount = relayInfo.BillingImageCount
 	} else if snap.EstimatedImageCount != nil {

@@ -32,6 +32,7 @@
   tokens?: Partial<Record<TokenVariable, number>>
   request?: { body?: unknown; headers?: Record<string, string> }
   usage?: Record<string, unknown>
+  group?: string
   now?: Date
 }
 ```
@@ -41,6 +42,7 @@
 - 表达式给 `cc` 定价、未给 `cc1h` 或 `cc12h` 定价时，基础预估与后端一样把 1 小时写入的 6/3.75 倍、12 小时写入的 2 倍计入 `cc`，`cc` 本身未定价时这些写入不计费。
 - 省略 `request` 表示没有模拟请求上下文；显式 `{}` 表示一个没有请求头、请求体字段的请求。只有开启请求模拟后，界面才提供空请求。
 - `usage` 对应任务 `u()` 字段；不从请求体猜测任务用量。
+- `group` 对应后端的计费分组变量；省略表示未知，引用 `group` 的表达式返回 `missing_context`，不按空分组计算。
 - `now` 是一次求值共享的绝对时刻，省略时在开始求值时取得当前时间。
 - 输入 token 必须为有限非负数。执行失败不返回可用费用，不以 0 代替错误。
 

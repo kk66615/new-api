@@ -65,6 +65,7 @@ type RequestSimulationProps = {
   expression: string
   tokens?: BillingSimulationContext['tokens']
   usage?: BillingSimulationContext['usage']
+  group?: BillingSimulationContext['group']
   currency?: PricingCurrency
   usageSchema?: BillingUsageSchema
   mode: 'token' | 'task'
@@ -173,6 +174,7 @@ export function RequestSimulation(props: RequestSimulationProps) {
       imageCount: Number(imageCount),
       tokens: props.tokens,
       usage,
+      group: props.group,
       now,
       request: {
         body: requestBody,
@@ -190,6 +192,7 @@ export function RequestSimulation(props: RequestSimulationProps) {
     props.expression,
     props.tokens,
     usage,
+    props.group,
     props.usageSchema,
   ])
 

@@ -37,7 +37,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
-import { Field, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -82,6 +82,7 @@ import {
   type TimeCondition,
   type TimeFunc,
 } from '@/features/pricing/lib/billing-expr'
+import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
 import {
   parseVisualBillingDocument,
   serializeVisualBillingDocument,
@@ -725,7 +726,17 @@ function CostEstimator({ effectiveExpr, fullExpr, currency }: EstimatorProps) {
   const inputId = useId()
   const outputId = useId()
   const lengthId = useId()
+  const groupId = useId()
   const [lengthOverride, setLengthOverride] = useState('')
+  const [billingGroup, setBillingGroup] = useState('default')
+  const usesGroup = useMemo(
+    () =>
+      [effectiveExpr, fullExpr].some((source) => {
+        const compiled = compileBillingExpression(source)
+        return compiled.status === 'ready' && compiled.variables.has('group')
+      }),
+    [effectiveExpr, fullExpr]
+  )
   const billingTime = useBillingTime(effectiveExpr)
   const [promptTokens, setPromptTokens] = useState(0)
   const [completionTokens, setCompletionTokens] = useState(0)
@@ -761,9 +772,19 @@ function CostEstimator({ effectiveExpr, fullExpr, currency }: EstimatorProps) {
     () =>
       evalExprLocally(effectiveExpr, promptTokens, completionTokens, extras, {
         tokens,
+        group: usesGroup ? billingGroup : undefined,
         now: billingTime === undefined ? undefined : new Date(billingTime),
       }),
-    [effectiveExpr, promptTokens, completionTokens, extras, tokens, billingTime]
+    [
+      effectiveExpr,
+      promptTokens,
+      completionTokens,
+      extras,
+      tokens,
+      usesGroup,
+      billingGroup,
+      billingTime,
+    ]
   )
 
   if (result.error === 'task usage') {
@@ -825,6 +846,19 @@ function CostEstimator({ effectiveExpr, fullExpr, currency }: EstimatorProps) {
           placeholder={t('Use the existing token total')}
         />
       </Field>
+      {usesGroup && (
+        <Field>
+          <FieldLabel htmlFor={groupId}>{t('Billing group')}</FieldLabel>
+          <Input
+            id={groupId}
+            value={billingGroup}
+            onChange={(event) => setBillingGroup(event.target.value)}
+          />
+          <FieldDescription>
+            {t('Group name used by group conditions in the expression')}
+          </FieldDescription>
+        </Field>
+      )}
       {usesExtras && (
         <div className='grid grid-cols-2 gap-3'>
           {BILLING_EXTRA_VARS.map((variable) => {
@@ -884,6 +918,7 @@ function CostEstimator({ effectiveExpr, fullExpr, currency }: EstimatorProps) {
       <RequestSimulation
         expression={fullExpr}
         tokens={tokens}
+        group={usesGroup ? billingGroup : undefined}
         currency={currency}
         mode='token'
       />

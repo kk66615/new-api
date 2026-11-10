@@ -802,3 +802,54 @@ func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
 
 func (s *priceTestReservation) ReserveBeforeSubmit(quota int) error { return s.Reserve(quota) }
+
+func TestModelPriceHelperTieredPricesByResolvedGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+	})
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"group-test-model":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"group-test-model":"group == \"vip\" ? tier(\"offpeak\", p) : tier(\"peak\", p * 2)"}`,
+	}))
+
+	tests := []struct {
+		name      string
+		autoGroup string
+		wantGroup string
+		wantTier  string
+		wantQuota int
+	}{
+		{name: "token group", wantGroup: "default", wantTier: "peak", wantQuota: 1000},
+		{name: "auto group selection", autoGroup: "vip", wantGroup: "vip", wantTier: "offpeak", wantQuota: 500},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tc.autoGroup != "" {
+				ctx.Set("auto_group", tc.autoGroup)
+			}
+			info := &relaycommon.RelayInfo{
+				OriginModelName:     "group-test-model",
+				UserGroup:           "default",
+				UsingGroup:          "default",
+				BillingRequestInput: &billingexpr.RequestInput{},
+			}
+
+			priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantQuota, priceData.QuotaToPreConsume)
+			assert.Equal(t, tc.wantTier, info.TieredBillingSnapshot.EstimatedTier)
+			require.NotNil(t, info.BillingRequestInput)
+			assert.Equal(t, tc.wantGroup, info.BillingRequestInput.Group)
+		})
+	}
+}

@@ -251,4 +251,49 @@ describe('request simulation', () => {
     expect(onBillingExprChange).not.toHaveBeenCalled()
     expect(onRequestRuleExprChange).not.toHaveBeenCalled()
   })
+
+  test('estimates and simulates group-dependent prices for the entered billing group', async () => {
+    const user = userEvent.setup()
+    render(
+      <TieredPricingEditor
+        modelName='test-model'
+        billingExpr='tier("base", p * 2) * (group != "offpeak" ? 2 : 1)'
+        requestRuleExpr=''
+        onBillingExprChange={vi.fn()}
+        onRequestRuleExprChange={vi.fn()}
+      />
+    )
+    fireEvent.change(screen.getByLabelText('Input tokens'), {
+      target: { value: '1000000' },
+    })
+    fireEvent.blur(screen.getByLabelText('Input tokens'))
+    const group = screen.getByLabelText('Billing group')
+    expect(group).toHaveValue('default')
+    expect(screen.getByText(/Estimated cost/).parentElement).toHaveTextContent(
+      /Estimated cost:\s*\$4(?:\.0+)?(?![\d.])/
+    )
+
+    fireEvent.change(group, { target: { value: 'offpeak' } })
+    expect(screen.getByText(/Estimated cost/).parentElement).toHaveTextContent(
+      /Estimated cost:\s*\$2(?:\.0+)?(?![\d.])/
+    )
+    expect(screen.queryByText(/Expression error/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Request simulation' }))
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Simulated request cost: \$2(?:\.0+)?(?![\d.])/
+    )
+  })
+
+  test('shows no billing group field for expressions that do not use group', () => {
+    render(
+      <TieredPricingEditor
+        billingExpr='tier("base", p * 2)'
+        requestRuleExpr=''
+        onBillingExprChange={vi.fn()}
+        onRequestRuleExprChange={vi.fn()}
+      />
+    )
+    expect(screen.queryByLabelText('Billing group')).not.toBeInTheDocument()
+  })
 })

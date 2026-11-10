@@ -163,6 +163,23 @@ OpenAI 已于 2026-05-12 下线 DALL·E 2/3；其校验、默认值和倍率保�
 
 > **注意：** 自动扣除针对 GPT/OpenAI 格式的 API（prompt_tokens 包含子类别）。Claude 格式的 API 不重复扣除缓存；未独立计价的缓存读取和缓存写入加回输入。系统根据上游返回格式自动处理。
 
+### Billing Group
+
+`group` 是本次请求实际计费所用的分组（字符串）。令牌分组为 `auto` 时取自动选中的分组；自动分组重试换组后，预扣会按新分组重新估算，结算也按最终分组计算。它由服务端在用户可用分组内校验后确定（令牌分组、自动分组，或演练场请求体里经过校验的 group），不能用请求头伪造，适合"同一模型、不同分组走不同价格结构"：
+
+```
+# “谷价国模”分组恒按空闲价，其余分组高峰时段 ×2
+tier("base", p * 1 + c * 4 + cr * 0.02) * (group != "谷价国模" && hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12 ? 2 : 1)
+```
+
+分组倍率（GroupRatio）、用户分组特殊倍率（GroupGroupRatio）、可用分组与特殊可用分组都照常生效：它们只决定“谁能用这个分组、表达式结果再乘多少”。令牌绑定固定分组时，`group` 就是那个分组，被取消可用后请求直接 403；令牌分组为 `auto` 时，这些设置会改变候选分组，请求不报错而是落到下一个可用分组，`group` 和价格随之改变。
+
+注意：
+
+- 表达式里写的是分组名字面量，必须与分组设置里的名字逐字相同（含空格、大小写）。**给分组改名时表达式里的名字要跟着改**，否则改名后的分组落到未命中的分支且不报错：按上面的写法是多收（按高峰价），写成 `group == "某组" ? 加价 : 原价` 则是少收。分组名分散在分组倍率、可用分组、渠道、令牌和表达式里，没有一次改完的接口；稳妥的顺序是先把表达式改成新旧两个名字都认（`group != "旧名" && group != "新名"`），再改名，确认后去掉旧名。
+- 管理员用 `sk-{key}-{channelId}` 指定渠道、以及后台渠道测试时，`group` 是请求方的分组而不是渠道所在分组（令牌分组为 `auto` 时是字面量 `auto`），测得的价格不代表该分组真实用户；一个渠道也不要同时挂在按 `group` 区分价格的多个分组里。
+- 任务模型（视频等）的表达式不能引用 `group`：模型已由任务插件声明时，保存就报 "group is not supported for task usage expressions"；保存时还没有插件声明、或直接写库的，在提交任务时报 `model_price_error`。两种情况都是拒绝请求，不会按错误价格计费。
+
 ### Built-in Functions
 
 | Function | Signature | Purpose |
@@ -258,7 +275,7 @@ At compile time, the engine instruments ternary factors with this exact shape:
 <request-probe condition> ? <numeric literal> : 1
 ```
 
-The condition must reference at least one request probe (`param`, `header`, `hour`, `minute`, `weekday`, `month`, or `day`). Both branches must be numeric literals and the fallback must equal `1`. Other conditionals, including `(condition ? 2 : 1.5)`, are evaluated normally but are not traced. Integer-only factors use an integer-preserving trace callback, so instrumentation does not change expressions that require an integer operand (for example, `%`). The internal trace callback names are reserved and cannot be used in stored expressions.
+The condition must reference at least one request probe (`param`, `header`, `group`, `hour`, `minute`, `weekday`, `month`, or `day`). Both branches must be numeric literals and the fallback must equal `1`. Other conditionals, including `(condition ? 2 : 1.5)`, are evaluated normally but are not traced. Integer-only factors use an integer-preserving trace callback, so instrumentation does not change expressions that require an integer operand (for example, `%`). The internal trace callback names are reserved and cannot be used in stored expressions.
 
 The compiled cache stores the canonical condition and multiplier for every instrumented node. Each run starts with the full detected rule list marked as unmatched; callbacks mark rules that actually evaluate true. Rules skipped by normal expression short-circuiting remain unmatched. This keeps the expression's numeric result unchanged and avoids reparsing it on each request.
 
@@ -464,7 +481,7 @@ When a request arrives and the model uses `tiered_expr` billing:
 1. Loads expression from `billing_setting.GetBillingExpr()`
 2. Builds `RequestInput` (headers + body) for `param()` / `header()` functions
 3. Runs the expression with locally estimated input tokens (`P` and `Len`) and zero output tokens (`C=0`). Client output limits do not affect the reservation. If request token estimation is disabled, the estimated input is zero.
-4. Converts output to quota: `rawCost / 1,000,000 * QuotaPerUnit`. For token-priced leaves, multiplies this reservation by `quota_setting.pre_consume_multiplier` (default 1; any finite positive decimal). The multiplier does not change context-length tier selection, actual settlement, or request-priced leaves. The snapshot freezes the multiplier for image quantity retries; group retries reuse the multiplied reservation. Older snapshots with no multiplier retain a factor of 1.
+4. Converts output to quota: `rawCost / 1,000,000 * QuotaPerUnit`. For token-priced leaves, multiplies this reservation by `quota_setting.pre_consume_multiplier` (default 1; any finite positive decimal). The multiplier does not change context-length tier selection, actual settlement, or request-priced leaves. The snapshot freezes the multiplier for image quantity retries; group retries reuse the multiplied reservation, except that an expression reading `group` is estimated again for the selected group with the same multiplier. Older snapshots with no multiplier retain a factor of 1.
 5. Creates `BillingSnapshot` and stores it on `RelayInfo`. Expression and request state stay frozen for settlement. An auto-group retry refreshes group-dependent fields from the selected group before the next upstream attempt. If a free initial group skipped pre-consume and the retry selects a paid group, the billing session is created before that attempt. If an existing session moves to a more expensive group, its reservation is raised to that group's estimate before sending; cheaper groups are refunded only after actual usage is settled.
 
 Wallet trust bypass uses `quota_setting.trust_quota_usd` (default 10 USD; 0 disables bypass). Both the wallet and any limited API token must exceed the threshold. The wallet must still cover the estimated reservation before bypass is considered. Subscriptions and asynchronous tasks do not use this bypass. Legacy token-ratio pricing also reserves estimated input cost times the multiplier, without the former `PreConsumedQuota` floor or output-token estimate. Task usage pricing is unchanged.

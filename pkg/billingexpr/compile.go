@@ -3,6 +3,7 @@ package billingexpr
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 
@@ -101,7 +102,7 @@ func usesRequestProbe(node ast.Node) bool {
 			return false
 		}
 		switch identifier.Value {
-		case "param", "header", "hour", "minute", "weekday", "month", "day":
+		case "param", "header", "group", "hour", "minute", "weekday", "month", "day":
 			return true
 		default:
 			return false
@@ -138,6 +139,7 @@ var compileEnvPrototypeV1 = map[string]any{
 	"img_o":       float64(0),
 	"ai":          float64(0),
 	"ao":          float64(0),
+	"group":       "",
 	"tier":        func(string, float64) float64 { return 0 },
 	"fixed":       func(float64) float64 { return 0 },
 	"_trace":      func(int, bool, float64) float64 { return 1 },
@@ -251,6 +253,25 @@ func ExprVersion(exprStr string) int {
 	cacheMu.RUnlock()
 	v, _ := ParseExprVersion(exprStr)
 	return v
+}
+
+// StringLiterals returns the distinct string literals of an expression in
+// source order, read from the unoptimized tree so skipped branches count.
+// Save-time validation tries each one as a group name.
+func StringLiterals(exprStr string) []string {
+	_, body := ParseExprVersion(exprStr)
+	tree, err := parser.Parse(body)
+	if err != nil {
+		return nil
+	}
+	var literals []string
+	ast.Find(tree.Node, func(node ast.Node) bool {
+		if literal, ok := node.(*ast.StringNode); ok && !slices.Contains(literals, literal.Value) {
+			literals = append(literals, literal.Value)
+		}
+		return false
+	})
+	return literals
 }
 
 func extractUsedVars(prog *vm.Program) map[string]bool {

@@ -788,3 +788,25 @@ export function extractUsage() { return {seconds:2}; }
 		})
 	}
 }
+
+// An expression stored directly in the database bypasses save-time checks;
+// submission still refuses it because the task snapshot carries no group.
+func TestRelayTaskSubmitRejectsGroupPricing(t *testing.T) {
+	saveBillingConfig(t)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"declared-model":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"declared-model":"group == \"offpeak\" ? tier(\"offpeak\", 1) : tier(\"peak\", 2)"}`,
+	}))
+	c, info := newTaskSubmitContext(t, "declared-model", "")
+	c.Set("group", "offpeak")
+	info.UserGroup = "default"
+	info.UsingGroup = "offpeak"
+	pinMappingOrderPlugin(t, c, billingFallbackPlugin)
+	info.OriginModelName = "declared-model"
+
+	_, taskErr := RelayTaskSubmit(c, info)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "model_price_error", taskErr.Code)
+	assert.Contains(t, taskErr.Message, "cannot use group")
+	assert.Nil(t, info.TieredBillingSnapshot)
+}

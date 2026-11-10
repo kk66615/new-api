@@ -261,6 +261,7 @@ describe('local billing expression evaluation', () => {
         headers: fixture.headers as Record<string, string> | undefined,
       },
       usage: fixture.usage,
+      group: fixture.group,
     })
     expect(result.status).toBe('success')
     if (result.status !== 'success') return
@@ -289,6 +290,21 @@ describe('local billing expression evaluation', () => {
     )
     assert(compiled.status === 'ready')
     expect(readTokenTierChain(compiled.ast)).toBeNull()
+  })
+
+  test('treats an absent billing group as unknown, not as an empty group', () => {
+    const expression =
+      'group == "offpeak" ? tier("offpeak", 1) : tier("peak", 2)'
+    expect(evaluateBillingExpression(expression).status).toBe('missing_context')
+    expect(
+      evaluateBillingExpression(expression, { group: 'offpeak' })
+    ).toMatchObject({ status: 'success', cost: 1, matchedTier: 'offpeak' })
+    expect(evaluateBillingExpression(expression, { group: '' })).toMatchObject({
+      status: 'success',
+      cost: 2,
+      matchedTier: 'peak',
+    })
+    expect(compileBillingExpression('group * 2').status).not.toBe('ready')
   })
 
   test('distinguishes unknown requests from explicitly empty requests', () => {

@@ -7447,6 +7447,7 @@
     "Relay-internal upstream key number": "Relay-internal upstream key number",
     "Azure content-safety annotations": "Azure content-safety annotations",
     "Meaning unknown": "Meaning unknown",
-    "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity."
+    "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.",
+    "Group name used by group conditions in the expression": "Group name used by group conditions in the expression"
   }
 }

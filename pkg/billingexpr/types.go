@@ -10,7 +10,11 @@ import (
 type RequestInput struct {
 	Headers map[string]string
 	Body    []byte
-	Usage   map[string]any
+	// Group is the routing group the request is billed under (the final
+	// auto-group selection, not the token's "auto"). It is server-derived,
+	// unlike headers and body, so expressions may price by it safely.
+	Group string
+	Usage map[string]any
 	// ImageCount is a validated billing quantity, separate from the frozen
 	// request's n. Settlement can replace it with the actual returned count.
 	ImageCount *int

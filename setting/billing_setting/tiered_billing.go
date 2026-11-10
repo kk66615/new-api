@@ -214,8 +214,20 @@ func smokeTestExpr(exprStr string) error {
 		{Len: math.MaxInt32, ImgCR: math.MaxInt32},
 	}
 
+	requests := billingExprSmokeRequests()
+	if billingexpr.UsedVars(exprStr)["group"] {
+		// A branch may run for a single group only, so every string literal is
+		// also tried as the group name.
+		for _, name := range billingexpr.StringLiterals(exprStr) {
+			for _, request := range billingExprSmokeRequests() {
+				request.Group = name
+				requests = append(requests, request)
+			}
+		}
+	}
+
 	for _, v := range vectors {
-		for _, request := range billingExprSmokeRequests() {
+		for _, request := range requests {
 			result, _, err := billingexpr.RunExprWithRequest(exprStr, v, request)
 			if err != nil {
 				return fmt.Errorf("vector {p=%g, c=%g}: run failed: %w", v.P, v.C, err)
@@ -237,6 +249,10 @@ func SmokeTestTaskExpr(exprStr string, schema map[string]jsplugin.UsageFieldSche
 	}
 	if billingexpr.UsesFixedPricing(exprStr) {
 		return fmt.Errorf("fixed pricing is not supported for task usage expressions")
+	}
+	// Task completion settles later from a snapshot that carries no group.
+	if billingexpr.UsedVars(exprStr)["group"] {
+		return fmt.Errorf("group is not supported for task usage expressions")
 	}
 	for key := range billingexpr.UsedUsageKeys(exprStr) {
 		if _, declared := schema[key]; !declared {

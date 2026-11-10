@@ -1171,13 +1171,14 @@ func TestFrontendSimulationContract(t *testing.T) {
 		BillingUnit billingexpr.BillingUnit
 		FixedPrice  *float64
 		ImageCount  *int
+		Group       string
 	}
 	require.NoError(t, common.Unmarshal(data, &cases))
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			body, err := common.Marshal(tc.Body)
 			require.NoError(t, err)
-			cost, trace, err := billingexpr.RunExprWithRequest(tc.Expression, tc.Tokens, billingexpr.RequestInput{Body: body, Headers: tc.Headers, Usage: tc.Usage, ImageCount: tc.ImageCount})
+			cost, trace, err := billingexpr.RunExprWithRequest(tc.Expression, tc.Tokens, billingexpr.RequestInput{Body: body, Headers: tc.Headers, Usage: tc.Usage, ImageCount: tc.ImageCount, Group: tc.Group})
 			require.NoError(t, err)
 			assert.InDelta(t, tc.Cost, cost, 1e-9)
 			assert.Equal(t, tc.Tier, trace.MatchedTier)

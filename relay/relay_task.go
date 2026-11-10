@@ -276,6 +276,10 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 				return nil, service.TaskErrorWrapper(fmt.Errorf("task model %s pricing is not configured for plugin %s", modelName, pluginKey), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 			}
 		}
+		// Task completion settles later from a snapshot that carries no group.
+		if billingexpr.UsedVars(exprStr)["group"] {
+			return nil, service.TaskErrorWrapper(fmt.Errorf("task model %s pricing cannot use group", modelName), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
+		}
 		var facts map[string]any
 		if validatedProvider, ok := adaptor.(channel.TaskValidatedUsageFactsProvider); ok {
 			facts, err = validatedProvider.ExtractUsageFactsValidated(c, info)

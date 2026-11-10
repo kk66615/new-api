@@ -419,5 +419,69 @@
         "conditionText": "Text-only requests"
       }
     ]
+  },
+  {
+    "name": "group skips the peak multiplier",
+    "expression": "tier(\"base\", p * 2) * (group != \"offpeak\" && hour(\"Asia/Shanghai\") >= 0 ? 2 : 1)",
+    "tokens": {
+      "p": 100
+    },
+    "group": "offpeak",
+    "cost": 200,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      false
+    ]
+  },
+  {
+    "name": "other groups pay the peak multiplier",
+    "expression": "tier(\"base\", p * 2) * (group != \"offpeak\" && hour(\"Asia/Shanghai\") >= 0 ? 2 : 1)",
+    "tokens": {
+      "p": 100
+    },
+    "group": "default",
+    "cost": 400,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      true
+    ]
+  },
+  {
+    "name": "non-ASCII group name skips the peak multiplier",
+    "expression": "tier(\"base\", p * 2) * (group != \"谷价国模\" && hour(\"Asia/Shanghai\") >= 0 ? 2 : 1)",
+    "tokens": {
+      "p": 100
+    },
+    "group": "谷价国模",
+    "cost": 200,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      false
+    ]
+  },
+  {
+    "name": "non-ASCII group name must match exactly",
+    "expression": "tier(\"base\", p * 2) * (group != \"谷价国模\" && hour(\"Asia/Shanghai\") >= 0 ? 2 : 1)",
+    "tokens": {
+      "p": 100
+    },
+    "group": "谷价",
+    "cost": 400,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      true
+    ]
   }
 ]
