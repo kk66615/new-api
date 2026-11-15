@@ -364,6 +364,61 @@ func TestCalculateTextQuotaSummaryUnifiedForClaudeSemantic(t *testing.T) {
 	require.Equal(t, 1488, chatSummary.Quota)
 }
 
+// A request whose upstream reported no usage at all is billed on the prompt
+// estimate, matching upstream behaviour: the upstream accepted and processed
+// the prompt even when the client disconnected before the first byte. The fork
+// used to zero this charge for abnormal streams with no output.
+func TestCalculateTextQuotaSummaryBillsPromptEstimateWithoutUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	const estimate = 1200
+	relayInfo := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatOpenAI,
+		OriginModelName: "gemini-4-carbon",
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 10,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(estimate)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, nil)
+
+	require.Equal(t, estimate, summary.PromptTokens)
+	require.Zero(t, summary.CompletionTokens)
+	require.Equal(t, estimate, summary.TotalTokens)
+	require.Positive(t, summary.Quota)
+	require.True(t, summary.hasBillableUsage())
+}
+
+// The same path still settles at zero when the prompt estimate is zero, for
+// example when request token counting is disabled: a zero estimate must not
+// invent a charge.
+func TestCalculateTextQuotaSummaryStaysZeroWithoutEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	relayInfo := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatOpenAI,
+		OriginModelName: "gemini-4-carbon",
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 10,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, nil)
+
+	require.Zero(t, summary.TotalTokens)
+	require.Zero(t, summary.Quota)
+	require.False(t, summary.hasBillableUsage())
+}
+
 func TestCalculateTextQuotaSummaryUsesSplitClaudeCacheCreationRatios(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
