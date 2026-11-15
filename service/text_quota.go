@@ -251,18 +251,6 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 			CompletionTokens: 0,
 			TotalTokens:      relayInfo.GetEstimatePromptTokens(),
 		}
-	} else if isEmptyTextUsage(usage) && streamEndedWithoutOutput(relayInfo) {
-		// A stream that ended abnormally (client_gone, upstream timeout) before
-		// any content reached the client, with the upstream reporting no usage,
-		// arrives here as an empty non-nil usage. The upstream accepted and
-		// processed the prompt, so bill the prompt estimate instead of settling
-		// at zero. This is the same rule the nil case follows, applied to every
-		// channel that constructs an empty usage on an aborted stream.
-		usage = &dto.Usage{
-			PromptTokens:     relayInfo.GetEstimatePromptTokens(),
-			CompletionTokens: 0,
-			TotalTokens:      relayInfo.GetEstimatePromptTokens(),
-		}
 	}
 
 	summary.PromptTokens = usage.PromptTokens
@@ -407,13 +395,21 @@ func isEmptyTextUsage(usage *dto.Usage) bool {
 		return true
 	}
 	return usage.PromptTokens == 0 && usage.CompletionTokens == 0 &&
+		usage.TotalTokens == 0 &&
+		usage.InputTokens == 0 && usage.OutputTokens == 0 &&
 		usage.PromptTokensDetails.CachedTokens == 0 &&
-		usage.PromptTokensDetails.CacheCreationTokensTotal() == 0 &&
+		usage.PromptTokensDetails.CachedCreationTokens == 0 &&
+		usage.PromptTokensDetails.CacheWriteTokens == 0 &&
+		usage.PromptTokensDetails.TextTokens == 0 &&
 		usage.PromptTokensDetails.ImageTokens == 0 &&
 		usage.PromptTokensDetails.AudioTokens == 0 &&
+		usage.CompletionTokenDetails.TextTokens == 0 &&
+		usage.CompletionTokenDetails.ImageTokens == 0 &&
 		usage.CompletionTokenDetails.AudioTokens == 0 &&
+		usage.CompletionTokenDetails.ReasoningTokens == 0 &&
 		usage.ClaudeCacheCreation5mTokens == 0 &&
-		usage.ClaudeCacheCreation1hTokens == 0
+		usage.ClaudeCacheCreation1hTokens == 0 &&
+		usage.PromptCacheHitTokens == 0
 }
 
 // streamEndedWithoutOutput reports a stream that stopped abnormally before any
@@ -456,6 +452,18 @@ func publicRefusalReason(reason string) string {
 }
 
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
+	// An aborted stream whose handler built an empty usage (upstream sent no
+	// usage block) is billed on the prompt estimate. This runs before the
+	// billing usage is computed so tiered token-priced expressions see the
+	// estimate too: they read these params and would otherwise settle at zero.
+	if usage != nil && isEmptyTextUsage(usage) && streamEndedWithoutOutput(relayInfo) && relayInfo.GetEstimatePromptTokens() > 0 {
+		estimate := relayInfo.GetEstimatePromptTokens()
+		usage = &dto.Usage{
+			PromptTokens:     estimate,
+			CompletionTokens: 0,
+			TotalTokens:      estimate,
+		}
+	}
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {

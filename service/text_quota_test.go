@@ -421,46 +421,86 @@ func TestCalculateTextQuotaSummaryStaysZeroWithoutEstimate(t *testing.T) {
 }
 
 // An aborted stream whose handler built an empty usage (upstream sent no usage
-// block) is billed on the prompt estimate too. This is the shape every channel
+// block) is billed on the prompt estimate. This is the shape every channel
 // produces on client_gone before the first byte, and the one the production
-// zero-quota logs carried.
-func TestCalculateTextQuotaSummaryBillsPromptEstimateForEmptyUsageOnAbortedStream(t *testing.T) {
+// zero-quota logs carried. Checked at the settlement entry, which is where the
+// rule lives so that tiered token-priced expressions see the estimate too.
+func TestPostTextConsumeQuotaBillsPromptEstimateForEmptyUsageOnAbortedStream(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 63, 63
+	seedUser(t, userID, 10_000_000)
+	seedChannel(t, channelID)
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
 
 	const estimate = 26307
 	status := &relaycommon.StreamStatus{}
 	status.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
 
-	relayInfo := &relaycommon.RelayInfo{
-		RelayFormat:     types.RelayFormatOpenAI,
+	info := &relaycommon.RelayInfo{
+		UserId:          userID,
 		OriginModelName: "gemini-4-argon",
+		UsingGroup:      "default",
 		IsStream:        true,
 		StreamStatus:    status,
-		PriceData: hosttypes.PriceData{
-			ModelRatio:      1,
-			CompletionRatio: 5,
-			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 2},
-		},
-		StartTime: time.Now(),
+		StartTime:       time.Now(),
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: channelID},
+		PriceData:       hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 5, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 2}},
 	}
-	relayInfo.SetEstimatePromptTokens(estimate)
+	info.SetEstimatePromptTokens(estimate)
 
-	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+	PostTextConsumeQuota(ctx, info, &dto.Usage{}, nil)
 
-	require.Equal(t, estimate, summary.PromptTokens)
-	require.Zero(t, summary.CompletionTokens)
-	require.Positive(t, summary.Quota)
-	require.True(t, summary.hasBillableUsage())
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Equal(t, estimate, log.PromptTokens)
+	assert.Zero(t, log.CompletionTokens)
+	assert.Positive(t, log.Quota)
+}
+
+// A token-priced tiered expression must see the same estimate: it reads the
+// billing params, so a rule that only touched the ratio summary would settle
+// this request at zero while reporting a chargeable token count.
+func TestPostTextConsumeQuotaBillsPromptEstimateForTieredExprOnAbortedStream(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 64, 64
+	seedUser(t, userID, 10_000_000)
+	seedChannel(t, channelID)
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+	const estimate = 26307
+	status := &relaycommon.StreamStatus{}
+	status.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
+
+	expr := `tier("base", p * 10 + c * 50)`
+	info := &relaycommon.RelayInfo{
+		UserId:          userID,
+		OriginModelName: "gpt-6-astra",
+		UsingGroup:      "default",
+		IsStream:        true,
+		StreamStatus:    status,
+		StartTime:       time.Now(),
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: channelID},
+		PriceData:       hosttypes.PriceData{GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+	}
+	info.SetEstimatePromptTokens(estimate)
+	info.TieredBillingSnapshot = makeSnapshot(expr, 1, 0, 0)
+
+	PostTextConsumeQuota(ctx, info, &dto.Usage{}, nil)
+
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Equal(t, estimate, log.PromptTokens)
+	assert.Positive(t, log.Quota, "a token-priced expression must bill the estimated prompt")
 }
 
 // The estimate must not be invented when the stream ended normally, when the
 // client already received content, or on a non-stream request: those settle on
 // what the response actually carried.
-func TestCalculateTextQuotaSummaryKeepsZeroForEmptyUsageOutsideAbortedStream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-
+func TestPostTextConsumeQuotaKeepsZeroForEmptyUsageOutsideAbortedStream(t *testing.T) {
 	normalEnd := &relaycommon.StreamStatus{}
 	normalEnd.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 
@@ -478,28 +518,35 @@ func TestCalculateTextQuotaSummaryKeepsZeroForEmptyUsageOutsideAbortedStream(t *
 		{name: "non-stream request", isStream: false},
 		{name: "stream without a status record", isStream: true},
 	}
-	for _, tc := range cases {
+	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			relayInfo := &relaycommon.RelayInfo{
-				RelayFormat:       types.RelayFormatOpenAI,
+			truncate(t)
+			userID, channelID := 70+i, 70+i
+			seedUser(t, userID, 10_000_000)
+			seedChannel(t, channelID)
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+			info := &relaycommon.RelayInfo{
+				UserId:            userID,
 				OriginModelName:   "gemini-4-argon",
+				UsingGroup:        "default",
 				IsStream:          tc.isStream,
 				StreamStatus:      tc.status,
 				SendResponseCount: tc.sentResponses,
-				PriceData: hosttypes.PriceData{
-					ModelRatio:      1,
-					CompletionRatio: 5,
-					GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 2},
-				},
-				StartTime: time.Now(),
+				StartTime:         time.Now(),
+				ChannelMeta:       &relaycommon.ChannelMeta{ChannelId: channelID},
+				PriceData:         hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 5, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 2}},
 			}
-			relayInfo.SetEstimatePromptTokens(26307)
+			info.SetEstimatePromptTokens(26307)
 
-			summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+			PostTextConsumeQuota(ctx, info, &dto.Usage{}, nil)
 
-			require.Zero(t, summary.TotalTokens)
-			require.Zero(t, summary.Quota)
-			require.False(t, summary.hasBillableUsage())
+			log := getLastLog(t)
+			require.NotNil(t, log)
+			assert.Zero(t, log.Quota)
+			assert.Zero(t, log.PromptTokens)
 		})
 	}
 }
