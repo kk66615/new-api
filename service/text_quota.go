@@ -251,6 +251,18 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 			CompletionTokens: 0,
 			TotalTokens:      relayInfo.GetEstimatePromptTokens(),
 		}
+	} else if isEmptyTextUsage(usage) && streamEndedWithoutOutput(relayInfo) {
+		// A stream that ended abnormally (client_gone, upstream timeout) before
+		// any content reached the client, with the upstream reporting no usage,
+		// arrives here as an empty non-nil usage. The upstream accepted and
+		// processed the prompt, so bill the prompt estimate instead of settling
+		// at zero. This is the same rule the nil case follows, applied to every
+		// channel that constructs an empty usage on an aborted stream.
+		usage = &dto.Usage{
+			PromptTokens:     relayInfo.GetEstimatePromptTokens(),
+			CompletionTokens: 0,
+			TotalTokens:      relayInfo.GetEstimatePromptTokens(),
+		}
 	}
 
 	summary.PromptTokens = usage.PromptTokens
@@ -385,6 +397,33 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	}
 
 	return summary
+}
+
+// isEmptyTextUsage reports a usage that carries no billable token quantity. An
+// aborted stream produces exactly this shape: the handlers build an empty usage
+// because upstream never sent a usage block.
+func isEmptyTextUsage(usage *dto.Usage) bool {
+	if usage == nil {
+		return true
+	}
+	return usage.PromptTokens == 0 && usage.CompletionTokens == 0 &&
+		usage.PromptTokensDetails.CachedTokens == 0 &&
+		usage.PromptTokensDetails.CacheCreationTokensTotal() == 0 &&
+		usage.PromptTokensDetails.ImageTokens == 0 &&
+		usage.PromptTokensDetails.AudioTokens == 0 &&
+		usage.CompletionTokenDetails.AudioTokens == 0 &&
+		usage.ClaudeCacheCreation5mTokens == 0 &&
+		usage.ClaudeCacheCreation1hTokens == 0
+}
+
+// streamEndedWithoutOutput reports a stream that stopped abnormally before any
+// content reached the client. The upstream accepted the prompt in that case, so
+// the prompt cost is real even though the client received nothing.
+func streamEndedWithoutOutput(relayInfo *relaycommon.RelayInfo) bool {
+	if relayInfo == nil || !relayInfo.IsStream {
+		return false
+	}
+	return !relayInfo.StreamStatus.IsNormalEnd() && relayInfo.SendResponseCount == 0
 }
 
 func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) string {

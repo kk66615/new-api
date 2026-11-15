@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http/httptest"
@@ -417,6 +418,90 @@ func TestCalculateTextQuotaSummaryStaysZeroWithoutEstimate(t *testing.T) {
 	require.Zero(t, summary.TotalTokens)
 	require.Zero(t, summary.Quota)
 	require.False(t, summary.hasBillableUsage())
+}
+
+// An aborted stream whose handler built an empty usage (upstream sent no usage
+// block) is billed on the prompt estimate too. This is the shape every channel
+// produces on client_gone before the first byte, and the one the production
+// zero-quota logs carried.
+func TestCalculateTextQuotaSummaryBillsPromptEstimateForEmptyUsageOnAbortedStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	const estimate = 26307
+	status := &relaycommon.StreamStatus{}
+	status.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
+
+	relayInfo := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatOpenAI,
+		OriginModelName: "gemini-4-argon",
+		IsStream:        true,
+		StreamStatus:    status,
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 5,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 2},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(estimate)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	require.Equal(t, estimate, summary.PromptTokens)
+	require.Zero(t, summary.CompletionTokens)
+	require.Positive(t, summary.Quota)
+	require.True(t, summary.hasBillableUsage())
+}
+
+// The estimate must not be invented when the stream ended normally, when the
+// client already received content, or on a non-stream request: those settle on
+// what the response actually carried.
+func TestCalculateTextQuotaSummaryKeepsZeroForEmptyUsageOutsideAbortedStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	normalEnd := &relaycommon.StreamStatus{}
+	normalEnd.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+
+	clientGone := &relaycommon.StreamStatus{}
+	clientGone.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
+
+	cases := []struct {
+		name          string
+		isStream      bool
+		status        *relaycommon.StreamStatus
+		sentResponses int
+	}{
+		{name: "normally ended stream", isStream: true, status: normalEnd},
+		{name: "client received content", isStream: true, status: clientGone, sentResponses: 3},
+		{name: "non-stream request", isStream: false},
+		{name: "stream without a status record", isStream: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			relayInfo := &relaycommon.RelayInfo{
+				RelayFormat:       types.RelayFormatOpenAI,
+				OriginModelName:   "gemini-4-argon",
+				IsStream:          tc.isStream,
+				StreamStatus:      tc.status,
+				SendResponseCount: tc.sentResponses,
+				PriceData: hosttypes.PriceData{
+					ModelRatio:      1,
+					CompletionRatio: 5,
+					GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 2},
+				},
+				StartTime: time.Now(),
+			}
+			relayInfo.SetEstimatePromptTokens(26307)
+
+			summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+			require.Zero(t, summary.TotalTokens)
+			require.Zero(t, summary.Quota)
+			require.False(t, summary.hasBillableUsage())
+		})
+	}
 }
 
 func TestCalculateTextQuotaSummaryUsesSplitClaudeCacheCreationRatios(t *testing.T) {
