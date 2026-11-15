@@ -11,18 +11,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ResolveIncomingBillingExprRequestInput builds the request input for exprStr.
-// The returned Body is retained on info.BillingRequestInput until post-response
-// settlement, so it is only materialized when exprStr actually calls param():
-// for a disk-backed body, Bytes() ReadFulls the whole payload into a fresh heap
-// buffer that then stays pinned for the entire (possibly minutes-long) upstream
-// response. header() reads info.RequestHeaders and needs no body.
-func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo, exprStr string) (billingexpr.RequestInput, error) {
+// ResolveIncomingBillingExprRequestInput freezes the request context a billing
+// expression reads. Only expressions that call param() read the body; for the
+// others it is not loaded, so a disk-cached body never moves into memory and
+// the snapshot does not keep the whole request alive until settlement.
+func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo, readsBody bool) (billingexpr.RequestInput, error) {
 	if info != nil && info.BillingRequestInput != nil {
 		input := cloneRequestInput(*info.BillingRequestInput)
 		merged := cloneStringMap(info.RequestHeaders)
 		maps.Copy(merged, input.Headers)
 		input.Headers = merged
+		// A later expression, such as compact repricing, may read a body the
+		// first expression did not need.
+		if readsBody && input.Body == nil {
+			bodyBytes, err := readIncomingBillingExprBody(c)
+			if err != nil {
+				return billingexpr.RequestInput{}, err
+			}
+			input.Body = bodyBytes
+		}
 		return input, nil
 	}
 
@@ -30,8 +37,7 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 	if info != nil {
 		input.Headers = cloneStringMap(info.RequestHeaders)
 	}
-
-	if !billingexpr.UsedVars(exprStr)["param"] {
+	if !readsBody {
 		return input, nil
 	}
 
@@ -98,7 +104,6 @@ func readIncomingBillingExprBody(c *gin.Context) ([]byte, error) {
 func cloneRequestInput(src billingexpr.RequestInput) billingexpr.RequestInput {
 	input := billingexpr.RequestInput{
 		Headers: cloneStringMap(src.Headers),
-		Group:   src.Group,
 	}
 	if src.ImageCount != nil {
 		count := *src.ImageCount
