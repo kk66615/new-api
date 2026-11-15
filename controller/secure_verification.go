@@ -45,6 +45,8 @@ func writeSecurityOperationError(c *gin.Context, err error) {
 		code, message = "PASSKEY_RP_ID_INVALID", "Invalid Passkey domain. Enter a domain without a scheme, port, path or wildcard."
 	case errors.Is(err, service.ErrAccountEmailInvalid), errors.Is(err, service.ErrAccountEmailRestricted):
 		code, message = "EMAIL_ADDRESS_REJECTED", err.Error()
+	case errors.Is(err, service.ErrDisposableEmailRejected):
+		code, message = "EMAIL_ADDRESS_DISPOSABLE", err.Error()
 	case errors.Is(err, model.ErrEmailAlreadyTaken):
 		code, message = "EMAIL_ALREADY_TAKEN", "This email address is already in use."
 	case errors.Is(err, service.ErrEmailBindingDelivery):

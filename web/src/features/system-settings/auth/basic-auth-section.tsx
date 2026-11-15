@@ -31,6 +31,13 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 
@@ -52,6 +59,10 @@ const basicAuthSchema = z.object({
   EmailDomainRestrictionEnabled: z.boolean(),
   EmailAliasRestrictionEnabled: z.boolean(),
   EmailDomainWhitelist: z.string(),
+  DisposableEmailBlockEnabled: z.boolean(),
+  DisposableEmailHeuristicMode: z.enum(['off', 'log', 'block']),
+  DisposableEmailExtraDomains: z.string(),
+  DisposableEmailAllowlist: z.string(),
 })
 
 type BasicAuthFormValues = z.infer<typeof basicAuthSchema>
@@ -71,6 +82,16 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
         .map((domain) => domain.trim())
         .filter(Boolean)
         .join('\n'),
+      DisposableEmailExtraDomains: defaultValues.DisposableEmailExtraDomains
+        .split(',')
+        .map((domain) => domain.trim())
+        .filter(Boolean)
+        .join('\n'),
+      DisposableEmailAllowlist: defaultValues.DisposableEmailAllowlist
+        .split(',')
+        .map((domain) => domain.trim())
+        .filter(Boolean)
+        .join('\n'),
     }),
     [defaultValues]
   )
@@ -85,15 +106,20 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
   const onSubmit = async (data: BasicAuthFormValues) => {
     const updates: Array<{ key: string; value: string | boolean }> = []
 
+    const textareaKeys = new Set([
+      'EmailDomainWhitelist',
+      'DisposableEmailExtraDomains',
+      'DisposableEmailAllowlist',
+    ])
     Object.entries(data).forEach(([key, value]) => {
-      if (key === 'EmailDomainWhitelist') {
+      if (textareaKeys.has(key)) {
         if (typeof value !== 'string') return
         const domains = value
           .split('\n')
           .map((domain) => domain.trim())
           .filter(Boolean)
           .join(',')
-        if (domains !== defaultValues.EmailDomainWhitelist) {
+        if (domains !== defaultValues[key as keyof typeof defaultValues]) {
           updates.push({ key, value: domains })
         }
       } else if (value !== defaultValues[key as keyof typeof defaultValues]) {
@@ -256,6 +282,110 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
                 <FormDescription>
                   {t(
                     'One domain per line (only used when domain restriction is enabled)'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='DisposableEmailBlockEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Block Disposable Email Domains')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Reject registrations from known throwaway mailbox providers before sending the verification code'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='DisposableEmailHeuristicMode'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Disposable Email Heuristics')}</FormLabel>
+                <FormControl>
+                  <Select
+                    value={field.value}
+                    onValueChange={field.onChange}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='off'>{t('Off')}</SelectItem>
+                      <SelectItem value='log'>
+                        {t('Log only (do not reject)')}
+                      </SelectItem>
+                      <SelectItem value='block'>
+                        {t('Reject matching addresses')}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Applies to addresses outside the blocklist: random-looking domains under low-reputation TLDs, and one source using several subdomains of the same parent domain'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='DisposableEmailExtraDomains'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Additional Blocked Domains')}</FormLabel>
+                <FormControl>
+                  <Textarea
+                    placeholder={t('example.com&#10;company.com')}
+                    rows={4}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'One domain per line. Subdomains are matched too; leave empty unless the synced list misses a provider'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='DisposableEmailAllowlist'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Blocklist Exceptions')}</FormLabel>
+                <FormControl>
+                  <Textarea
+                    placeholder={t('example.com&#10;company.com')}
+                    rows={3}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'One domain per line. Always allowed, overriding the blocklist and the heuristics'
                   )}
                 </FormDescription>
                 <FormMessage />

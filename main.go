@@ -377,6 +377,12 @@ func InitResources() error {
 	}
 	model.InitOptionMap()
 
+	// Load the synced disposable-email blocklist after options so the policy
+	// has both the file and the operator lists available from the first request.
+	if err := service.LoadDisposableEmailBlocklist(); err != nil {
+		common.SysError(common.LogText("failed to load disposable email blocklist: %s", err.Error()))
+	}
+
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
 

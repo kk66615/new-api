@@ -38,6 +38,10 @@ func EmailBindStart(c *gin.Context) {
 		writeSecurityOperationError(c, err)
 		return
 	}
+	if err := service.CheckRegistrationEmailPolicy(c.Request.Context(), email, c.ClientIP()); err != nil {
+		writeSecurityOperationError(c, err)
+		return
+	}
 	context, err := common.Marshal(service.AccountBindingContext{Provider: "email", Email: email})
 	if err != nil {
 		writeSecurityOperationError(c, err)
