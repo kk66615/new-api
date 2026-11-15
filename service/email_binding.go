@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -52,6 +53,14 @@ func ValidateAccountEmail(email string) (string, error) {
 		return "", ErrAccountEmailRestricted
 	}
 	return email, nil
+}
+
+// CheckRegistrationEmailPolicy rejects addresses the operator has excluded,
+// either by the disposable-domain policy or by the same rules registration
+// uses, so a binding cannot be used to attach a throwaway mailbox. The policy
+// switch is read inside CheckDisposableEmail under the options lock.
+func CheckRegistrationEmailPolicy(ctx context.Context, email string, clientIP string) error {
+	return CheckDisposableEmail(ctx, email, clientIP)
 }
 
 func StartEmailBinding(identity AuthIdentity, authorization *model.AuthFlowAuthorization, email string, lang string) (*EmailBindingData, error) {

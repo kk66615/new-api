@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -64,6 +65,10 @@ func InitOptionMap() {
 	common.OptionMap["ChannelDisableThreshold"] = strconv.FormatFloat(common.ChannelDisableThreshold, 'f', -1, 64)
 	common.OptionMap["EmailDomainRestrictionEnabled"] = strconv.FormatBool(common.EmailDomainRestrictionEnabled)
 	common.OptionMap["EmailAliasRestrictionEnabled"] = strconv.FormatBool(common.EmailAliasRestrictionEnabled)
+	common.OptionMap["DisposableEmailBlockEnabled"] = strconv.FormatBool(common.DisposableEmailBlockEnabled)
+	common.OptionMap["DisposableEmailHeuristicMode"] = common.DisposableEmailHeuristicMode
+	common.OptionMap["DisposableEmailExtraDomains"] = strings.Join(common.DisposableEmailExtraDomains, ",")
+	common.OptionMap["DisposableEmailAllowlist"] = strings.Join(common.DisposableEmailAllowlist, ",")
 	common.OptionMap["EmailDomainWhitelist"] = strings.Join(common.EmailDomainWhitelist, ",")
 	common.OptionMap["SMTPServer"] = ""
 	common.OptionMap["EmailProvider"] = "smtp"
@@ -271,6 +276,13 @@ func validateOptionValue(key string, value string) error {
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
+	if key == "DisposableEmailHeuristicMode" {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "block", "log", "off":
+			return nil
+		}
+		return fmt.Errorf("invalid DisposableEmailHeuristicMode %q: use off, log or block", value)
+	}
 	return nil
 }
 
@@ -425,6 +437,8 @@ func updateOptionMap(key string, value string) (err error) {
 			common.EmailDomainRestrictionEnabled = boolValue
 		case "EmailAliasRestrictionEnabled":
 			common.EmailAliasRestrictionEnabled = boolValue
+		case "DisposableEmailBlockEnabled":
+			common.DisposableEmailBlockEnabled = boolValue
 		case "AutomaticDisableChannelEnabled":
 			common.AutomaticDisableChannelEnabled = boolValue
 		case "AutomaticEnableChannelEnabled":
@@ -500,6 +514,19 @@ func updateOptionMap(key string, value string) (err error) {
 	switch key {
 	case "EmailDomainWhitelist":
 		common.EmailDomainWhitelist = strings.Split(value, ",")
+	case "DisposableEmailHeuristicMode":
+		// validateOptionValue rejects unknown values before they reach the
+		// database; reaching here with a bad value means a row written by an
+		// older build, so keep the previous in-memory mode.
+		mode := strings.ToLower(strings.TrimSpace(value))
+		switch mode {
+		case "block", "log", "off":
+			common.DisposableEmailHeuristicMode = mode
+		}
+	case "DisposableEmailExtraDomains":
+		common.DisposableEmailExtraDomains = splitDomainList(value)
+	case "DisposableEmailAllowlist":
+		common.DisposableEmailAllowlist = splitDomainList(value)
 	case "SMTPServer":
 		common.SMTPServer = value
 	case "SMTPPort":
@@ -747,4 +774,19 @@ func handleConfigUpdate(key, value string) bool {
 	}
 
 	return true // 已处理
+}
+
+// splitDomainList normalizes a comma, whitespace or newline separated domain
+// list from an option value.
+func splitDomainList(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	})
+	domains := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if domain := strings.ToLower(strings.Trim(strings.TrimSpace(field), ".")); domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	return domains
 }

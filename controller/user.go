@@ -248,6 +248,12 @@ func Register(c *gin.Context) {
 			common.ApiErrorT(c, "Verification code is incorrect or has expired")
 			return
 		}
+		// Checked again here as well as at send time: a code obtained before
+		// the policy was tightened must not complete a registration.
+		if err := service.CheckRegistrationEmailPolicy(c.Request.Context(), user.Email, c.ClientIP()); err != nil {
+			writeSecurityOperationError(c, err)
+			return
+		}
 		if err := model.EnsureEmailAvailable(user.Email, 0); err != nil {
 			if errors.Is(err, model.ErrEmailAlreadyTaken) {
 				common.ApiErrorT(c, "Email address is already in use")

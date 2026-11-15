@@ -227,6 +227,11 @@ func SendEmailVerification(c *gin.Context) {
 		common.ApiErrorT(c, "Email address is already in use")
 		return
 	}
+	// Reject before sending: a refused address must not cost a mail delivery.
+	if err := service.CheckRegistrationEmailPolicy(c.Request.Context(), email, c.ClientIP()); err != nil {
+		writeSecurityOperationError(c, err)
+		return
+	}
 	code := common.GenerateVerificationCode(6)
 	common.RegisterVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
 	// The address may not belong to an account yet, so the mail follows the

@@ -164,6 +164,10 @@ export type AuthSettings = {
   EmailDomainRestrictionEnabled: boolean
   EmailAliasRestrictionEnabled: boolean
   EmailDomainWhitelist: string
+  DisposableEmailBlockEnabled: boolean
+  DisposableEmailHeuristicMode: 'off' | 'log' | 'block'
+  DisposableEmailExtraDomains: string
+  DisposableEmailAllowlist: string
   ServerAddress: string
   GitHubOAuthEnabled: boolean
   GitHubClientId: string

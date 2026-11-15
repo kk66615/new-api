@@ -21,6 +21,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(emailBlocklistSyncHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -149,6 +150,33 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// emailBlocklistSyncHandler refreshes the disposable-email domain list once a
+// day. It runs regardless of DisposableEmailBlockEnabled so the file is already
+// current whenever the operator turns enforcement on.
+type emailBlocklistSyncHandler struct{}
+
+func (emailBlocklistSyncHandler) Type() string { return model.SystemTaskTypeEmailBlocklist }
+
+func (emailBlocklistSyncHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("EMAIL_BLOCKLIST_SYNC_ENABLED", true)
+}
+
+func (emailBlocklistSyncHandler) Interval() time.Duration {
+	hours := common.GetEnvOrDefault("EMAIL_BLOCKLIST_SYNC_INTERVAL_HOURS", 24)
+	return time.Duration(max(hours, 1)) * time.Hour
+}
+
+func (emailBlocklistSyncHandler) NewPayload() any { return nil }
+
+func (emailBlocklistSyncHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	entries, err := service.SyncDisposableEmailBlocklist(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, map[string]any{"domains": entries}, nil)
 }
 
 func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {

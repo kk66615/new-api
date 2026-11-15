@@ -501,6 +501,12 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 	}
 	if oauthUser.Email != "" {
 		user.Email = model.NormalizeEmail(oauthUser.Email)
+		// OAuth signup is a registration path: a provider that hands back a
+		// throwaway address must not create an account the password path would
+		// have refused.
+		if err := service.CheckRegistrationEmailPolicy(c.Request.Context(), user.Email, c.ClientIP()); err != nil {
+			return nil, nil, err
+		}
 		if err := model.EnsureEmailAvailable(user.Email, 0); err != nil {
 			if errors.Is(err, model.ErrEmailAlreadyTaken) {
 				return nil, nil, &OAuthEmailAlreadyTakenError{}

@@ -7474,6 +7474,19 @@
     "Azure content-safety annotations": "Azure 内容安全标注",
     "Meaning unknown": "含义未知",
     "Top-level fields the upstream added outside the standard protocol, usually by relay software; useful to identify the relay, not evidence of model authenticity.": "上游在标准协议之外添加的顶层字段，通常由中转软件添加；可用于识别中转，不能作为模型真伪的证据。",
-    "Group name used by group conditions in the expression": "表达式中 group 条件使用的分组名"
+    "Group name used by group conditions in the expression": "表达式中 group 条件使用的分组名",
+    "Block Disposable Email Domains": "拦截一次性邮箱域名",
+    "Reject registrations from known throwaway mailbox providers before sending the verification code": "在发送验证码之前拒绝已知的一次性邮箱服务商注册",
+    "Disposable Email Heuristics": "一次性邮箱启发式判定",
+    "Off": "关闭",
+    "Log only (do not reject)": "仅记录（不拒绝）",
+    "Reject matching addresses": "拒绝命中的地址",
+    "Applies to addresses outside the blocklist: random-looking domains under low-reputation TLDs, and one source using several subdomains of the same parent domain": "适用于清单之外的地址：低信誉顶级域下的随机域名，以及同一来源使用同一父域下多个子域名的情况",
+    "Additional Blocked Domains": "额外拦截域名",
+    "One domain per line. Subdomains are matched too; leave empty unless the synced list misses a provider": "每行一个域名。子域名同样命中；只有同步清单漏掉某个服务商时才需要填写",
+    "Blocklist Exceptions": "拦截白名单",
+    "One domain per line. Always allowed, overriding the blocklist and the heuristics": "每行一个域名。始终放行，优先级高于清单和启发式判定",
+    "Disposable email blocklist sync": "一次性邮箱清单同步",
+    "Disposable email addresses are not accepted here. Please use a personal or company mailbox.": "不接受一次性邮箱地址。请使用个人或企业邮箱。"
   }
 }

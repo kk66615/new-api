@@ -77,6 +77,15 @@ var RegisterEnabled = true
 
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
+var DisposableEmailBlockEnabled = false   // 是否拒绝一次性/临时邮箱域名注册
+// DisposableEmailHeuristicMode: off | log | block，控制清单之外的启发式判定
+var DisposableEmailHeuristicMode = "off"
+
+// DisposableEmailExtraDomains 是运维自建的补充域名清单（逗号分隔），命中即拒
+var DisposableEmailExtraDomains []string
+
+// DisposableEmailAllowlist 是放行清单（逗号分隔），优先级高于所有拦截规则
+var DisposableEmailAllowlist []string
 var EmailDomainWhitelist = []string{
 	"gmail.com",
 	"163.com",
