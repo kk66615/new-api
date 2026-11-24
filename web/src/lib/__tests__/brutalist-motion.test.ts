@@ -212,7 +212,7 @@ describe('attachDialogOriginMotion edge cases', () => {
     queue = []
     let id = 1
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-      queue.push({ id: id, cb })
+      queue.push({ id, cb })
       return id++
     })
     vi.stubGlobal('cancelAnimationFrame', (handle: number) => {

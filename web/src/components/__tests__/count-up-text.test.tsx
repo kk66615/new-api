@@ -93,7 +93,7 @@ describe('CountUpText', () => {
 
     expect(figure()).toHaveTextContent('$0.00')
     advance(200)
-    const midway = Number(figure().textContent?.replace(/[$,]/g, ''))
+    const midway = Number(figure().textContent?.replaceAll(/[$,]/g, ''))
     expect(midway).toBeGreaterThan(0)
     expect(midway).toBeLessThan(2340.53)
     advance(2000)
