@@ -25,6 +25,14 @@ For commercial licensing, please contact support@quantumnous.com
 
 export const THEME_PRESETS = [
   {
+    // Site default. Brutalist cream canvas with ink borders and hard offset
+    // shadows, adapted from the tweakcn "MX-Brutalist" theme. Its motion layer
+    // lives in styles/mx-brutalist-motion.css.
+    value: 'mx-brutalist',
+    name: 'MX Brutalist',
+    swatches: ['oklch(0.5687 0.1498 151.938)', 'oklch(0.6088 0.2498 29.2339)'],
+  },
+  {
     value: 'default',
     name: 'Default',
     swatches: ['oklch(0.72 0.18 250)', 'oklch(0.7 0.12 280)'],
@@ -112,7 +120,7 @@ export type ThemeCustomization = {
 }
 
 export const DEFAULT_THEME_CUSTOMIZATION: ThemeCustomization = {
-  preset: 'default',
+  preset: 'mx-brutalist',
   font: 'default',
   radius: 'default',
   scale: 'default',

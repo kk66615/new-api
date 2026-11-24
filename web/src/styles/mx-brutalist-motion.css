@@ -1,0 +1,405 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+/*
+ * MX Brutalist: component styling and motion layer.
+ *
+ * Everything is scoped to `[data-theme-preset='mx-brutalist']` (set on <body>
+ * by the theme customization provider) so every other preset keeps the stock
+ * look and motion. Colour tokens live in theme-presets.css. Motion rules sit
+ * inside `prefers-reduced-motion: no-preference`, so users who ask the OS for
+ * less motion get the static styling only.
+ *
+ * Script-driven pieces (dialogs growing from the clicked element, numbers
+ * rolling up, the dark/light ink reveal) live in lib/brutalist-motion.ts and
+ * check the same preset attribute.
+ */
+
+[data-theme-preset='mx-brutalist'] {
+  --brut-spring: linear(
+    0,
+    0.009,
+    0.035 2.1%,
+    0.141 4.4%,
+    0.723 12.9%,
+    0.938 16.7%,
+    1.017 19.4%,
+    1.067,
+    1.099 24.3%,
+    1.108 26%,
+    1.1,
+    1.084 30.8%,
+    1.026 37.3%,
+    1.004 41.2%,
+    0.993 45.7%,
+    0.996 56.2%,
+    1
+  );
+  --brut-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  letter-spacing: 0.02em;
+}
+
+/* ── Static styling ───────────────────────────────────────────────────── */
+[data-theme-preset='mx-brutalist']
+  :is(
+    h1,
+    h2,
+    h3,
+    h4,
+    [data-slot='card-title'],
+    [data-slot='dialog-title']
+  ) {
+  font-family: var(--font-brut-display);
+  font-synthesis-weight: none;
+  letter-spacing: 0.01em;
+}
+[data-theme-preset='mx-brutalist'] :is(td, code, pre, kbd, .font-mono) {
+  font-family: var(--font-brut-mono);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='sidebar-inner'] {
+  border-right: 2px solid var(--brut-ink);
+}
+[data-theme-preset='mx-brutalist']
+  [data-slot='sidebar-inset']
+  :is(.shadow-xs, .shadow-sm, .shadow) {
+  box-shadow: var(--brut-shadow);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] .bg-card .bg-card {
+  box-shadow: none;
+}
+[data-theme-preset='mx-brutalist']
+  [data-slot='sidebar-menu-button'][data-active]:not([data-active='false']) {
+  box-shadow: 3px 3px 0 0 var(--brut-ink);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='overview-quota-panel'] {
+  background: color-mix(in oklch, var(--muted) 75%, var(--card));
+}
+[data-theme-preset='mx-brutalist'] [data-slot='dialog-content'] {
+  border: 2px solid var(--brut-ink);
+  border-radius: 0;
+  box-shadow: 6px 6px 0 0 var(--brut-ink);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='dialog-overlay'] {
+  background: oklch(0.2 0.03 160 / 0.25);
+}
+[data-theme-preset='mx-brutalist'] tbody tr:hover {
+  box-shadow: inset 4px 0 0 0 var(--primary);
+}
+
+/* Toasts: square speech bubble with a hard shadow. */
+[data-theme-preset='mx-brutalist'] :is([data-sonner-toaster], [data-sonner-toast]) {
+  font-family: var(--font-body);
+}
+[data-theme-preset='mx-brutalist'] [data-sonner-toast] {
+  border: 2px solid var(--brut-ink) !important;
+  border-radius: 0 !important;
+  box-shadow: 4px 4px 0 0 var(--brut-ink) !important;
+  background: var(--card) !important;
+  color: var(--foreground) !important;
+  overflow: visible !important;
+}
+[data-theme-preset='mx-brutalist']
+  [data-sonner-toast]:not([data-swiping='true'])::before {
+  content: '';
+  position: absolute;
+  right: 28px;
+  bottom: -12px;
+  width: 18px;
+  height: 18px;
+  background: var(--card);
+  border-right: 2px solid var(--brut-ink);
+  border-bottom: 2px solid var(--brut-ink);
+  transform: skewX(-30deg) rotate(45deg);
+}
+
+/* Refreshing tables stay fully readable; the motion block adds the ink bar. */
+[data-theme-preset='mx-brutalist'] .data-table-refreshing {
+  position: relative;
+  opacity: 1;
+}
+[data-theme-preset='mx-brutalist'] .data-table-refreshing::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 19;
+  pointer-events: none;
+  background-image: radial-gradient(
+    color-mix(in oklch, var(--brut-ink) 18%, transparent) 1px,
+    transparent 1.4px
+  );
+  background-size: 5px 5px;
+}
+
+/* Skeletons: halftone screentone instead of a flat grey block. */
+[data-theme-preset='mx-brutalist'] :is([data-slot='skeleton'], .skeleton-shimmer) {
+  background-color: var(--muted) !important;
+  background-image:
+    radial-gradient(
+      color-mix(in oklch, var(--brut-ink) 28%, transparent) 1px,
+      transparent 1.4px
+    ),
+    linear-gradient(
+      100deg,
+      transparent 30%,
+      color-mix(in oklch, var(--background) 85%, transparent) 50%,
+      transparent 70%
+    ) !important;
+  background-size:
+    6px 6px,
+    60% 100% !important;
+  background-repeat: repeat, no-repeat !important;
+}
+
+/* ── Motion ───────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  /* Buttons lift with a hard ink shadow and sink when pressed. */
+  [data-theme-preset='mx-brutalist'] .group\/button {
+    transition:
+      transform 0.22s var(--brut-spring),
+      box-shadow 0.22s var(--brut-spring),
+      background-color 0.15s,
+      color 0.15s;
+  }
+  [data-theme-preset='mx-brutalist']
+    .group\/button:is(.bg-primary, .border:not(.border-transparent)):not(
+      :disabled
+    ):hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 3px 3px 0 0 var(--brut-ink);
+  }
+  [data-theme-preset='mx-brutalist']
+    .group\/button:is(.bg-primary, .border:not(.border-transparent)):not(
+      :disabled
+    ):active {
+    transform: translate(1px, 1px);
+    box-shadow: 0 0 0 0 var(--brut-ink);
+    transition-duration: 0.06s;
+  }
+  [data-theme-preset='mx-brutalist']
+    .group\/button:not(.bg-primary):not(:disabled):active {
+    transform: scale(0.92);
+    transition-duration: 0.06s;
+  }
+
+  /* Sidebar: nudge on hover; the selected fill sweeps in from the left. */
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-menu-button'] {
+    transition:
+      transform 0.25s var(--brut-spring),
+      background-color 0.2s,
+      color 0.2s;
+  }
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-menu-button']:hover {
+    transform: translateX(4px);
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-menu-button'][data-active]:not([data-active='false']) {
+    animation: brut-fill-sweep 0.42s var(--brut-ease-out);
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-menu-button'][data-active]:not(
+      [data-active='false']
+    ):hover {
+    transform: none;
+  }
+
+  /* Panels drop into place like comic frames, one after another. */
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main .bg-card.border,
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-inset']
+    main
+    div.rounded-xl.border:not(.rounded-xl.border *) {
+    animation: brut-panel-in 0.6s var(--brut-spring) both;
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-inset']
+    main
+    .bg-card.border:nth-child(2) {
+    animation-delay: 0.06s;
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-inset']
+    main
+    .bg-card.border:nth-child(3) {
+    animation-delay: 0.12s;
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-inset']
+    main
+    .bg-card.border:nth-child(4) {
+    animation-delay: 0.18s;
+  }
+  [data-theme-preset='mx-brutalist']
+    [data-slot='sidebar-inset']
+    main
+    .bg-card.border:nth-child(n + 5) {
+    animation-delay: 0.24s;
+  }
+
+  /* Table rows slide in from the left. */
+  [data-theme-preset='mx-brutalist'] tbody tr {
+    animation: brut-row-in 0.45s var(--brut-spring) both;
+    transition: box-shadow 0.25s var(--brut-spring);
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(2) {
+    animation-delay: 0.03s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(3) {
+    animation-delay: 0.06s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(4) {
+    animation-delay: 0.09s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(5) {
+    animation-delay: 0.12s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(6) {
+    animation-delay: 0.15s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(7) {
+    animation-delay: 0.18s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(8) {
+    animation-delay: 0.21s;
+  }
+  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(n + 9) {
+    animation-delay: 0.24s;
+  }
+
+  /* Skeleton light sweep across the screentone. */
+  [data-theme-preset='mx-brutalist'] :is([data-slot='skeleton'], .skeleton-shimmer) {
+    animation: brut-tone-sweep 1.3s linear infinite !important;
+  }
+
+  /* Refresh: an ink bar sweeps the top edge while data reloads. */
+  [data-theme-preset='mx-brutalist'] .data-table-refreshing::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 4px;
+    z-index: 20;
+    background: var(--primary);
+    animation: brut-ink-bar 0.9s var(--brut-ease-out) infinite;
+  }
+
+  /* Spinners whirl and settle instead of turning at a constant rate. */
+  [data-theme-preset='mx-brutalist'] .animate-spin {
+    animation-timing-function: cubic-bezier(0.5, 0.1, 0.4, 0.9);
+    animation-duration: 0.7s;
+  }
+
+  /* Toast bubbles pop in. */
+  [data-theme-preset='mx-brutalist'] [data-sonner-toast] > * {
+    animation: brut-bubble-pop 0.5s var(--brut-spring) both;
+    transform-origin: 90% 100%;
+  }
+
+  /* Dialogs: lib/brutalist-motion.ts grows them from the clicked element, so
+   * the stock zoom/fade is switched off while it is in charge. */
+  [data-theme-preset='mx-brutalist'] [data-slot='dialog-content'][data-origin-motion] {
+    animation: none !important;
+  }
+}
+
+/* Dark/light switch: the new palette spreads from the click point. The
+ * attribute is only set by lib/brutalist-motion.ts for the duration of the
+ * view transition, and never when the user prefers reduced motion. */
+html[data-ink-reveal]::view-transition-old(root),
+html[data-ink-reveal]::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+html[data-ink-reveal]::view-transition-new(root) {
+  animation: brut-ink-reveal 0.75s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes brut-fill-sweep {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 -8px -8px 0);
+  }
+}
+@keyframes brut-panel-in {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96) rotate(-0.8deg);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes brut-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes brut-tone-sweep {
+  from {
+    background-position:
+      0 0,
+      -150% 0;
+  }
+  to {
+    background-position:
+      12px 12px,
+      250% 0;
+  }
+}
+@keyframes brut-ink-bar {
+  0% {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  50% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  50.01% {
+    transform: scaleX(1);
+    transform-origin: right;
+  }
+  100% {
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+}
+@keyframes brut-bubble-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4) rotate(-6deg);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes brut-ink-reveal {
+  from {
+    clip-path: circle(0 at var(--ink-x, 50%) var(--ink-y, 50%));
+  }
+  to {
+    clip-path: circle(150vmax at var(--ink-x, 50%) var(--ink-y, 50%));
+  }
+}

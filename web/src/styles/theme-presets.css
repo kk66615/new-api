@@ -426,10 +426,13 @@ For commercial licensing, please contact support@quantumnous.com
  *   - `anthropic`: warm cream surfaces are a brand choice, NOT a primary-mix
  *     derivation (the Anthropic system deliberately uses warm neutrals for
  *     cards/borders rather than tinting them with the clay accent).
- *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces. */
+ *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces.
+ *   - `mx-brutalist`: ships the exact surface tokens of its source theme. */
 [data-theme-preset]:not([data-theme-preset='default']):not(
   [data-theme-preset='anthropic']
-):not([data-theme-preset='simple-large']) {
+):not([data-theme-preset='simple-large']):not(
+  [data-theme-preset='mx-brutalist']
+) {
   --card: color-mix(in oklch, var(--primary) 3%, var(--background));
   --popover: color-mix(in oklch, var(--primary) 5%, var(--background));
   --muted: color-mix(in oklch, var(--primary) 7%, var(--background));
@@ -454,7 +457,9 @@ For commercial licensing, please contact support@quantumnous.com
 .dark
   [data-theme-preset]:not([data-theme-preset='default']):not(
     [data-theme-preset='anthropic']
-  ):not([data-theme-preset='simple-large']) {
+  ):not([data-theme-preset='simple-large']):not(
+    [data-theme-preset='mx-brutalist']
+  ) {
   --card: color-mix(in oklch, var(--primary) 8%, var(--background));
   --popover: color-mix(in oklch, var(--primary) 12%, var(--background));
   --muted: color-mix(in oklch, var(--primary) 12%, var(--background));
@@ -469,6 +474,130 @@ For commercial licensing, please contact support@quantumnous.com
   --sidebar: color-mix(in oklch, var(--primary) 5%, var(--background));
   --sidebar-accent: color-mix(in oklch, var(--primary) 18%, var(--background));
   --sidebar-border: color-mix(in oklch, var(--primary) 22%, var(--background));
+}
+
+/* ── MX Brutalist (site default) ──────────────────────────────────────── */
+/*
+ * Adapted from the tweakcn "MX-Brutalist" theme: cream canvas, deep green
+ * ink, green primary with red/orange accents, square corners and hard offset
+ * shadows. Opted out of the semantic surface bridge above so these exact
+ * surface tokens win. Component-level styling and the motion layer live in
+ * mx-brutalist-motion.css.
+ */
+[data-theme-preset='mx-brutalist'] {
+  --background: oklch(0.9923 0.0104 91.4994);
+  --foreground: oklch(0.1759 0.0275 161.2531);
+  --card: oklch(1.0000 0 0);
+  --card-foreground: oklch(0.1759 0.0275 161.2531);
+  --popover: oklch(1.0000 0 0);
+  --popover-foreground: oklch(0.1759 0.0275 161.2531);
+  --primary: oklch(0.5687 0.1498 151.9380);
+  --primary-foreground: oklch(1.0000 0 0);
+  --secondary: oklch(0.6088 0.2498 29.2339);
+  --secondary-foreground: oklch(1.0000 0 0);
+  --muted: oklch(0.9465 0.0314 91.6628);
+  --muted-foreground: oklch(0.3525 0.0379 91.7268);
+  --accent: oklch(0.7721 0.1727 64.1585);
+  --accent-foreground: oklch(0.1759 0.0275 161.2531);
+  --destructive: oklch(0.5799 0.2380 29.2339);
+  --destructive-foreground: oklch(1.0000 0 0);
+  --border: oklch(0 0 0);
+  --input: oklch(1.0000 0 0);
+  --ring: oklch(0.5687 0.1498 151.9380);
+  --chart-1: oklch(0.5687 0.1498 151.9380);
+  --chart-2: oklch(0.6088 0.2498 29.2339);
+  --chart-3: oklch(0.7721 0.1727 64.1585);
+  --chart-4: oklch(0.6829 0.2615 345.7533);
+  --chart-5: oklch(0.7443 0.1347 219.0676);
+  --sidebar: oklch(0.3167 0.0793 154.3757);
+  --sidebar-foreground: oklch(1.0000 0 0);
+  --sidebar-primary: oklch(0.7721 0.1727 64.1585);
+  --sidebar-primary-foreground: oklch(0.3167 0.0793 154.3757);
+  --sidebar-accent: oklch(0.4156 0.1071 152.9714);
+  --sidebar-accent-foreground: oklch(1.0000 0 0);
+  --sidebar-border: oklch(0 0 0);
+  --sidebar-ring: oklch(0.7721 0.1727 64.1585);
+
+  /* Sidebar and header share the page canvas; only the selected item turns
+   * green (the tweakcn source paints the whole sidebar dark green). */
+  --sidebar: var(--background);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--primary);
+  --sidebar-accent-foreground: var(--primary-foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  --skeleton-base: oklch(0.9465 0.0314 91.6628);
+  --skeleton-highlight: oklch(0.9923 0.0104 91.4994);
+  --radius: 0rem;
+
+  /* Ink used for hard offset shadows and outlines. */
+  --brut-ink: oklch(0.1759 0.0275 161.2531);
+  --brut-shadow: 4px 4px 0 0 var(--brut-ink);
+
+  /* Latin faces come from the theme; CJK falls back to the platform sans. */
+  --font-ui-sans:
+    'Montserrat Variable', 'Montserrat', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
+  --font-brut-display:
+    'Montserrat Variable', 'Smiley Sans Oblique', 'PingFang SC',
+    'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-brut-mono:
+    'Space Mono', ui-monospace, Menlo, Consolas, 'PingFang SC',
+    'Microsoft YaHei', 'Noto Sans SC', monospace;
+}
+.dark [data-theme-preset='mx-brutalist'] {
+  --background: oklch(0.1649 0.0308 162.2739);
+  --foreground: oklch(0.9809 0.0260 91.6197);
+  --card: oklch(0.2283 0.0445 158.2398);
+  --card-foreground: oklch(0.9809 0.0260 91.6197);
+  --popover: oklch(0.2283 0.0445 158.2398);
+  --popover-foreground: oklch(0.9809 0.0260 91.6197);
+  --primary: oklch(0.8484 0.2275 151.1487);
+  --primary-foreground: oklch(0.1292 0.0270 165.3808);
+  --secondary: oklch(0.6489 0.2370 26.9728);
+  --secondary-foreground: oklch(1.0000 0 0);
+  --muted: oklch(0.2724 0.0467 159.1721);
+  --muted-foreground: oklch(0.8253 0.0270 91.6606);
+  --accent: oklch(0.7951 0.1631 68.6392);
+  --accent-foreground: oklch(0.1292 0.0270 165.3808);
+  --destructive: oklch(0.6280 0.2577 29.2339);
+  --destructive-foreground: oklch(1.0000 0 0);
+  --border: oklch(0.9809 0.0260 91.6197);
+  --input: oklch(0.2642 0.0387 160.3481);
+  --ring: oklch(0.7951 0.1631 68.6392);
+  --chart-1: oklch(0.8484 0.2275 151.1487);
+  --chart-2: oklch(0.6489 0.2370 26.9728);
+  --chart-3: oklch(0.7951 0.1631 68.6392);
+  --chart-4: oklch(0.7337 0.2145 342.8759);
+  --chart-5: oklch(0.8296 0.1375 215.2952);
+  --sidebar: oklch(0.1292 0.0270 165.3808);
+  --sidebar-foreground: oklch(0.9809 0.0260 91.6197);
+  --sidebar-primary: oklch(0.8484 0.2275 151.1487);
+  --sidebar-primary-foreground: oklch(0.1292 0.0270 165.3808);
+  --sidebar-accent: oklch(0.2449 0.0403 159.5177);
+  --sidebar-accent-foreground: oklch(0.9809 0.0260 91.6197);
+  --sidebar-border: oklch(0.9809 0.0260 91.6197);
+  --sidebar-ring: oklch(0.7951 0.1631 68.6392);
+
+  /* Sidebar and header share the page canvas; only the selected item turns
+   * green (the tweakcn source paints the whole sidebar dark green). */
+  --sidebar: var(--background);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--primary);
+  --sidebar-accent-foreground: var(--primary-foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  --skeleton-base: oklch(0.2724 0.0467 159.1721);
+  --skeleton-highlight: oklch(0.3525 0.0467 159.1721);
+
+  --brut-ink: oklch(0.9809 0.026 91.6197);
+  --brut-shadow: 4px 4px 0 0 oklch(0.85 0.12 85);
 }
 
 /* ── Anthropic ────────────────────────────────────────────────────────── */

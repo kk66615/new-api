@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { LucideIcon } from 'lucide-react'
 import { useId, type ReactNode } from 'react'
 
+import { CountUpText } from '@/components/count-up-text'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -274,7 +275,7 @@ export function StatCard(props: StatCardProps) {
     valueContent = (
       <div className='flex flex-col gap-1'>
         <div className='text-foreground font-mono text-base font-semibold tracking-tight break-all tabular-nums sm:text-2xl'>
-          {props.value}
+          <CountUpText text={props.value} />
         </div>
         <p
           className={cn(

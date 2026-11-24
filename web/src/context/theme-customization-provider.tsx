@@ -126,12 +126,12 @@ export function ThemeCustomizationProvider(props: {
   )
 
   // Mirror state to the <body> via data-* attributes so theme-presets.css can
-  // override CSS variables at the right cascade layer.
+  // override CSS variables at the right cascade layer. The preset is always
+  // written: the site default (mx-brutalist) carries its own tokens, while the
+  // stock look is the explicit 'default' value, which the CSS treats as "no
+  // overrides".
   useEffect(() => {
-    applyAttribute(
-      'data-theme-preset',
-      preset === DEFAULT_THEME_CUSTOMIZATION.preset ? null : preset
-    )
+    applyAttribute('data-theme-preset', preset)
   }, [preset])
 
   // Resolve Auto into the preset font or the browser's sans-serif while

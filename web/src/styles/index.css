@@ -26,9 +26,17 @@ For commercial licensing, please contact support@quantumnous.com
  * that activates it. Loaded globally so font-switching is instantaneous
  * with no FOUT once the variable is fetched. */
 @import '@fontsource-variable/lora';
+/* MX Brutalist faces: Montserrat (UI), Space Mono (numbers, keys, logs) and
+ * Smiley Sans Oblique (CJK headings). Only @font-face rules are declared
+ * here; browsers fetch the files when the preset actually uses them. */
+@import '@fontsource-variable/montserrat';
+@import '@fontsource/space-mono/400.css';
+@import '@fontsource/space-mono/700.css';
+@import '@chinese-fonts/dyh/dist/SmileySans-Oblique/result.css';
 
 @import './theme.css';
 @import './theme-presets.css';
+@import './mx-brutalist-motion.css';
 
 @layer base {
   :root {

@@ -22,9 +22,11 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 
+import { runInkThemeTransition } from '@/lib/brutalist-motion'
 import {
   readThemePreference,
   THEME_STORAGE_KEYS,
@@ -85,18 +87,35 @@ export function ThemeProvider({
     resolveTheme(theme)
   )
 
+  // The first application happens on mount and must not animate; later ones
+  // come from the user switching modes and may use the MX Brutalist ink reveal.
+  const appliedOnce = useRef(false)
+
   useEffect(() => {
     const root = window.document.documentElement
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
 
     const applyTheme = () => {
       const nextResolvedTheme = theme === 'system' ? getSystemTheme() : theme
-      root.classList.remove('light', 'dark')
-      root.classList.add(nextResolvedTheme)
+      const otherTheme = nextResolvedTheme === 'dark' ? 'light' : 'dark'
+      if (
+        root.classList.contains(nextResolvedTheme) &&
+        !root.classList.contains(otherTheme)
+      ) {
+        setResolvedTheme(nextResolvedTheme)
+        return
+      }
+      const update = () => {
+        root.classList.remove('light', 'dark')
+        root.classList.add(nextResolvedTheme)
+      }
+      if (appliedOnce.current) runInkThemeTransition(update)
+      else update()
       setResolvedTheme(nextResolvedTheme)
     }
 
     applyTheme()
+    appliedOnce.current = true
 
     mediaQuery.addEventListener('change', applyTheme)
 
