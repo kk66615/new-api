@@ -203,6 +203,71 @@ describe('attachDialogOriginMotion', () => {
   })
 })
 
+describe('attachDialogOriginMotion edge cases', () => {
+  let queue: Array<{ id: number; cb: FrameRequestCallback }>
+  let el: HTMLDivElement
+  let detach: () => void
+
+  beforeEach(() => {
+    queue = []
+    let id = 1
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      queue.push({ id: id, cb })
+      return id++
+    })
+    vi.stubGlobal('cancelAnimationFrame', (handle: number) => {
+      queue = queue.filter((frame) => frame.id !== handle)
+    })
+    document.body.setAttribute('data-theme-preset', 'mx-brutalist')
+    stubMotionAllowed()
+    el = document.createElement('div')
+    document.body.appendChild(el)
+  })
+
+  afterEach(() => {
+    detach?.()
+    el.remove()
+    document.body.removeAttribute('data-theme-preset')
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('opens in place when there is no recent click (keyboard open)', async () => {
+    const calls = stubAnimations(el)
+    // Any earlier click is now far in the past.
+    vi.spyOn(performance, 'now').mockReturnValue(1e9)
+    detach = attachDialogOriginMotion(el)
+    el.setAttribute('data-open', '')
+    await flush()
+    for (const frame of queue.splice(0)) frame.cb(0)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('drops the queued grow-in when the dialog closes in the same frame', async () => {
+    const calls = stubAnimations(el)
+    detach = attachDialogOriginMotion(el)
+    const trigger = document.createElement('button')
+    trigger.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 20, height: 10 }) as DOMRect
+    document.body.appendChild(trigger)
+    trigger.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, clientX: 5, clientY: 5 })
+    )
+    trigger.remove()
+
+    el.setAttribute('data-open', '')
+    await flush()
+    expect(queue).toHaveLength(1)
+    el.removeAttribute('data-open')
+    el.setAttribute('data-closed', '')
+    await flush()
+    for (const frame of queue.splice(0)) frame.cb(0)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].options.fill).toBe('forwards')
+  })
+})
+
 describe('runInkThemeTransition', () => {
   afterEach(() => {
     document.body.removeAttribute('data-theme-preset')

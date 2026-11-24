@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 
 import { useThemeCustomization } from '@/context/theme-customization-provider'
 import {
@@ -40,29 +40,32 @@ export function CountUpText(props: { text: string | number }) {
   const { customization } = useThemeCustomization()
   const animate =
     customization.preset === BRUTALIST_PRESET && !prefersReducedMotion()
-  const [display, setDisplay] = useState(text)
+  // Frame text while a roll-up runs; null means "show the real text".
+  const [frame, setFrame] = useState<string | null>(null)
 
-  useEffect(() => {
+  // Layout effect so the starting "0" replaces the final figure before the
+  // browser paints it.
+  useLayoutEffect(() => {
     const target = animate ? parseCountUpTarget(text) : null
     if (!target || target.value === 0) {
-      setDisplay(text)
+      setFrame(null)
       return
     }
-    let frame = 0
+    let handle = 0
     const start = performance.now()
     const step = (now: number) => {
       const progress = countUpProgress(now - start, DURATION_MS)
       if (progress >= 1) {
-        setDisplay(text)
+        setFrame(null)
         return
       }
-      setDisplay(formatCountUp(target, target.value * progress))
-      frame = requestAnimationFrame(step)
+      setFrame(formatCountUp(target, target.value * progress))
+      handle = requestAnimationFrame(step)
     }
-    setDisplay(formatCountUp(target, 0))
-    frame = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(frame)
+    setFrame(formatCountUp(target, 0))
+    handle = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(handle)
   }, [text, animate])
 
-  return display
+  return animate && frame !== null ? frame : text
 }

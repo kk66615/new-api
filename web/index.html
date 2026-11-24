@@ -36,6 +36,19 @@
   </head>
 
   <body>
+    <!-- Apply the colour preset before first paint so default users do not
+         see the stock palette flash. Keep in sync with
+         ThemeCustomizationProvider and DEFAULT_THEME_CUSTOMIZATION.preset;
+         the provider re-validates the value once React mounts. -->
+    <script>
+      ;(function () {
+        var preset = 'mx-brutalist'
+        try {
+          preset = localStorage.getItem('newapi:theme:v1:preset') || preset
+        } catch (e) {}
+        document.body.setAttribute('data-theme-preset', preset)
+      })()
+    </script>
     <div id="root" translate="no" class="notranslate"></div>
   </body>
 </html>

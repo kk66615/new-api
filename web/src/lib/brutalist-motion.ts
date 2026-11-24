@@ -26,6 +26,7 @@ For commercial licensing, please contact support@quantumnous.com
  * the OS for reduced motion. CSS for the same preset lives in
  * styles/mx-brutalist-motion.css.
  */
+import { useCallback } from 'react'
 
 export const BRUTALIST_PRESET = 'mx-brutalist'
 
@@ -49,8 +50,15 @@ type Box = { left: number; top: number; width: number; height: number }
 let lastPointer: { x: number; y: number; box: Box | null; at: number } | null =
   null
 
-// A dialog opened by keyboard should not grow from an unrelated old click.
+// A dialog opened by keyboard, or a theme flip from the OS, should not start
+// from an unrelated old click.
 const ORIGIN_MAX_AGE_MS = 1500
+
+function recentPointer() {
+  return lastPointer && performance.now() - lastPointer.at < ORIGIN_MAX_AGE_MS
+    ? lastPointer
+    : null
+}
 let pointerTrackingInstalled = false
 
 const ORIGIN_SELECTOR = 'button, a, [role="button"], [role="menuitem"], tr'
@@ -83,6 +91,10 @@ function installPointerTracking() {
     true
   )
 }
+
+// Track from module load so the very first click (e.g. the theme toggle) is
+// already known when its handler runs.
+installPointerTracking()
 
 /* ── Dialog grows from its origin ─────────────────────────────────────── */
 
@@ -146,6 +158,13 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
   installPointerTracking()
   let state: 'idle' | 'open' | 'closing' = 'idle'
   let origin: Box | null = null
+  let pendingOpen = 0
+  const cancelPendingOpen = () => {
+    if (pendingOpen && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(pendingOpen)
+    }
+    pendingOpen = 0
+  }
 
   const sync = () => {
     const active = isBrutalistMotionActive()
@@ -157,21 +176,29 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
     if (closing) {
       if (state !== 'open') return
       state = 'closing'
+      // An open animation still waiting for its frame must not restart after
+      // the close (it would grow the dialog back before it disappears).
+      cancelPendingOpen()
       if (active) playOrigin(el, origin, true)
       return
     }
     if (!el.hasAttribute('data-open') || state === 'open') return
     state = 'open'
-    origin =
-      lastPointer && performance.now() - lastPointer.at < ORIGIN_MAX_AGE_MS
-        ? (lastPointer.box ?? {
-            left: lastPointer.x - 8,
-            top: lastPointer.y - 8,
-            width: 16,
-            height: 16,
-          })
-        : null
-    if (active) requestAnimationFrame(() => playOrigin(el, origin, false))
+    // A kept-mounted popup may still hold the filled fold-back frame from its
+    // last close; clear it even when motion is now off.
+    el.getAnimations?.().forEach((a) => a.cancel())
+    const pointer = recentPointer()
+    origin = pointer
+      ? (pointer.box ?? {
+          left: pointer.x - 8,
+          top: pointer.y - 8,
+          width: 16,
+          height: 16,
+        })
+      : null
+    if (active) {
+      pendingOpen = requestAnimationFrame(() => playOrigin(el, origin, false))
+    }
   }
 
   const observer = new MutationObserver(sync)
@@ -180,7 +207,21 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
     attributeFilter: ['data-open', 'data-closed', 'data-ending-style'],
   })
   sync()
-  return () => observer.disconnect()
+  return () => {
+    observer.disconnect()
+    cancelPendingOpen()
+  }
+}
+
+/**
+ * Callback ref for dialog popups (`Dialog` and `AlertDialog`). React 19 runs
+ * the returned cleanup when the popup unmounts.
+ */
+export function useDialogOriginMotionRef() {
+  return useCallback((node: HTMLElement | null) => {
+    if (!node) return
+    return attachDialogOriginMotion(node)
+  }, [])
 }
 
 /* ── Dark/light ink reveal ────────────────────────────────────────────── */
@@ -204,8 +245,11 @@ export function runInkThemeTransition(apply: () => void) {
     return
   }
   const root = document.documentElement
-  const x = lastPointer?.x ?? window.innerWidth / 2
-  const y = lastPointer?.y ?? 0
+  // A recent click spreads from the click; a keyboard or OS-driven switch
+  // spreads from the top centre.
+  const pointer = recentPointer()
+  const x = pointer?.x ?? window.innerWidth / 2
+  const y = pointer?.y ?? 0
   root.style.setProperty('--ink-x', `${Math.round(x)}px`)
   root.style.setProperty('--ink-y', `${Math.round(y)}px`)
   root.setAttribute('data-ink-reveal', '')

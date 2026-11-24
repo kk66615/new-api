@@ -22,6 +22,7 @@ import { AlertDialog as AlertDialogPrimitive } from '@base-ui/react/alert-dialog
 import * as React from 'react'
 
 import { Button } from '@/components/ui/button'
+import { useDialogOriginMotionRef } from '@/lib/brutalist-motion'
 import { cn } from '@/lib/utils'
 
 function AlertDialog({ ...props }: AlertDialogPrimitive.Root.Props) {
@@ -63,10 +64,14 @@ function AlertDialogContent({
 }: AlertDialogPrimitive.Popup.Props & {
   size?: 'default' | 'sm'
 }) {
+  // Same grow-from-origin motion as Dialog under the MX Brutalist preset.
+  const originMotionRef = useDialogOriginMotionRef()
+
   return (
     <AlertDialogPortal>
       <AlertDialogOverlay />
       <AlertDialogPrimitive.Popup
+        ref={originMotionRef}
         data-slot='alert-dialog-content'
         data-size={size}
         className={cn(

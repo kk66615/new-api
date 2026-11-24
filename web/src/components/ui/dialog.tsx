@@ -22,7 +22,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import * as React from 'react'
 
 import { Button } from '@/components/ui/button'
-import { attachDialogOriginMotion } from '@/lib/brutalist-motion'
+import { useDialogOriginMotionRef } from '@/lib/brutalist-motion'
 import { cn } from '@/lib/utils'
 
 function Dialog({ ...props }: DialogPrimitive.Root.Props) {
@@ -67,10 +67,7 @@ function DialogContent({
 }) {
   // Under the MX Brutalist preset the popup grows out of the element that
   // opened it and folds back on close; a no-op for every other preset.
-  const originMotionRef = React.useCallback((node: HTMLDivElement | null) => {
-    if (!node) return
-    return attachDialogOriginMotion(node)
-  }, [])
+  const originMotionRef = useDialogOriginMotionRef()
 
   return (
     <DialogPortal>

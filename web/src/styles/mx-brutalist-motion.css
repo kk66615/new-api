@@ -55,13 +55,16 @@ For commercial licensing, please contact support@quantumnous.com
 }
 
 /* ── Static styling ───────────────────────────────────────────────────── */
-[data-theme-preset='mx-brutalist']
+/* Display and mono faces apply only while the font setting is Auto, so an
+ * explicit Sans/Serif choice still wins. */
+[data-theme-preset='mx-brutalist'][data-theme-font='system']
   :is(h1, h2, h3, h4, [data-slot='card-title'], [data-slot='dialog-title']) {
   font-family: var(--font-brut-display);
   font-synthesis-weight: none;
   letter-spacing: 0.01em;
 }
-[data-theme-preset='mx-brutalist'] :is(td, code, pre, kbd, .font-mono) {
+[data-theme-preset='mx-brutalist'][data-theme-font='system']
+  :is(td, code, pre, kbd, .font-mono) {
   font-family: var(--font-brut-mono);
 }
 [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inner'] {
@@ -70,7 +73,13 @@ For commercial licensing, please contact support@quantumnous.com
 [data-theme-preset='mx-brutalist']
   [data-slot='sidebar-inset']
   :is(.shadow-xs, .shadow-sm, .shadow) {
-  box-shadow: var(--brut-shadow);
+  /* Tailwind draws focus/invalid rings with box-shadow: keep them. */
+  box-shadow:
+    var(--tw-inset-shadow, 0 0 #0000),
+    var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000),
+    var(--brut-shadow);
 }
 [data-theme-preset='mx-brutalist']
   [data-slot='sidebar-inset']
@@ -80,17 +89,29 @@ For commercial licensing, please contact support@quantumnous.com
 }
 [data-theme-preset='mx-brutalist']
   [data-slot='sidebar-menu-button'][data-active]:not([data-active='false']) {
-  box-shadow: 3px 3px 0 0 var(--brut-ink);
+  box-shadow:
+    var(--tw-inset-shadow, 0 0 #0000),
+    var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000),
+    3px 3px 0 0 var(--brut-ink);
 }
 [data-theme-preset='mx-brutalist'] [data-slot='overview-quota-panel'] {
   background: color-mix(in oklch, var(--muted) 75%, var(--card));
 }
-[data-theme-preset='mx-brutalist'] [data-slot='dialog-content'] {
+[data-theme-preset='mx-brutalist']
+  :is([data-slot='dialog-content'], [data-slot='alert-dialog-content']) {
   border: 2px solid var(--brut-ink);
-  border-radius: 0;
-  box-shadow: 6px 6px 0 0 var(--brut-ink);
+  border-radius: var(--radius);
+  box-shadow:
+    var(--tw-inset-shadow, 0 0 #0000),
+    var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000),
+    6px 6px 0 0 var(--brut-ink);
 }
-[data-theme-preset='mx-brutalist'] [data-slot='dialog-overlay'] {
+[data-theme-preset='mx-brutalist']
+  :is([data-slot='dialog-overlay'], [data-slot='alert-dialog-overlay']) {
   background: oklch(0.2 0.03 160 / 0.25);
 }
 [data-theme-preset='mx-brutalist'] tbody tr:hover {
@@ -104,7 +125,7 @@ For commercial licensing, please contact support@quantumnous.com
 }
 [data-theme-preset='mx-brutalist'] [data-sonner-toast] {
   border: 2px solid var(--brut-ink) !important;
-  border-radius: 0 !important;
+  border-radius: var(--radius) !important;
   box-shadow: 4px 4px 0 0 var(--brut-ink) !important;
   background: var(--card) !important;
   color: var(--foreground) !important;
@@ -128,6 +149,8 @@ For commercial licensing, please contact support@quantumnous.com
 [data-theme-preset='mx-brutalist'] .data-table-refreshing {
   position: relative;
   opacity: 1;
+  /* still not clickable while reloading (pointer-events-none is kept) */
+  cursor: progress;
 }
 [data-theme-preset='mx-brutalist'] .data-table-refreshing::after {
   content: '';
@@ -178,14 +201,24 @@ For commercial licensing, please contact support@quantumnous.com
       :disabled
     ):hover {
     transform: translate(-2px, -2px);
-    box-shadow: 3px 3px 0 0 var(--brut-ink);
+    box-shadow:
+      var(--tw-inset-shadow, 0 0 #0000),
+      var(--tw-inset-ring-shadow, 0 0 #0000),
+      var(--tw-ring-offset-shadow, 0 0 #0000),
+      var(--tw-ring-shadow, 0 0 #0000),
+      3px 3px 0 0 var(--brut-ink);
   }
   [data-theme-preset='mx-brutalist']
     .group\/button:is(.bg-primary, .border:not(.border-transparent)):not(
       :disabled
     ):active {
     transform: translate(1px, 1px);
-    box-shadow: 0 0 0 0 var(--brut-ink);
+    box-shadow:
+      var(--tw-inset-shadow, 0 0 #0000),
+      var(--tw-inset-ring-shadow, 0 0 #0000),
+      var(--tw-ring-offset-shadow, 0 0 #0000),
+      var(--tw-ring-shadow, 0 0 #0000),
+      0 0 0 0 var(--brut-ink);
     transition-duration: 0.06s;
   }
   [data-theme-preset='mx-brutalist']
@@ -219,7 +252,7 @@ For commercial licensing, please contact support@quantumnous.com
   [data-theme-preset='mx-brutalist']
     [data-slot='sidebar-inset']
     main
-    .bg-card.border,
+    .bg-card.border:not(.bg-card *),
   [data-theme-preset='mx-brutalist']
     [data-slot='sidebar-inset']
     main
@@ -251,33 +284,33 @@ For commercial licensing, please contact support@quantumnous.com
     animation-delay: 0.24s;
   }
 
-  /* Table rows slide in from the left. */
-  [data-theme-preset='mx-brutalist'] tbody tr {
+  /* Rows of page tables slide in from the left (not tables in dialogs). */
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr {
     animation: brut-row-in 0.45s var(--brut-spring) both;
     transition: box-shadow 0.25s var(--brut-spring);
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(2) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(2) {
     animation-delay: 0.03s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(3) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(3) {
     animation-delay: 0.06s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(4) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(4) {
     animation-delay: 0.09s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(5) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(5) {
     animation-delay: 0.12s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(6) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(6) {
     animation-delay: 0.15s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(7) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(7) {
     animation-delay: 0.18s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(8) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(8) {
     animation-delay: 0.21s;
   }
-  [data-theme-preset='mx-brutalist'] tbody tr:nth-child(n + 9) {
+  [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr:nth-child(n + 9) {
     animation-delay: 0.24s;
   }
 
@@ -313,7 +346,10 @@ For commercial licensing, please contact support@quantumnous.com
   /* Dialogs: lib/brutalist-motion.ts grows them from the clicked element, so
    * the stock zoom/fade is switched off while it is in charge. */
   [data-theme-preset='mx-brutalist']
-    [data-slot='dialog-content'][data-origin-motion] {
+    :is(
+      [data-slot='dialog-content'],
+      [data-slot='alert-dialog-content']
+    )[data-origin-motion] {
     animation: none !important;
   }
 }

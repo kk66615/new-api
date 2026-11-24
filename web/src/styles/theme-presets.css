@@ -509,14 +509,6 @@ For commercial licensing, please contact support@quantumnous.com
   --chart-3: oklch(0.7721 0.1727 64.1585);
   --chart-4: oklch(0.6829 0.2615 345.7533);
   --chart-5: oklch(0.7443 0.1347 219.0676);
-  --sidebar: oklch(0.3167 0.0793 154.3757);
-  --sidebar-foreground: oklch(1 0 0);
-  --sidebar-primary: oklch(0.7721 0.1727 64.1585);
-  --sidebar-primary-foreground: oklch(0.3167 0.0793 154.3757);
-  --sidebar-accent: oklch(0.4156 0.1071 152.9714);
-  --sidebar-accent-foreground: oklch(1 0 0);
-  --sidebar-border: oklch(0 0 0);
-  --sidebar-ring: oklch(0.7721 0.1727 64.1585);
 
   /* Sidebar and header share the page canvas; only the selected item turns
    * green (the tweakcn source paints the whole sidebar dark green). */
@@ -573,14 +565,6 @@ For commercial licensing, please contact support@quantumnous.com
   --chart-3: oklch(0.7951 0.1631 68.6392);
   --chart-4: oklch(0.7337 0.2145 342.8759);
   --chart-5: oklch(0.8296 0.1375 215.2952);
-  --sidebar: oklch(0.1292 0.027 165.3808);
-  --sidebar-foreground: oklch(0.9809 0.026 91.6197);
-  --sidebar-primary: oklch(0.8484 0.2275 151.1487);
-  --sidebar-primary-foreground: oklch(0.1292 0.027 165.3808);
-  --sidebar-accent: oklch(0.2449 0.0403 159.5177);
-  --sidebar-accent-foreground: oklch(0.9809 0.026 91.6197);
-  --sidebar-border: oklch(0.9809 0.026 91.6197);
-  --sidebar-ring: oklch(0.7951 0.1631 68.6392);
 
   /* Sidebar and header share the page canvas; only the selected item turns
    * green (the tweakcn source paints the whole sidebar dark green). */
