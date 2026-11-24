@@ -331,7 +331,11 @@ describe('runInkThemeTransition', () => {
     const root = document.documentElement
 
     document.body.dispatchEvent(
-      new MouseEvent('pointerdown', { bubbles: true, clientX: 321, clientY: 45 })
+      new MouseEvent('pointerdown', {
+        bubbles: true,
+        clientX: 321,
+        clientY: 45,
+      })
     )
     runInkThemeTransition(() => {})
     expect(root.style.getPropertyValue('--ink-x')).toBe('321px')

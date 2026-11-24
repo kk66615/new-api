@@ -86,10 +86,8 @@ For commercial licensing, please contact support@quantumnous.com
   /* Nested cards drop the hard shadow but keep Tailwind rings (Card draws
    * its outline with ring-1). */
   box-shadow:
-    var(--tw-inset-shadow, 0 0 #0000),
-    var(--tw-inset-ring-shadow, 0 0 #0000),
-    var(--tw-ring-offset-shadow, 0 0 #0000),
-    var(--tw-ring-shadow, 0 0 #0000);
+    var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000);
 }
 [data-theme-preset='mx-brutalist']
   [data-slot='sidebar-menu-button'][data-active]:not([data-active='false']) {
