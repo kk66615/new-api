@@ -40,7 +40,10 @@ function stubMotionAllowed(reduce = false) {
 }
 
 function stubAnimations(el: HTMLElement) {
-  const calls: Array<{ keyframes: Keyframe[]; options: KeyframeAnimationOptions }> = []
+  const calls: Array<{
+    keyframes: Keyframe[]
+    options: KeyframeAnimationOptions
+  }> = []
   const running: Array<{ cancel: () => void }> = []
   el.animate = ((keyframes: Keyframe[], options: KeyframeAnimationOptions) => {
     calls.push({ keyframes, options })

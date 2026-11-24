@@ -126,11 +126,14 @@ function playOrigin(el: HTMLElement, origin: Box | null, closing: boolean) {
     duration: OPEN_DURATION,
     easing: 'cubic-bezier(0.2, 1.15, 0.32, 1)',
   })
-  for (const child of [...el.children]) {
-    child.animate([{ opacity: 0 }, { opacity: 0, offset: 0.3 }, { opacity: 1 }], {
-      duration: 480,
-      easing: 'ease-out',
-    })
+  for (const child of el.children) {
+    child.animate(
+      [{ opacity: 0 }, { opacity: 0, offset: 0.3 }, { opacity: 1 }],
+      {
+        duration: 480,
+        easing: 'ease-out',
+      }
+    )
   }
 }
 
@@ -193,7 +196,10 @@ type ViewTransitionDocument = Document & {
 export function runInkThemeTransition(apply: () => void) {
   installPointerTracking()
   const doc = document as ViewTransitionDocument
-  if (!isBrutalistMotionActive() || typeof doc.startViewTransition !== 'function') {
+  if (
+    !isBrutalistMotionActive() ||
+    typeof doc.startViewTransition !== 'function'
+  ) {
     apply()
     return
   }
@@ -205,10 +211,7 @@ export function runInkThemeTransition(apply: () => void) {
   root.setAttribute('data-ink-reveal', '')
   const clearMarker = () => root.removeAttribute('data-ink-reveal')
   try {
-    doc
-      .startViewTransition(apply)
-      .finished.then(clearMarker)
-      .catch(clearMarker)
+    doc.startViewTransition(apply).finished.then(clearMarker).catch(clearMarker)
   } catch {
     clearMarker()
     apply()
