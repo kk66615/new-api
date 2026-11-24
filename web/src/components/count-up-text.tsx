@@ -64,5 +64,5 @@ export function CountUpText(props: { text: string | number }) {
     return () => cancelAnimationFrame(frame)
   }, [text, animate])
 
-  return <>{display}</>
+  return display
 }

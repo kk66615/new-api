@@ -126,7 +126,7 @@ function playOrigin(el: HTMLElement, origin: Box | null, closing: boolean) {
     duration: OPEN_DURATION,
     easing: 'cubic-bezier(0.2, 1.15, 0.32, 1)',
   })
-  for (const child of Array.from(el.children)) {
+  for (const child of [...el.children]) {
     child.animate([{ opacity: 0 }, { opacity: 0, offset: 0.3 }, { opacity: 1 }], {
       duration: 480,
       easing: 'ease-out',
@@ -203,11 +203,14 @@ export function runInkThemeTransition(apply: () => void) {
   root.style.setProperty('--ink-x', `${Math.round(x)}px`)
   root.style.setProperty('--ink-y', `${Math.round(y)}px`)
   root.setAttribute('data-ink-reveal', '')
-  const done = () => root.removeAttribute('data-ink-reveal')
+  const clearMarker = () => root.removeAttribute('data-ink-reveal')
   try {
-    doc.startViewTransition(apply).finished.then(done, done)
+    doc
+      .startViewTransition(apply)
+      .finished.then(clearMarker)
+      .catch(clearMarker)
   } catch {
-    done()
+    clearMarker()
     apply()
   }
 }
@@ -229,7 +232,7 @@ export function parseCountUpTarget(text: string): CountUpTarget | null {
   const match = COUNT_UP_PATTERN.exec(text.trim())
   if (!match) return null
   const [, prefix, numeric, suffix] = match
-  const value = Number(numeric.replace(/,/g, ''))
+  const value = Number(numeric.replaceAll(',', ''))
   if (!Number.isFinite(value)) return null
   const decimals = numeric.includes('.') ? numeric.split('.')[1].length : 0
   return { prefix, value, decimals, grouped: numeric.includes(','), suffix }

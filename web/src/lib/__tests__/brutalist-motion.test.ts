@@ -79,7 +79,8 @@ describe('count-up helpers', () => {
   })
 
   it('formats intermediate values in the same shape as the final text', () => {
-    const target = parseCountUpTarget('$2,340.53')!
+    const target = parseCountUpTarget('$2,340.53')
+    if (!target) throw new Error('expected a parsable figure')
     expect(formatCountUp(target, 0)).toBe('$0.00')
     expect(formatCountUp(target, 1234.5)).toBe('$1,234.50')
     expect(formatCountUp(target, target.value)).toBe('$2,340.53')
