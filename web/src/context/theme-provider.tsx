@@ -105,13 +105,16 @@ export function ThemeProvider({
         setResolvedTheme(nextResolvedTheme)
         return
       }
+      // Theme-dependent components (charts, toasts) re-render from
+      // resolvedTheme, so it changes together with the class: inside the view
+      // transition callback, after the old frame has been captured.
       const update = () => {
         root.classList.remove('light', 'dark')
         root.classList.add(nextResolvedTheme)
+        setResolvedTheme(nextResolvedTheme)
       }
       if (appliedOnce.current) runInkThemeTransition(update)
       else update()
-      setResolvedTheme(nextResolvedTheme)
     }
 
     applyTheme()

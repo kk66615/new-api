@@ -154,11 +154,12 @@ describe('attachDialogOriginMotion', () => {
     stubMotionAllowed()
     const calls = stubAnimations(el)
     detach = attachDialogOriginMotion(el)
-    expect(el).toHaveAttribute('data-origin-motion')
 
     clickAt(100, 50)
     el.setAttribute('data-open', '')
     await flush()
+    // Stock zoom/fade switched off only because this module animates now.
+    expect(el).toHaveAttribute('data-origin-motion')
     expect(calls).toHaveLength(1)
     expect(calls[0].keyframes[0].transform).toMatch(/^translate\(/)
     expect(calls[0].keyframes[1].transform).toBe('none')
@@ -241,6 +242,38 @@ describe('attachDialogOriginMotion edge cases', () => {
     await flush()
     for (const frame of queue.splice(0)) frame.cb(0)
     expect(calls).toHaveLength(0)
+    // Nothing to grow from: the stock animation stays in charge.
+    expect(el).not.toHaveAttribute('data-origin-motion')
+  })
+
+  it('never cancels the stock open animation when it is not in charge', async () => {
+    const stock = { cancel: vi.fn() }
+    el.getAnimations = () => [stock as unknown as Animation]
+    el.animate = vi.fn() as unknown as HTMLElement['animate']
+
+    // Other preset, with a recent click.
+    document.body.setAttribute('data-theme-preset', 'default')
+    detach = attachDialogOriginMotion(el)
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    trigger.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, clientX: 5, clientY: 5 })
+    )
+    trigger.remove()
+    el.setAttribute('data-open', '')
+    await flush()
+    for (const frame of queue.splice(0)) frame.cb(0)
+    expect(stock.cancel).not.toHaveBeenCalled()
+    expect(el.animate).not.toHaveBeenCalled()
+
+    // Close and reopen as a kept-mounted popup: still untouched.
+    el.removeAttribute('data-open')
+    el.setAttribute('data-closed', '')
+    await flush()
+    el.removeAttribute('data-closed')
+    el.setAttribute('data-open', '')
+    await flush()
+    expect(stock.cancel).not.toHaveBeenCalled()
   })
 
   it('drops the queued grow-in when the dialog closes in the same frame', async () => {
@@ -284,6 +317,58 @@ describe('runInkThemeTransition', () => {
     runInkThemeTransition(apply)
     expect(apply).toHaveBeenCalledOnce()
     expect(start).not.toHaveBeenCalled()
+  })
+
+  it('spreads from a recent click, or from the top centre otherwise', () => {
+    document.body.setAttribute('data-theme-preset', 'mx-brutalist')
+    stubMotionAllowed()
+    Object.assign(document, {
+      startViewTransition: vi.fn((update: () => void) => {
+        update()
+        return { finished: new Promise<void>(() => {}) }
+      }),
+    })
+    const root = document.documentElement
+
+    document.body.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, clientX: 321, clientY: 45 })
+    )
+    runInkThemeTransition(() => {})
+    expect(root.style.getPropertyValue('--ink-x')).toBe('321px')
+    expect(root.style.getPropertyValue('--ink-y')).toBe('45px')
+
+    const later = performance.now() + 60_000
+    vi.spyOn(performance, 'now').mockReturnValue(later)
+    runInkThemeTransition(() => {})
+    expect(root.style.getPropertyValue('--ink-x')).toBe(
+      `${Math.round(window.innerWidth / 2)}px`
+    )
+    expect(root.style.getPropertyValue('--ink-y')).toBe('0px')
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the marker while a newer switch is still running', async () => {
+    document.body.setAttribute('data-theme-preset', 'mx-brutalist')
+    stubMotionAllowed()
+    const resolvers: Array<() => void> = []
+    Object.assign(document, {
+      startViewTransition: vi.fn((update: () => void) => {
+        update()
+        return {
+          finished: new Promise<void>((resolve) => resolvers.push(resolve)),
+        }
+      }),
+    })
+    runInkThemeTransition(() => {})
+    runInkThemeTransition(() => {})
+    resolvers[0]()
+    await flush()
+    await flush()
+    expect(document.documentElement).toHaveAttribute('data-ink-reveal')
+    resolvers[1]()
+    await flush()
+    await flush()
+    expect(document.documentElement).not.toHaveAttribute('data-ink-reveal')
   })
 
   it('wraps the update in a view transition and clears the marker afterwards', async () => {

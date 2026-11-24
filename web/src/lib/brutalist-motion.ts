@@ -116,23 +116,30 @@ export function computeOriginTransform(from: Box, to: Box): string | null {
 const OPEN_DURATION = 560
 const CLOSE_DURATION = 360
 
-function playOrigin(el: HTMLElement, origin: Box | null, closing: boolean) {
+/**
+ * Play the grow-in or fold-back. Only called while this module owns the
+ * popup's motion (preset active, origin known, `data-origin-motion` set, so
+ * the stock CSS enter/exit animations are already switched off).
+ */
+function playOrigin(
+  el: HTMLElement,
+  origin: Box,
+  closing: boolean
+): Animation | null {
   // Measure the resting layout box, not a half-finished animation frame.
   el.getAnimations().forEach((a) => a.cancel())
-  if (!origin) return
   const transform = computeOriginTransform(origin, el.getBoundingClientRect())
-  if (!transform) return
+  if (!transform) return null
   const collapsed = { transform, opacity: 0.4 }
   const open = { transform: 'none', opacity: 1 }
   if (closing) {
     // Base UI waits for running animations before unmounting the popup, so
     // the fold-back completes before the dialog disappears.
-    el.animate([open, collapsed], {
+    return el.animate([open, collapsed], {
       duration: CLOSE_DURATION,
       easing: 'cubic-bezier(0.5, 0, 0.75, 0)',
       fill: 'forwards',
     })
-    return
   }
   el.animate([collapsed, open], {
     duration: OPEN_DURATION,
@@ -147,17 +154,24 @@ function playOrigin(el: HTMLElement, origin: Box | null, closing: boolean) {
       }
     )
   }
+  return null
 }
 
 /**
  * Wire one dialog popup element. Some dialogs stay mounted while closed and
  * are reopened in place, so open/close is derived from the element's current
  * Base UI state attributes on every change rather than from mount/unmount.
+ *
+ * `data-origin-motion` (which switches the stock zoom/fade off) is only set
+ * while this module will actually animate: preset active and a recent click
+ * to grow from. Otherwise the popup keeps its stock animation untouched.
  */
 export function attachDialogOriginMotion(el: HTMLElement): () => void {
   installPointerTracking()
   let state: 'idle' | 'open' | 'closing' = 'idle'
   let origin: Box | null = null
+  let owned = false
+  let foldBack: Animation | null = null
   let pendingOpen = 0
   const cancelPendingOpen = () => {
     if (pendingOpen && typeof cancelAnimationFrame === 'function') {
@@ -165,12 +179,13 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
     }
     pendingOpen = 0
   }
+  const setOwned = (value: boolean) => {
+    owned = value
+    if (value) el.setAttribute('data-origin-motion', '')
+    else el.removeAttribute('data-origin-motion')
+  }
 
   const sync = () => {
-    const active = isBrutalistMotionActive()
-    if (active) el.setAttribute('data-origin-motion', '')
-    else el.removeAttribute('data-origin-motion')
-
     const closing =
       el.hasAttribute('data-closed') || el.hasAttribute('data-ending-style')
     if (closing) {
@@ -179,14 +194,20 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
       // An open animation still waiting for its frame must not restart after
       // the close (it would grow the dialog back before it disappears).
       cancelPendingOpen()
-      if (active) playOrigin(el, origin, true)
+      if (owned && origin && isBrutalistMotionActive()) {
+        foldBack = playOrigin(el, origin, true)
+      } else {
+        setOwned(false)
+      }
       return
     }
     if (!el.hasAttribute('data-open') || state === 'open') return
     state = 'open'
-    // A kept-mounted popup may still hold the filled fold-back frame from its
-    // last close; clear it even when motion is now off.
-    el.getAnimations?.().forEach((a) => a.cancel())
+    // A kept-mounted popup may still hold our filled fold-back frame from its
+    // last close. Only that animation is ours to cancel; stock CSS animations
+    // are left alone.
+    foldBack?.cancel()
+    foldBack = null
     const pointer = recentPointer()
     origin = pointer
       ? (pointer.box ?? {
@@ -196,8 +217,14 @@ export function attachDialogOriginMotion(el: HTMLElement): () => void {
           height: 16,
         })
       : null
-    if (active) {
-      pendingOpen = requestAnimationFrame(() => playOrigin(el, origin, false))
+    const animate = origin !== null && isBrutalistMotionActive()
+    setOwned(animate)
+    if (animate && origin) {
+      const from = origin
+      pendingOpen = requestAnimationFrame(() => {
+        pendingOpen = 0
+        playOrigin(el, from, false)
+      })
     }
   }
 
@@ -226,6 +253,8 @@ export function useDialogOriginMotionRef() {
 
 /* ── Dark/light ink reveal ────────────────────────────────────────────── */
 
+let inkRevealToken = 0
+
 type ViewTransitionDocument = Document & {
   startViewTransition?: (update: () => void) => { finished: Promise<void> }
 }
@@ -253,7 +282,12 @@ export function runInkThemeTransition(apply: () => void) {
   root.style.setProperty('--ink-x', `${Math.round(x)}px`)
   root.style.setProperty('--ink-y', `${Math.round(y)}px`)
   root.setAttribute('data-ink-reveal', '')
-  const clearMarker = () => root.removeAttribute('data-ink-reveal')
+  // A quick second switch starts a new transition before the first finishes;
+  // only the latest one may clear the marker.
+  const token = ++inkRevealToken
+  const clearMarker = () => {
+    if (token === inkRevealToken) root.removeAttribute('data-ink-reveal')
+  }
   try {
     doc.startViewTransition(apply).finished.then(clearMarker).catch(clearMarker)
   } catch {

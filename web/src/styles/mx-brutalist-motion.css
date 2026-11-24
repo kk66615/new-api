@@ -83,7 +83,13 @@ For commercial licensing, please contact support@quantumnous.com
   [data-slot='sidebar-inset']
   .bg-card
   .bg-card {
-  box-shadow: none;
+  /* Nested cards drop the hard shadow but keep Tailwind rings (Card draws
+   * its outline with ring-1). */
+  box-shadow:
+    var(--tw-inset-shadow, 0 0 #0000),
+    var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000);
 }
 [data-theme-preset='mx-brutalist']
   [data-slot='sidebar-menu-button'][data-active]:not([data-active='false']) {
@@ -147,8 +153,6 @@ For commercial licensing, please contact support@quantumnous.com
 [data-theme-preset='mx-brutalist'] .data-table-refreshing {
   position: relative;
   opacity: 1;
-  /* still not clickable while reloading (pointer-events-none is kept) */
-  cursor: progress;
 }
 [data-theme-preset='mx-brutalist'] .data-table-refreshing::after {
   content: '';
@@ -255,7 +259,7 @@ For commercial licensing, please contact support@quantumnous.com
     [data-slot='sidebar-inset']
     main
     div.rounded-xl.border:not(.rounded-xl.border *) {
-    animation: brut-panel-in 0.6s var(--brut-spring) both;
+    animation: brut-panel-in 0.6s var(--brut-spring) backwards;
   }
   [data-theme-preset='mx-brutalist']
     [data-slot='sidebar-inset']
@@ -284,7 +288,7 @@ For commercial licensing, please contact support@quantumnous.com
 
   /* Rows of page tables slide in from the left (not tables in dialogs). */
   [data-theme-preset='mx-brutalist'] [data-slot='sidebar-inset'] main tbody tr {
-    animation: brut-row-in 0.45s var(--brut-spring) both;
+    animation: brut-row-in 0.45s var(--brut-spring) backwards;
     transition: box-shadow 0.25s var(--brut-spring);
   }
   [data-theme-preset='mx-brutalist']
@@ -369,8 +373,23 @@ For commercial licensing, please contact support@quantumnous.com
 
   /* Toast bubbles pop in. */
   [data-theme-preset='mx-brutalist'] [data-sonner-toast] > * {
-    animation: brut-bubble-pop 0.5s var(--brut-spring) both;
+    animation: brut-bubble-pop 0.5s var(--brut-spring) backwards;
     transform-origin: 90% 100%;
+  }
+
+  /* Completed entrances use `backwards` fill so they release transform and
+   * opacity afterwards (row drag, Sonner stacking and close-button placement
+   * write those properties themselves). */
+
+  /* While a popup folds back, Base UI keeps the overlay mounted until the
+   * popup's animation ends; hold the faded-out overlay instead of letting it
+   * snap back to full tint. */
+  [data-theme-preset='mx-brutalist']
+    :is(
+      [data-slot='dialog-overlay'],
+      [data-slot='alert-dialog-overlay']
+    )[data-closed] {
+    animation-fill-mode: forwards;
   }
 
   /* Dialogs: lib/brutalist-motion.ts grows them from the clicked element, so
