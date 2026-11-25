@@ -46,13 +46,14 @@ export function Features(_props: FeaturesProps) {
         'Optimized network architecture ensures millisecond response times'
       ),
       span: 'md:col-span-2',
-      icon: <Zap className='size-4 text-blue-400' />,
+      icon: <Zap data-slot='landing-accent' className='size-4 text-blue-400' />,
       visual: (
         <div className='mt-4 grid grid-cols-3 gap-2'>
           {['OpenAI', 'Claude', 'Gemini', 'DeepSeek', 'Qwen', 'Llama'].map(
             (name) => (
               <div
                 key={name}
+                data-slot='landing-model-chip'
                 className='border-border/30 bg-muted/20 text-muted-foreground flex items-center justify-center rounded-lg border px-3 py-2 text-xs transition-colors duration-300 hover:border-blue-500/30 hover:bg-blue-500/5'
               >
                 {name}
@@ -105,13 +106,14 @@ export function Features(_props: FeaturesProps) {
       title: t('Global Coverage'),
       desc: t('Multi-region deployment for stable global access'),
       span: 'md:col-span-1',
-      icon: <Globe className='size-4 text-violet-400' />,
+      icon: <Globe data-slot='landing-accent' className='size-4 text-violet-400' />,
       visual: (
         <div className='mt-4 space-y-2'>
           {[t('Load Balancing'), t('Rate Limiting'), t('Cost Tracking')].map(
             (step, i) => (
               <div key={step} className='flex items-center gap-2'>
                 <div
+                  data-slot={i === 1 ? 'landing-accent-chip' : undefined}
                   className={`flex size-6 items-center justify-center rounded-full text-[10px] font-bold ${
                     i === 1
                       ? 'border border-blue-500/30 bg-blue-500/20 text-blue-500'
@@ -148,7 +150,7 @@ export function Features(_props: FeaturesProps) {
             ))}
           </div>
           <div className='text-muted-foreground flex items-center gap-1.5 text-xs'>
-            <Code className='size-3.5 text-blue-500' />
+            <Code data-slot='landing-accent' className='size-3.5 text-blue-500' />
             {t('Multi-protocol Compatible')}
           </div>
         </div>

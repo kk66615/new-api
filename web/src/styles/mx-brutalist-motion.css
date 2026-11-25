@@ -129,6 +129,56 @@ For commercial licensing, please contact support@quantumnous.com
   box-shadow: inset 4px 0 0 0 var(--primary);
 }
 
+/* Landing page: the stock blue/violet accents become the theme's green and
+ * amber. The glow is an inline style, hence !important. */
+[data-theme-preset='mx-brutalist'] [data-slot='landing-glow'] {
+  background:
+    radial-gradient(
+      ellipse 60% 50% at 20% 20%,
+      color-mix(in oklch, var(--primary) 55%, transparent) 0%,
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 50% 40% at 80% 15%,
+      color-mix(in oklch, var(--accent) 45%, transparent) 0%,
+      transparent 70%
+    ) !important;
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-gradient-text'] {
+  /* Solid green on an amber highlighter stroke instead of a gradient fill. */
+  color: var(--primary);
+  background: linear-gradient(
+    transparent 64%,
+    color-mix(in oklch, var(--accent) 45%, transparent) 64%,
+    color-mix(in oklch, var(--accent) 45%, transparent) 92%,
+    transparent 92%
+  );
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-badge'] {
+  border-color: color-mix(in oklch, var(--primary) 35%, transparent);
+  background: color-mix(in oklch, var(--primary) 8%, transparent);
+  color: var(--primary);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-badge'] span span {
+  background: var(--primary);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-accent'] {
+  color: var(--primary);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-accent-chip'] {
+  border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+  background: color-mix(in oklch, var(--primary) 15%, transparent);
+  color: var(--primary);
+}
+[data-theme-preset='mx-brutalist'] [data-slot='landing-model-chip']:hover {
+  border-color: var(--primary);
+  background: color-mix(in oklch, var(--primary) 8%, transparent);
+}
+
 /* Toasts: square speech bubble with a hard shadow. */
 [data-theme-preset='mx-brutalist']
   :is([data-sonner-toaster], [data-sonner-toast]) {

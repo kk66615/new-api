@@ -40,6 +40,7 @@ export function CTA(props: CTAProps) {
       {/* Gradient mesh background */}
       <div
         aria-hidden
+        data-slot='landing-glow'
         className='absolute inset-0 -z-10 opacity-20 dark:opacity-[0.08]'
         style={{
           background: [
@@ -56,7 +57,10 @@ export function CTA(props: CTAProps) {
         <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-4xl'>
           {t('Ready to simplify')}
           <br />
-          <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
+          <span
+            data-slot='landing-gradient-text'
+            className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'
+          >
             {t('your AI integration?')}
           </span>
         </h2>
