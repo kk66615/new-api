@@ -23,6 +23,9 @@ export const THEME_STORAGE_KEYS = {
   radius: 'newapi:theme:v1:radius',
   scale: 'newapi:theme:v1:scale',
   contentLayout: 'newapi:theme:v1:content-layout',
+  // Written by the first-paint script in index.html; listed here so the
+  // frontend cache reset keeps it.
+  presetAdopted: 'newapi:theme:v1:preset-adopted',
 } as const
 
 export function readThemePreference<T extends string>(

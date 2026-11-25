@@ -42,7 +42,9 @@
          the provider re-validates the value once React mounts.
          A preset saved before MX Brutalist became the site default is
          dropped once, so every visitor starts on the new theme; choices made
-         after that are kept. -->
+         after that are kept. The marker stores the default it was taken for,
+         so changing the default here drops saved presets once more. Keep the
+         key in sync with THEME_STORAGE_KEYS.presetAdopted. -->
     <script>
       ;(function () {
         var preset = 'mx-brutalist'

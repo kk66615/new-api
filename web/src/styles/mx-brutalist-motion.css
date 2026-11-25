@@ -106,10 +106,6 @@ For commercial licensing, please contact support@quantumnous.com
 [data-theme-preset='mx-brutalist'] [data-slot='overview-hero-backdrop'] {
   background: none;
 }
-/* The site logo is a square tile with a hard shadow; do not crop it round. */
-[data-theme-preset='mx-brutalist'] [data-slot='header-logo'] {
-  border-radius: 0;
-}
 [data-theme-preset='mx-brutalist']
   :is([data-slot='dialog-content'], [data-slot='alert-dialog-content']) {
   border: 2px solid var(--brut-ink);

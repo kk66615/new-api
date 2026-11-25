@@ -41,7 +41,6 @@ export function HeaderLogo({
     <img
       src={src}
       alt={alt}
-      data-slot='header-logo'
       className={cn(
         'h-6 w-6 rounded-full transition-opacity duration-200',
         !loading && logoLoaded ? 'opacity-100' : 'opacity-0',

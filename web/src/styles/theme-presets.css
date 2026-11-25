@@ -517,7 +517,7 @@ For commercial licensing, please contact support@quantumnous.com
   --success: var(--primary);
   --success-foreground: var(--primary-foreground);
   --warning: oklch(0.64 0.16 62);
-  --warning-foreground: oklch(1 0 0);
+  --warning-foreground: var(--foreground);
   --info: oklch(0.56 0.12 219);
   --info-foreground: oklch(1 0 0);
 

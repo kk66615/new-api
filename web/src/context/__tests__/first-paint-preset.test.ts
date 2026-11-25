@@ -20,7 +20,10 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { initializeFrontendCache } from '@/lib/frontend-cache'
+import { THEME_STORAGE_KEYS } from '@/lib/theme-storage'
 
 // The inline script in index.html that picks the colour preset before React
 // mounts. Run it as the browser would.
@@ -35,12 +38,13 @@ function runFirstPaintScript() {
   new Function(script.textContent)()
 }
 
-const PRESET_KEY = 'newapi:theme:v1:preset'
-const ADOPTED_KEY = 'newapi:theme:v1:preset-adopted'
+const PRESET_KEY = THEME_STORAGE_KEYS.preset
+const ADOPTED_KEY = THEME_STORAGE_KEYS.presetAdopted
 const preset = () => document.body.getAttribute('data-theme-preset')
 
 beforeEach(() => localStorage.clear())
 afterEach(() => {
+  vi.restoreAllMocks()
   localStorage.clear()
   document.body.removeAttribute('data-theme-preset')
 })
@@ -65,5 +69,26 @@ describe('first-paint preset', () => {
     runFirstPaintScript()
     expect(preset()).toBe('default')
     expect(localStorage.getItem(PRESET_KEY)).toBe('default')
+  })
+
+  it('keeps a choice made on the first visit across the cache reset', () => {
+    // main.tsx resets the frontend cache after this script on a first visit.
+    runFirstPaintScript()
+    initializeFrontendCache()
+    localStorage.setItem(PRESET_KEY, 'default')
+
+    runFirstPaintScript()
+    initializeFrontendCache()
+
+    expect(preset()).toBe('default')
+    expect(localStorage.getItem(PRESET_KEY)).toBe('default')
+  })
+
+  it('falls back to MX Brutalist when storage is unavailable', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked')
+    })
+    runFirstPaintScript()
+    expect(preset()).toBe('mx-brutalist')
   })
 })
