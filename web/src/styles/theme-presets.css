@@ -510,6 +510,17 @@ For commercial licensing, please contact support@quantumnous.com
   --chart-4: oklch(0.6829 0.2615 345.7533);
   --chart-5: oklch(0.7443 0.1347 219.0676);
 
+  /* Status colours come from the theme palette: green, amber and the theme's
+   * own cyan (the surface bridge that maps these for other presets is
+   * opted out above). Amber and cyan are darkened here because they are
+   * also used as text on the cream canvas. */
+  --success: var(--primary);
+  --success-foreground: var(--primary-foreground);
+  --warning: oklch(0.64 0.16 62);
+  --warning-foreground: oklch(1 0 0);
+  --info: oklch(0.56 0.12 219);
+  --info-foreground: oklch(1 0 0);
+
   /* Sidebar and header share the page canvas; only the selected item turns
    * green (the tweakcn source paints the whole sidebar dark green). */
   --sidebar: var(--background);
@@ -565,6 +576,13 @@ For commercial licensing, please contact support@quantumnous.com
   --chart-3: oklch(0.7951 0.1631 68.6392);
   --chart-4: oklch(0.7337 0.2145 342.8759);
   --chart-5: oklch(0.8296 0.1375 215.2952);
+
+  --success: var(--primary);
+  --success-foreground: var(--primary-foreground);
+  --warning: var(--accent);
+  --warning-foreground: var(--accent-foreground);
+  --info: var(--chart-5);
+  --info-foreground: var(--primary-foreground);
 
   /* Sidebar and header share the page canvas; only the selected item turns
    * green (the tweakcn source paints the whole sidebar dark green). */

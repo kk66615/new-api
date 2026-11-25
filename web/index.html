@@ -39,12 +39,21 @@
     <!-- Apply the colour preset before first paint so default users do not
          see the stock palette flash. Keep in sync with
          ThemeCustomizationProvider and DEFAULT_THEME_CUSTOMIZATION.preset;
-         the provider re-validates the value once React mounts. -->
+         the provider re-validates the value once React mounts.
+         A preset saved before MX Brutalist became the site default is
+         dropped once, so every visitor starts on the new theme; choices made
+         after that are kept. -->
     <script>
       ;(function () {
         var preset = 'mx-brutalist'
+        var presetKey = 'newapi:theme:v1:preset'
+        var adoptedKey = 'newapi:theme:v1:preset-adopted'
         try {
-          preset = localStorage.getItem('newapi:theme:v1:preset') || preset
+          if (localStorage.getItem(adoptedKey) !== preset) {
+            localStorage.removeItem(presetKey)
+            localStorage.setItem(adoptedKey, preset)
+          }
+          preset = localStorage.getItem(presetKey) || preset
         } catch (e) {}
         document.body.setAttribute('data-theme-preset', preset)
       })()

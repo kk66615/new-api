@@ -1,0 +1,70 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+// The inline script in index.html that picks the colour preset before React
+// mounts. Run it as the browser would.
+function runFirstPaintScript() {
+  const html = readFileSync(
+    path.resolve(__dirname, '../../../index.html'),
+    'utf8'
+  )
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const script = Array.from(doc.body.querySelectorAll('script')).find((el) =>
+    el.textContent?.includes('data-theme-preset')
+  )
+  if (!script?.textContent) throw new Error('first-paint preset script missing')
+  new Function(script.textContent)()
+}
+
+const PRESET_KEY = 'newapi:theme:v1:preset'
+const ADOPTED_KEY = 'newapi:theme:v1:preset-adopted'
+const preset = () => document.body.getAttribute('data-theme-preset')
+
+beforeEach(() => localStorage.clear())
+afterEach(() => {
+  localStorage.clear()
+  document.body.removeAttribute('data-theme-preset')
+})
+
+describe('first-paint preset', () => {
+  it('starts a first-time visitor on MX Brutalist', () => {
+    runFirstPaintScript()
+    expect(preset()).toBe('mx-brutalist')
+    expect(localStorage.getItem(ADOPTED_KEY)).toBe('mx-brutalist')
+  })
+
+  it('moves a returning visitor off a preset saved before the switch', () => {
+    localStorage.setItem(PRESET_KEY, 'anthropic')
+    runFirstPaintScript()
+    expect(preset()).toBe('mx-brutalist')
+    expect(localStorage.getItem(PRESET_KEY)).toBeNull()
+  })
+
+  it('keeps a preset chosen after the switch', () => {
+    runFirstPaintScript()
+    localStorage.setItem(PRESET_KEY, 'default')
+    runFirstPaintScript()
+    expect(preset()).toBe('default')
+    expect(localStorage.getItem(PRESET_KEY)).toBe('default')
+  })
+})

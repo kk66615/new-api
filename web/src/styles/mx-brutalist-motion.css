@@ -98,8 +98,17 @@ For commercial licensing, please contact support@quantumnous.com
     var(--tw-ring-shadow, 0 0 #0000),
     3px 3px 0 0 var(--brut-ink);
 }
+/* The credit panel takes a light tint of the green Wallet button below it;
+ * the setup guide is a flat card instead of the stock multi-colour wash. */
 [data-theme-preset='mx-brutalist'] [data-slot='overview-quota-panel'] {
-  background: color-mix(in oklch, var(--muted) 75%, var(--card));
+  background: color-mix(in oklch, var(--primary) 9%, var(--card));
+}
+[data-theme-preset='mx-brutalist'] [data-slot='overview-hero-backdrop'] {
+  background: none;
+}
+/* The site logo is a square tile with a hard shadow; do not crop it round. */
+[data-theme-preset='mx-brutalist'] [data-slot='header-logo'] {
+  border-radius: 0;
 }
 [data-theme-preset='mx-brutalist']
   :is([data-slot='dialog-content'], [data-slot='alert-dialog-content']) {
