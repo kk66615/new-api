@@ -18,18 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 // The inline script in index.html that picks the colour preset before React
 // mounts. Run it as the browser would.
 function runFirstPaintScript() {
-  const html = readFileSync(
-    path.resolve(__dirname, '../../../index.html'),
-    'utf8'
-  )
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const html = readFileSync(path.resolve(here, '../../../index.html'), 'utf8')
   const doc = new DOMParser().parseFromString(html, 'text/html')
-  const script = Array.from(doc.body.querySelectorAll('script')).find((el) =>
+  const script = [...doc.body.querySelectorAll('script')].find((el) =>
     el.textContent?.includes('data-theme-preset')
   )
   if (!script?.textContent) throw new Error('first-paint preset script missing')
