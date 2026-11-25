@@ -106,7 +106,9 @@ export function Features(_props: FeaturesProps) {
       title: t('Global Coverage'),
       desc: t('Multi-region deployment for stable global access'),
       span: 'md:col-span-1',
-      icon: <Globe data-slot='landing-accent' className='size-4 text-violet-400' />,
+      icon: (
+        <Globe data-slot='landing-accent' className='size-4 text-violet-400' />
+      ),
       visual: (
         <div className='mt-4 space-y-2'>
           {[t('Load Balancing'), t('Rate Limiting'), t('Cost Tracking')].map(
@@ -150,7 +152,10 @@ export function Features(_props: FeaturesProps) {
             ))}
           </div>
           <div className='text-muted-foreground flex items-center gap-1.5 text-xs'>
-            <Code data-slot='landing-accent' className='size-3.5 text-blue-500' />
+            <Code
+              data-slot='landing-accent'
+              className='size-3.5 text-blue-500'
+            />
             {t('Multi-protocol Compatible')}
           </div>
         </div>
