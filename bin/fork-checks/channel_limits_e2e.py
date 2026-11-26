@@ -21,7 +21,9 @@ records which channel path it was called on. It checks that:
     quota each, and only the fourth moves on; the spent budget survives a
     container restart;
   - the quota reset time zone and time are validated and saved;
-  - a token over its RPM limit gets 429 before any channel is used.
+  - a token over its RPM limit gets 429 before any channel is used;
+  - the usage the channel list shows (GET /api/channel/limit_usage) is the
+    limiter's own count and needs an admin login.
 Everything it creates is removed at the end. Exit code 0 only if all checks pass.
 """
 import http.cookiejar
@@ -204,6 +206,14 @@ def run_scenarios(admin):
     check("rpm: first two on A, the rest on B", hits == ["rpmA", "rpmA", "rpmB", "rpmB"], str(hits))
     check("rpm: A stays enabled", channel_status("rpmA") == 1)
 
+    # What the channel list shows is the limiter's own count.
+    ids = {r["name"]: r["id"] for r in query("select id, name from channels where name in ('rpmA', 'rpmB')")}
+    shown = call("GET", f"/api/channel/limit_usage?ids={ids['rpmA']},{ids['rpmB']}", None, admin).get("data") or []
+    check("usage: A shows 2 of 2 requests, B (no limit) is left out",
+          len(shown) == 1 and shown[0].get("channel_id") == ids["rpmA"] and shown[0].get("rpm") == {"used": 2, "limit": 2}, str(shown))
+    status, _ = call("GET", f"/api/channel/limit_usage?ids={ids['rpmA']}", None, None, raw=True)
+    check("usage: refused without an admin login", status in (401, 403), str(status))
+
     # Every candidate at its limit: local 429 and no upstream call.
     add_channel(admin, "fullC", "cl-full", 10, rpm_limit=1)
     add_channel(admin, "fullD", "cl-full", 0, rpm_limit=1)
@@ -248,6 +258,10 @@ def run_scenarios(admin):
     check("budget: three on I at list price, the fourth on J", hits == ["budgetI"] * 3 + ["budgetJ"], str(hits))
     charged = query("select used_quota from channels where name = 'budgetI'")[0]["used_quota"]
     check("budget: used_quota still records the customer charge", charged == 3 * 4000, f"used_quota={charged}")
+    budget_id = query("select id from channels where name = 'budgetI'")[0]["id"]
+    shown = (call("GET", f"/api/channel/limit_usage?ids={budget_id}", None, admin).get("data") or [{}])[0].get("daily") or {}
+    check("usage: the daily budget shows 3000 of 2500 at list price with its next reset",
+          shown.get("used") == 3000 and shown.get("limit") == 2500 and time.time() < shown.get("resets_at", 0) <= time.time() + 90000, str(shown))
 
     # Without Redis the budget windows are saved, so a restart (a deploy)
     # does not hand the channel its whole daily budget again.

@@ -648,3 +648,155 @@ func TestChannelQuotaWindowUpsertConfiguredDatabases(t *testing.T) {
 		})
 	}
 }
+
+// What admins see is read through the same counters the limiter enforces.
+func TestChannelLimitUsagesReportConfiguredLimitsOnly(t *testing.T) {
+	limited := &Channel{
+		Id:              channelLimitTestId(951100),
+		RpmLimit:        int64PtrForLimitTest(60),
+		DailyQuotaLimit: int64PtrForLimitTest(5000),
+	}
+	unlimited := &Channel{Id: channelLimitTestId(951100)}
+	seedChannelLimitCounters(t, limited.Id, 58, 777, 1200, 9000)
+	seedChannelLimitCounters(t, unlimited.Id, 5, 5, 5, 5)
+
+	before := time.Now()
+	usages := ChannelLimitUsages([]*Channel{limited, unlimited, nil})
+	require.Len(t, usages, 1, "channels without limits are left out")
+	usage := usages[0]
+	assert.Equal(t, limited.Id, usage.ChannelId)
+	require.NotNil(t, usage.Rpm)
+	assert.Equal(t, ChannelLimitUsageItem{Used: 58, Limit: 60}, *usage.Rpm)
+	assert.Nil(t, usage.Tpm, "a limit that is not configured is omitted")
+	assert.Nil(t, usage.Monthly)
+	require.NotNil(t, usage.Daily)
+	assert.Equal(t, int64(1200), usage.Daily.Used)
+	assert.Equal(t, int64(5000), usage.Daily.Limit)
+	resets := time.Unix(usage.Daily.ResetsAt, 0)
+	assert.True(t, resets.After(before) && !resets.After(before.Add(25*time.Hour)), "the daily budget resets within a day: %s", resets)
+
+	// The same counters decide selection: one more request reaches the limit.
+	require.True(t, ChannelWithinLimits(limited))
+	seedChannelLimitCounters(t, limited.Id, 2, 0, 0, 0)
+	assert.False(t, ChannelWithinLimits(limited))
+	assert.Equal(t, int64(60), ChannelLimitUsages([]*Channel{limited})[0].Rpm.Used)
+}
+
+func TestChannelQuotaWindowEndsFollowResetTimeAndTimezone(t *testing.T) {
+	losAngeles, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	ch := &Channel{
+		Id:             951200,
+		QuotaResetZone: common.GetPointer("America/Los_Angeles"),
+		QuotaResetTime: common.GetPointer("09:30"),
+	}
+	cases := []struct{ at, dayEnd, monthEnd time.Time }{
+		{ // before today's reset: the window ends today; the month window is still February's
+			time.Date(2026, 3, 1, 9, 29, 0, 0, losAngeles),
+			time.Date(2026, 3, 1, 9, 30, 0, 0, losAngeles),
+			time.Date(2026, 3, 1, 9, 30, 0, 0, losAngeles),
+		},
+		{ // after the reset
+			time.Date(2026, 3, 1, 9, 30, 0, 0, losAngeles),
+			time.Date(2026, 3, 2, 9, 30, 0, 0, losAngeles),
+			time.Date(2026, 4, 1, 9, 30, 0, 0, losAngeles),
+		},
+		{ // across the daylight saving change of 2026-03-08 the reset stays at 09:30 local
+			time.Date(2026, 3, 7, 12, 0, 0, 0, losAngeles),
+			time.Date(2026, 3, 8, 9, 30, 0, 0, losAngeles),
+			time.Date(2026, 4, 1, 9, 30, 0, 0, losAngeles),
+		},
+		{ // December rolls into January
+			time.Date(2026, 12, 31, 10, 0, 0, 0, losAngeles),
+			time.Date(2027, 1, 1, 9, 30, 0, 0, losAngeles),
+			time.Date(2027, 1, 1, 9, 30, 0, 0, losAngeles),
+		},
+	}
+	// New Year's Day before the reset still belongs to the old year's windows.
+	day, month := channelQuotaWindowLabels(ch, time.Date(2027, 1, 1, 9, 29, 0, 0, losAngeles))
+	assert.Equal(t, "20261231", day)
+	assert.Equal(t, "202612", month)
+	for _, c := range cases {
+		dayEnd, monthEnd := channelQuotaWindowEnds(ch, c.at)
+		assert.True(t, dayEnd.Equal(c.dayEnd), "day end at %s: got %s", c.at, dayEnd)
+		assert.True(t, monthEnd.Equal(c.monthEnd), "month end at %s: got %s", c.at, monthEnd)
+		// The window that ends there is the one the charge is counted in.
+		dayLabel, _ := channelQuotaWindowLabels(ch, c.at)
+		lastInstant, _ := channelQuotaWindowLabels(ch, dayEnd.Add(-time.Second))
+		nextWindow, _ := channelQuotaWindowLabels(ch, dayEnd)
+		assert.Equal(t, dayLabel, lastInstant)
+		assert.NotEqual(t, dayLabel, nextWindow)
+	}
+}
+
+// Some zones skip midnight when daylight saving starts (Havana jumps from
+// 00:00 to 01:00), so the window day is tracked as a calendar date: the
+// window must still roll on that day and its end must lie ahead.
+func TestChannelQuotaWindowsRollOnADayWithoutMidnight(t *testing.T) {
+	havana, err := time.LoadLocation("America/Havana")
+	require.NoError(t, err)
+	gapDay := time.Date(2026, 3, 8, 12, 0, 0, 0, havana)
+	_, standardOffset := time.Date(2026, 3, 7, 12, 0, 0, 0, havana).Zone()
+	_, summerOffset := gapDay.Zone()
+	require.NotEqual(t, standardOffset, summerOffset, "the test needs the day daylight saving starts in Havana")
+
+	for _, resetTime := range []string{"", "09:30"} {
+		ch := &Channel{Id: 951300, QuotaResetZone: common.GetPointer("America/Havana")}
+		if resetTime != "" {
+			ch.QuotaResetTime = common.GetPointer(resetTime)
+		}
+		beforeReset := time.Date(2026, 3, 8, 5, 0, 0, 0, havana)
+		afterReset := time.Date(2026, 3, 8, 10, 0, 0, 0, havana)
+
+		label, _ := channelQuotaWindowLabels(ch, afterReset)
+		assert.Equal(t, "20260308", label, "reset %q: the gap day gets its own window", resetTime)
+		dayEnd, _ := channelQuotaWindowEnds(ch, afterReset)
+		assert.True(t, dayEnd.After(afterReset), "reset %q: the next reset lies ahead, got %s", resetTime, dayEnd)
+		assert.Equal(t, 9, dayEnd.In(havana).Day(), "reset %q: it is on the next day", resetTime)
+
+		// The evening before: the window shown as ending next must end when
+		// the label really rolls, which is ahead of now.
+		eve := time.Date(2026, 3, 7, 23, 30, 0, 0, havana)
+		eveLabel, _ := channelQuotaWindowLabels(ch, eve)
+		eveEnd, _ := channelQuotaWindowEnds(ch, eve)
+		assert.True(t, eveEnd.After(eve), "reset %q: on the eve the next reset lies ahead, got %s", resetTime, eveEnd)
+		lastInstant, _ := channelQuotaWindowLabels(ch, eveEnd.Add(-time.Second))
+		atEnd, _ := channelQuotaWindowLabels(ch, eveEnd)
+		assert.Equal(t, eveLabel, lastInstant, "reset %q: the window lasts until its announced end", resetTime)
+		assert.NotEqual(t, eveLabel, atEnd, "reset %q: and rolls exactly there", resetTime)
+
+		label, _ = channelQuotaWindowLabels(ch, beforeReset)
+		if resetTime == "" {
+			assert.Equal(t, "20260308", label, "with a midnight reset 05:00 already belongs to the gap day")
+		} else {
+			assert.Equal(t, "20260307", label, "before 09:30 the previous day's window is still open")
+			dayEnd, _ = channelQuotaWindowEnds(ch, beforeReset)
+			assert.True(t, dayEnd.Equal(time.Date(2026, 3, 8, 9, 30, 0, 0, havana)), "got %s", dayEnd)
+		}
+	}
+}
+
+// With the memory cache off the listed channels come from one query.
+func TestCacheGetChannelsByIdsWithoutMemoryCache(t *testing.T) {
+	truncateTables(t)
+	previous := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = previous })
+
+	first := Channel{Id: channelLimitTestId(951400), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "first", Models: "m", Group: "default", Key: "k", RpmLimit: int64PtrForLimitTest(7)}
+	second := Channel{Id: channelLimitTestId(951400), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "second", Models: "m", Group: "default", Key: "k"}
+	require.NoError(t, first.Insert())
+	require.NoError(t, second.Insert())
+
+	channels, err := CacheGetChannelsByIds([]int{first.Id, second.Id, 99999999})
+	require.NoError(t, err)
+	require.Len(t, channels, 2, "unknown ids are left out")
+	usages := ChannelLimitUsages(channels)
+	require.Len(t, usages, 1)
+	assert.Equal(t, first.Id, usages[0].ChannelId)
+	assert.Equal(t, int64(7), usages[0].Rpm.Limit)
+
+	none, err := CacheGetChannelsByIds(nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

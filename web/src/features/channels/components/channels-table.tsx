@@ -69,6 +69,7 @@ import {
 } from '../lib'
 import type { Channel, ChannelSortBy } from '../types'
 import { ChannelCard } from './channel-card'
+import { ChannelLimitUsageSource } from './channel-limit-usage'
 import { ChannelPriorityContext } from './channel-priority-context'
 import {
   ChannelPriorityHandle,
@@ -517,6 +518,7 @@ export function ChannelsTable() {
         order={priorityOrder}
         channels={channels}
       />
+      <ChannelLimitUsageSource channels={priorityOrder.items} />
       <div
         ref={drag.root}
         role='region'

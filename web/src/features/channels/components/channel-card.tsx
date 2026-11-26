@@ -25,6 +25,7 @@ import { StatusBadgeTypeContext } from '@/components/status-badge'
 
 import { CHANNEL_STATUS } from '../constants'
 import { isTagAggregateRow, parseGroupsList } from '../lib'
+import { channelHasLimits } from '../lib/channel-limit-usage'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
@@ -36,8 +37,8 @@ const SENSITIVE_MASK = '••••'
  * renderer via `flexRender`, so the table's information and interactions are
  * preserved: row selection, provider/multi-key/IO.NET type badge, id,
  * name/remark + warning icons, status (with tooltips), groups, inline
- * priority/weight spinners, balance refresh, response/test times, tag
- * expand-collapse, and the per-row (or per-tag) actions menu.
+ * priority/weight spinners, balance refresh, response/test times, live limit
+ * usage, tag expand-collapse, and the per-row (or per-tag) actions menu.
  */
 function ChannelCardComponent({
   row,
@@ -74,6 +75,10 @@ function ChannelCardComponent({
   const balanceCell = renderCell('balance')
   const responseCell = renderCell('response_time')
   const testCell = renderCell('test_time')
+  const limitUsageCell =
+    !isTagRow && channelHasLimits(row.original)
+      ? renderCell('limit_usage')
+      : null
 
   const labelClass = 'text-muted-foreground text-[11px] font-medium select-none'
 
@@ -108,8 +113,8 @@ function ChannelCardComponent({
 
         {/* Both rows share their columns: identity/balance on the left,
           priority/response and weight/last tested on the right. */}
-        <StatusBadgeTypeContext.Provider value='text'>
-          <div className='grid grid-cols-[minmax(0,1fr)_auto_auto] items-start gap-3'>
+        <div className='grid grid-cols-[minmax(0,1fr)_auto_auto] items-start gap-3'>
+          <StatusBadgeTypeContext.Provider value='text'>
             <div className='min-w-0 overflow-hidden text-sm'>
               {!isTagRow && (
                 <div className={labelClass}>
@@ -153,24 +158,31 @@ function ChannelCardComponent({
                 </dd>
               </div>
             </dl>
-          </div>
-        </StatusBadgeTypeContext.Provider>
+          </StatusBadgeTypeContext.Provider>
 
-        {/* Groups retain their compact, full-width footer. */}
-        <div className='min-w-0'>
-          {groups.length > 0 ? (
-            <div className='-ml-1.5 flex min-w-0 flex-wrap gap-1'>
-              {groups.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  size='sm'
-                />
-              ))}
-            </div>
-          ) : (
-            <span className='text-muted-foreground text-sm'>-</span>
+          {/* Footer of the same grid: groups on the left; a channel with
+            limits shows their live use under the Response and Last Tested
+            columns, so its left edge lines up with them. Without limits the
+            groups keep the full width. */}
+          <div className={limitUsageCell ? 'min-w-0' : 'col-span-3 min-w-0'}>
+            {groups.length > 0 ? (
+              <div className='-ml-1.5 flex min-w-0 flex-wrap gap-1'>
+                {groups.map((g) => (
+                  <GroupBadge
+                    key={g}
+                    group={g}
+                    label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                    size='sm'
+                  />
+                ))}
+              </div>
+            ) : (
+              <span className='text-muted-foreground text-sm'>-</span>
+            )}
+          </div>
+          {limitUsageCell && (
+            // w-0 + min-w-full: take the two columns' width without widening them.
+            <div className='col-span-2 w-0 min-w-full'>{limitUsageCell}</div>
           )}
         </div>
       </div>

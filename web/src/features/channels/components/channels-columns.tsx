@@ -96,6 +96,7 @@ import {
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
 import { ChannelBalanceDetails } from './channel-balance-details'
+import { ChannelLimitUsageCell } from './channel-limit-usage'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -986,6 +987,15 @@ export function useChannelsColumns(
           return value.includes(String(row.getValue(id)))
         },
         size: 220,
+        enableSorting: false,
+      },
+
+      // Limit usage column: live use of the channel's rate and quota limits
+      {
+        id: 'limit_usage',
+        header: t('Limit usage'),
+        cell: ({ row }) => <ChannelLimitUsageCell channel={row.original} />,
+        size: 200,
         enableSorting: false,
       },
 

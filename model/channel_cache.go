@@ -244,6 +244,26 @@ func CacheGetChannel(id int) (*Channel, error) {
 	return c, nil
 }
 
+// CacheGetChannelsByIds returns the known channels among ids, from the memory
+// cache when it is on and with one query otherwise. Unknown ids are left out.
+func CacheGetChannelsByIds(ids []int) ([]*Channel, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if !common.MemoryCacheEnabled {
+		return GetChannelsByIds(ids)
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	channels := make([]*Channel, 0, len(ids))
+	for _, id := range ids {
+		if channel, ok := channelsIDM[id]; ok {
+			channels = append(channels, channel)
+		}
+	}
+	return channels, nil
+}
+
 func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 	if !common.MemoryCacheEnabled {
 		channel, err := GetChannelById(id, true)

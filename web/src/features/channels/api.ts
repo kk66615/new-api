@@ -91,6 +91,54 @@ export async function getInferenceStatus(
   return requireServerSuccess(response.data).data
 }
 
+/** One configured limit of a channel with its current use. */
+export type ChannelLimitUsageItem = {
+  used: number
+  limit: number
+  /** Unix seconds of the next reset; daily and monthly budgets only. */
+  resets_at?: number
+}
+
+/** Live use of a channel's limits; a limit that is not set is absent. */
+export type ChannelLimitUsage = {
+  channel_id: number
+  rpm?: ChannelLimitUsageItem
+  tpm?: ChannelLimitUsageItem
+  daily?: ChannelLimitUsageItem
+  monthly?: ChannelLimitUsageItem
+}
+
+/** The server reads this many ids per request. */
+const CHANNEL_LIMIT_USAGE_BATCH = 200
+const CHANNEL_LIMIT_USAGE_TIMEOUT_MS = 10_000
+
+export async function getChannelLimitUsage(
+  ids: number[],
+  signal?: AbortSignal
+): Promise<ChannelLimitUsage[]> {
+  const batches: number[][] = []
+  for (let i = 0; i < ids.length; i += CHANNEL_LIMIT_USAGE_BATCH) {
+    batches.push(ids.slice(i, i + CHANNEL_LIMIT_USAGE_BATCH))
+  }
+  const responses = await Promise.all(
+    batches.map((batch) =>
+      api.get<{ success: boolean; data: ChannelLimitUsage[] }>(
+        '/api/channel/limit_usage',
+        {
+          params: { ids: batch.join(',') },
+          signal,
+          disableDuplicate: true,
+          // A read that hangs must fail, so the list can say it is not current.
+          timeout: CHANNEL_LIMIT_USAGE_TIMEOUT_MS,
+        }
+      )
+    )
+  )
+  return responses.flatMap(
+    (response) => requireServerSuccess(response.data).data ?? []
+  )
+}
+
 export type TaskPluginOption = {
   sortPriority?: number
   website?: string

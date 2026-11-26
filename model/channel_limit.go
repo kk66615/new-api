@@ -51,8 +51,6 @@ const (
 	channelMonthQuotaPrefix = "chanQM"
 	dailyQuotaWindowTTL     = 48 * time.Hour
 	monthlyQuotaWindowTTL   = 45 * 24 * time.Hour
-	dayWindowBucketLayout   = "20060102"
-	monthWindowBucketLayout = "200601"
 )
 
 // ChannelSpend describes how a used_quota delta was charged. GroupRatio is the
@@ -137,12 +135,43 @@ func (channel *Channel) ValidateQuotaReset() error {
 	return nil
 }
 
-// channelQuotaWindowLabels returns the day and month labels of the budget
-// windows containing at. A window labelled D runs from D at the reset time to
-// the next day at the reset time, in the reset timezone; months likewise
-// start on the 1st at the reset time. A setting that no longer parses falls
-// back to midnight server time rather than dropping the charge.
-func channelQuotaWindowLabels(ch *Channel, at time.Time) (string, string) {
+// quotaWindowDay is the calendar day (in the reset timezone) a budget window
+// is labelled with. It is kept as a civil date rather than a time at
+// midnight: some zones skip midnight on a daylight saving change, and a time
+// built there would land on the previous day.
+type quotaWindowDay struct {
+	year  int
+	month time.Month
+	day   int
+	loc   *time.Location
+	// offset is the reset time as an offset from midnight.
+	offset time.Duration
+}
+
+// resetOn returns the reset moment on the day `days` after the window day.
+func (w quotaWindowDay) resetOn(days int) time.Time {
+	reset := time.Date(w.year, w.month, w.day+days,
+		int(w.offset/time.Hour), int(w.offset%time.Hour/time.Minute), 0, 0, w.loc)
+	// A reset time inside the hour a daylight saving change skips can resolve
+	// to the evening before; the window really turns at the first instant of
+	// its day. Noon always exists and names that day.
+	wantYear, wantMonth, wantDay := time.Date(w.year, w.month, w.day+days, 12, 0, 0, 0, w.loc).Date()
+	for range 8 {
+		year, month, day := reset.Date()
+		if year == wantYear && month == wantMonth && day == wantDay {
+			break
+		}
+		reset = reset.Add(15 * time.Minute)
+	}
+	return reset
+}
+
+// channelQuotaWindowStart returns the day whose budget window contains at.
+// A window labelled D runs from D at the reset time to the next day at the
+// reset time, in the reset timezone; months likewise start on the 1st at the
+// reset time. A setting that no longer parses falls back to midnight server
+// time rather than dropping the charge.
+func channelQuotaWindowStart(ch *Channel, at time.Time) quotaWindowDay {
 	loc, err := ParseQuotaResetTimezone(ch.GetQuotaResetTimezone())
 	if err != nil {
 		loc = time.Local
@@ -154,13 +183,31 @@ func channelQuotaWindowLabels(ch *Channel, at time.Time) (string, string) {
 	// Compare wall clocks, not elapsed time, so a daylight saving change
 	// never moves the reset away from its local HH:MM.
 	local := at.In(loc)
-	windowDay := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-	resetToday := time.Date(local.Year(), local.Month(), local.Day(),
-		int(offset/time.Hour), int(offset%time.Hour/time.Minute), 0, 0, loc)
-	if local.Before(resetToday) {
-		windowDay = windowDay.AddDate(0, 0, -1)
+	window := quotaWindowDay{loc: loc, offset: offset}
+	window.year, window.month, window.day = local.Date()
+	if local.Before(window.resetOn(0)) {
+		// Noon always exists, so stepping a day back from it is safe.
+		previous := time.Date(window.year, window.month, window.day-1, 12, 0, 0, 0, loc)
+		window.year, window.month, window.day = previous.Date()
 	}
-	return windowDay.Format(dayWindowBucketLayout), windowDay.Format(monthWindowBucketLayout)
+	return window
+}
+
+// channelQuotaWindowLabels returns the day and month labels of the budget
+// windows containing at.
+func channelQuotaWindowLabels(ch *Channel, at time.Time) (string, string) {
+	window := channelQuotaWindowStart(ch, at)
+	return fmt.Sprintf("%04d%02d%02d", window.year, int(window.month), window.day),
+		fmt.Sprintf("%04d%02d", window.year, int(window.month))
+}
+
+// channelQuotaWindowEnds returns when the day and month budget windows
+// containing at end, i.e. the next daily and monthly reset.
+func channelQuotaWindowEnds(ch *Channel, at time.Time) (time.Time, time.Time) {
+	window := channelQuotaWindowStart(ch, at)
+	firstOfNextMonth := window
+	firstOfNextMonth.month, firstOfNextMonth.day = window.month+1, 1
+	return window.resetOn(1), firstOfNextMonth.resetOn(0)
 }
 
 func channelQuotaKeys(ch *Channel, at time.Time) (string, string) {
@@ -207,6 +254,40 @@ func ChannelWithinLimits(ch *Channel) bool {
 	return ChannelWithinLimitsBatch([]*Channel{ch})[ch.Id]
 }
 
+// channelLimitCounters is what the limiter currently counts for one channel.
+type channelLimitCounters struct {
+	rpm, tpm, dayQuota, monthQuota int64
+}
+
+// readChannelLimitCounters reads the live counters of channels that have
+// limits, in one round trip per store. Both the selection filter and the
+// usage shown to admins read through it, so what is displayed is what is
+// enforced.
+func readChannelLimitCounters(limited []*Channel, now time.Time) map[int]channelLimitCounters {
+	rollingKeys := make([]string, 0, len(limited)*2)
+	quotaKeys := make([]string, 0, len(limited)*2)
+	dayKeys := make(map[int]string, len(limited))
+	monthKeys := make(map[int]string, len(limited))
+	for _, ch := range limited {
+		rollingKeys = append(rollingKeys, channelRpmKey(ch.Id), channelTpmKey(ch.Id))
+		dayKey, monthKey := channelQuotaKeys(ch, now)
+		dayKeys[ch.Id], monthKeys[ch.Id] = dayKey, monthKey
+		quotaKeys = append(quotaKeys, dayKey, monthKey)
+	}
+	rates := common.RollingCounterSums(rollingKeys)
+	quotas := common.CounterMGet(quotaKeys)
+	counters := make(map[int]channelLimitCounters, len(limited))
+	for _, ch := range limited {
+		counters[ch.Id] = channelLimitCounters{
+			rpm:        rates[channelRpmKey(ch.Id)],
+			tpm:        rates[channelTpmKey(ch.Id)],
+			dayQuota:   quotas[dayKeys[ch.Id]],
+			monthQuota: quotas[monthKeys[ch.Id]],
+		}
+	}
+	return counters
+}
+
 // ChannelWithinLimitsBatch reports, keyed by channel id, whether each channel
 // stays within its limits. Channels without configured limits are always
 // allowed, and the counters are fetched in one round trip per store so
@@ -226,28 +307,68 @@ func ChannelWithinLimitsBatch(channels []*Channel) map[int]bool {
 	if len(limited) == 0 {
 		return allowed
 	}
-	now := time.Now()
-	rollingKeys := make([]string, 0, len(limited)*2)
-	quotaKeys := make([]string, 0, len(limited)*2)
-	dayKeys := make(map[int]string, len(limited))
-	monthKeys := make(map[int]string, len(limited))
+	counters := readChannelLimitCounters(limited, time.Now())
 	for _, ch := range limited {
-		rollingKeys = append(rollingKeys, channelRpmKey(ch.Id), channelTpmKey(ch.Id))
-		dayKey, monthKey := channelQuotaKeys(ch, now)
-		dayKeys[ch.Id], monthKeys[ch.Id] = dayKey, monthKey
-		quotaKeys = append(quotaKeys, dayKey, monthKey)
-	}
-	rates := common.RollingCounterSums(rollingKeys)
-	quotas := common.CounterMGet(quotaKeys)
-	for _, ch := range limited {
-		allowed[ch.Id] = channelWithinLimitValues(ch,
-			rates[channelRpmKey(ch.Id)],
-			rates[channelTpmKey(ch.Id)],
-			quotas[dayKeys[ch.Id]],
-			quotas[monthKeys[ch.Id]],
-		)
+		c := counters[ch.Id]
+		allowed[ch.Id] = channelWithinLimitValues(ch, c.rpm, c.tpm, c.dayQuota, c.monthQuota)
 	}
 	return allowed
+}
+
+// ChannelLimitUsageItem is one configured limit with its current use.
+// ResetsAt (unix seconds) is set for the daily and monthly budgets only; the
+// per-minute limits roll continuously.
+type ChannelLimitUsageItem struct {
+	Used     int64 `json:"used"`
+	Limit    int64 `json:"limit"`
+	ResetsAt int64 `json:"resets_at,omitempty"`
+}
+
+// ChannelLimitUsage is the live use of a channel's configured limits. A limit
+// that is not configured is omitted.
+type ChannelLimitUsage struct {
+	ChannelId int                    `json:"channel_id"`
+	Rpm       *ChannelLimitUsageItem `json:"rpm,omitempty"`
+	Tpm       *ChannelLimitUsageItem `json:"tpm,omitempty"`
+	Daily     *ChannelLimitUsageItem `json:"daily,omitempty"`
+	Monthly   *ChannelLimitUsageItem `json:"monthly,omitempty"`
+}
+
+// ChannelLimitUsages returns the live limit usage of the given channels,
+// leaving out channels without any limit. Budgets are in quota units at list
+// price, as they are counted.
+func ChannelLimitUsages(channels []*Channel) []ChannelLimitUsage {
+	limited := make([]*Channel, 0, len(channels))
+	for _, ch := range channels {
+		if ch != nil && channelHasAnyLimit(ch) {
+			limited = append(limited, ch)
+		}
+	}
+	usages := make([]ChannelLimitUsage, 0, len(limited))
+	if len(limited) == 0 {
+		return usages
+	}
+	now := time.Now()
+	counters := readChannelLimitCounters(limited, now)
+	for _, ch := range limited {
+		c := counters[ch.Id]
+		usage := ChannelLimitUsage{ChannelId: ch.Id}
+		if limit := ch.GetRpmLimit(); limit > 0 {
+			usage.Rpm = &ChannelLimitUsageItem{Used: c.rpm, Limit: limit}
+		}
+		if limit := ch.GetTpmLimit(); limit > 0 {
+			usage.Tpm = &ChannelLimitUsageItem{Used: c.tpm, Limit: limit}
+		}
+		dayEnd, monthEnd := channelQuotaWindowEnds(ch, now)
+		if limit := ch.GetDailyQuotaLimit(); limit > 0 {
+			usage.Daily = &ChannelLimitUsageItem{Used: c.dayQuota, Limit: limit, ResetsAt: dayEnd.Unix()}
+		}
+		if limit := ch.GetMonthlyQuotaLimit(); limit > 0 {
+			usage.Monthly = &ChannelLimitUsageItem{Used: c.monthQuota, Limit: limit, ResetsAt: monthEnd.Unix()}
+		}
+		usages = append(usages, usage)
+	}
+	return usages
 }
 
 // ChannelRpmTryConsume atomically admits one upstream dispatch against the
