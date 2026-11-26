@@ -332,16 +332,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				return apiErr
 			}
 			if !appmodel.ChannelRpmTryConsume(channel) {
-				apiErr = appmodel.ChannelRpmOverLimitError(channel)
-				// Route the rejection through the shared retry policy so
-				// pinned and strict-session requests stop instead of leaking
-				// to another channel, mirroring the HTTP relay loops.
-				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
-				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
-				if decision.Action != "retry" {
+				// Hand the request to the next candidate without using up a
+				// retry, as the HTTP relay loops do; pinned and strict-session
+				// requests stop here.
+				apiErr = service.ChannelAtCapacityError(c)
+				if !service.SkipChannelAtCapacity(c, channel.Id, apiErr, retry) {
 					return apiErr
 				}
-				service.AppendUsedChannel(c, channel.Id)
 				continue
 			}
 			service.AppendUsedChannel(c, channel.Id)
@@ -735,11 +732,8 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	// Channel limits still apply on a locked connection: re-check TPM and
 	// calendar quota eligibility, then run the same atomic RPM admission
 	// as the initial selection path.
-	if !appmodel.ChannelWithinLimits(channel) {
-		return appmodel.ChannelLimitsExceededError(channel)
-	}
-	if !appmodel.ChannelRpmTryConsume(channel) {
-		return appmodel.ChannelRpmOverLimitError(channel)
+	if !appmodel.ChannelWithinLimits(channel) || !appmodel.ChannelRpmTryConsume(channel) {
+		return service.ChannelAtCapacityError(c)
 	}
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)

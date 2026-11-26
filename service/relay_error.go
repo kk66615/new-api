@@ -23,24 +23,34 @@ func clientRequestDone(c *gin.Context) bool {
 	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 
-// DecideRelayRetry is the single retry decision for relay attempts. The reason
-// is recorded in the request policy decision events of the log details.
-func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) PolicyDecision {
-	if err == nil {
-		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
-	}
+// relayMustStayOnChannel applies the rules that end a request on its current
+// channel whatever went wrong: the client is gone, the session is strictly
+// bound, or the channel is pinned.
+func relayMustStayOnChannel(c *gin.Context) (PolicyDecision, bool) {
 	if clientRequestDone(c) {
-		return PolicyDecision{Action: "stop", Reason: "client_disconnected", Source: "system"}
+		return PolicyDecision{Action: "stop", Reason: "client_disconnected", Source: "system"}, true
 	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		source := RequestPolicy(c).SessionModeSource
 		if source == "" {
 			source = "session_rule"
 		}
-		return PolicyDecision{Action: "stop", Reason: "strict_session", Source: source}
+		return PolicyDecision{Action: "stop", Reason: "strict_session", Source: source}, true
 	}
 	if GetChannelConstraints(c).SuppressesRetry() {
-		return PolicyDecision{Action: "stop", Reason: "pinned_channel", Source: "channel_constraint"}
+		return PolicyDecision{Action: "stop", Reason: "pinned_channel", Source: "channel_constraint"}, true
+	}
+	return PolicyDecision{}, false
+}
+
+// DecideRelayRetry is the single retry decision for relay attempts. The reason
+// is recorded in the request policy decision events of the log details.
+func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) PolicyDecision {
+	if err == nil {
+		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
+	}
+	if decision, stop := relayMustStayOnChannel(c); stop {
+		return decision
 	}
 	if types.IsChannelError(err) {
 		return PolicyDecision{Action: "retry", Reason: "channel_error", Source: "system"}

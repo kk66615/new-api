@@ -121,9 +121,9 @@ import {
   parseChannelConnectionInfo,
   type ChannelConnectionInfo,
 } from '@/lib/channel-connection-info'
+import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
 import { resolveLocalizedText } from '@/lib/localized-text'
-import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { ROLE } from '@/lib/roles'
 import {
   requireServerSuccess,
@@ -443,6 +443,9 @@ function SubHeading(props: {
 
 /** Stable empty list so memoized consumers do not re-run on every render. */
 const NO_UPSTREAM_MODELS: string[] = []
+
+// Select value standing for an empty reset timezone (server local time).
+const QUOTA_RESET_SERVER_TIMEZONE = 'server'
 
 export function ChannelMutateDrawer({
   open,
@@ -2451,6 +2454,29 @@ export function ChannelMutateDrawer({
   const monthlyQuotaLimitLabel = t('Monthly quota limit ({{currency}})', {
     currency: channelLimitCurrencyLabel,
   })
+  const quotaResetTimezoneItems = [
+    { value: QUOTA_RESET_SERVER_TIMEZONE, label: t('Server time zone') },
+    { value: 'UTC', label: 'UTC' },
+    { value: 'Asia/Shanghai', label: t('China (Asia/Shanghai)') },
+    {
+      value: 'America/Los_Angeles',
+      label: t('US Pacific (America/Los_Angeles)'),
+    },
+  ]
+  // A reset timezone saved outside the list (for example through the API)
+  // stays visible instead of reading as the server time zone.
+  const savedQuotaResetTimezone = form.watch('quota_reset_timezone')
+  if (
+    savedQuotaResetTimezone &&
+    !quotaResetTimezoneItems.some(
+      (item) => item.value === savedQuotaResetTimezone
+    )
+  ) {
+    quotaResetTimezoneItems.push({
+      value: savedQuotaResetTimezone,
+      label: savedQuotaResetTimezone,
+    })
+  }
   const rateLimitFields = (
     <div
       role='group'
@@ -2467,7 +2493,7 @@ export function ChannelMutateDrawer({
         iconTone='info'
       />
       <fieldset
-        disabled={sensitiveLocked || isSubmitting}
+        disabled={isSubmitting}
         className='space-y-4 disabled:opacity-60'
       >
         <div className='grid gap-4 sm:grid-cols-2'>
@@ -2568,6 +2594,64 @@ export function ChannelMutateDrawer({
                 <FormDescription>
                   {t(FIELD_DESCRIPTIONS.MONTHLY_QUOTA_LIMIT)}
                 </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='quota_reset_timezone'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Quota reset time zone')}</FormLabel>
+                <Select
+                  items={quotaResetTimezoneItems}
+                  value={field.value || QUOTA_RESET_SERVER_TIMEZONE}
+                  onValueChange={(value) =>
+                    field.onChange(
+                      value === QUOTA_RESET_SERVER_TIMEZONE ? '' : value
+                    )
+                  }
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectGroup>
+                      {quotaResetTimezoneItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  {t(FIELD_DESCRIPTIONS.QUOTA_RESET)}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='quota_reset_time'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Quota reset time')}</FormLabel>
+                <FormControl>
+                  <Input
+                    type='time'
+                    step={60}
+                    placeholder='00:00'
+                    {...field}
+                    value={field.value ?? ''}
+                  />
+                </FormControl>
                 <FormMessage />
               </FormItem>
             )}

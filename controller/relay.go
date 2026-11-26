@@ -221,22 +221,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		// Strict channel RPM admission at dispatch: a channel that just went
-		// over its budget hands the attempt to the next candidate. The error
-		// is local (never auto-bans), and the shared retry policy decides
-		// whether the request may move on — pinned and strict-session requests
-		// stop instead of leaking to another channel, exactly as for any
-		// other failure.
+		// over its budget hands the request to the next candidate without
+		// using up a retry (the error is local and never auto-bans); pinned
+		// and strict-session requests stop instead of leaking to another
+		// channel.
 		if !model.ChannelRpmTryConsume(channel) {
-			newAPIError = model.ChannelRpmOverLimitError(channel)
-			decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
-			service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
-			if decision.Action != "retry" {
+			newAPIError = service.ChannelAtCapacityError(c)
+			if !service.SkipChannelAtCapacity(c, channel.Id, newAPIError, retryParam) {
 				break
 			}
-			// Record the rejected channel in the use_channel trail so the
-			// next iteration enters candidate selection instead of
-			// rebuilding the same over-limit distributor channel.
-			service.AppendUsedChannel(c, channel.Id)
 			continue
 		}
 		service.AppendUsedChannel(c, channel.Id)
@@ -381,6 +374,12 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return channel, nil
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
+	if errors.Is(err, model.ErrChannelsOverLimit) {
+		// Every remaining candidate is at its own limit: answer like the
+		// distributor does (429 channel_limit_exceeded), not 500.
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgDistributorChannelsOverLimit, map[string]any{"Group": selectGroup, "Model": info.OriginModelName})),
+			model.ChannelLimitExceededCode, http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
+	}
 	if err != nil {
 		return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryGetChannelFailed, map[string]any{"Group": selectGroup, "Model": info.OriginModelName, "Error": err.Error()})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
@@ -445,6 +444,18 @@ func RelayMidjourney(c *gin.Context) {
 				"description": common.MessageWithRequestId(reportErr.Error(), c.GetString(common.RequestIdKey)),
 				"type":        string(reportErr.GetErrorCode()),
 				"code":        code,
+			})
+			return
+		}
+		// Midjourney submissions go straight to the distributor's channel,
+		// so its RPM limit is admitted here; there is no other candidate to
+		// hand the request to.
+		if channel, cacheErr := model.CacheGetChannel(c.GetInt("channel_id")); cacheErr == nil && !model.ChannelRpmTryConsume(channel) {
+			reportErr = service.ChannelAtCapacityError(c)
+			c.JSON(reportErr.StatusCode, gin.H{
+				"description": common.MessageWithRequestId(reportErr.Error(), c.GetString(common.RequestIdKey)),
+				"type":        string(reportErr.GetErrorCode()),
+				"code":        constant.MjRequestError,
 			})
 			return
 		}
@@ -726,36 +737,24 @@ func executeTaskSubmissionWith(
 			channel, channelErr = getChannel(c, relayInfo, retryParam)
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
-				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, "get_channel_failed", channelErr.StatusCode)
+				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, string(channelErr.GetErrorCode()), channelErr.StatusCode)
 				break
 			}
 		}
-		// Strict channel RPM admission at dispatch: skip the attempt (and
-		// the next candidate keeps the retry budget) instead of sending the
-		// task to a channel that just exhausted its per-minute budget.
+		// Strict channel RPM admission at dispatch: hand the task to the
+		// next candidate, without using up a retry, instead of sending it to
+		// a channel that just exhausted its per-minute budget.
 		if !model.ChannelRpmTryConsume(channel) {
-			overLimit := model.ChannelRpmOverLimitError(channel)
+			overLimit := service.ChannelAtCapacityError(c)
 			taskErr = service.TaskErrorWrapperLocal(overLimit.Err, string(model.ChannelLimitExceededCode), overLimit.StatusCode)
 			if lockedCh, locked := relayInfo.LockedChannel.(*model.Channel); locked && lockedCh != nil {
-				// A locked channel cannot move to another candidate, and the
-				// per-minute window cannot reset within this request's retry
-				// budget: stop now instead of re-running setup for the same
-				// deterministic rejection.
+				// A locked channel cannot move to another candidate: stop
+				// with the 429 instead of retrying the same refusal.
 				break
 			}
-			// Unlocked submissions follow the shared retry policy: pinned
-			// and strict-session requests stop instead of leaking to
-			// another channel.
-			taskAPIError := taskSubmissionAPIError(taskErr)
-			decision := decideTaskRetry(c, taskErr, common.RetryTimes-retryParam.GetRetry())
-			service.RecordPolicyFailure(c, channel.Id, taskAPIError, decision)
-			if decision.Action != "retry" {
+			if !service.SkipChannelAtCapacity(c, channel.Id, taskSubmissionAPIError(taskErr), retryParam) {
 				break
 			}
-			// Record the rejected channel in the use_channel trail so the
-			// next iteration enters candidate selection instead of
-			// rebuilding the same over-limit distributor channel.
-			service.AppendUsedChannel(c, channel.Id)
 			continue
 		}
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)

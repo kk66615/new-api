@@ -1810,3 +1810,19 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 		})
 	}
 }
+
+// A task refunded or settled later is put back in the channel budget window
+// of its submission, at the ratio it was charged at; without a billing
+// context the ratio is unknown and the budget stays as charged.
+func TestTaskChannelSpendUsesSubmissionTimeAndChargeRatio(t *testing.T) {
+	submitted := time.Date(2026, 11, 20, 23, 50, 0, 0, time.UTC)
+	task := &model.Task{SubmitTime: submitted.Unix()}
+	task.PrivateData.BillingContext = &model.TaskBillingContext{GroupRatio: 3.5}
+
+	spend := taskChannelSpend(task)
+	assert.True(t, spend.ChargedAt.Equal(submitted), "charged at %s", spend.ChargedAt)
+	assert.Equal(t, 3.5, spend.GroupRatio)
+
+	legacy := &model.Task{SubmitTime: submitted.Unix()}
+	assert.Zero(t, taskChannelSpend(legacy).GroupRatio, "a task without billing context leaves the budget unchanged")
+}

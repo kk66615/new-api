@@ -92,6 +92,8 @@ export const channelSchema = z.object({
   tpm_limit: z.number().nullish(),
   daily_quota_limit: z.number().nullish(),
   monthly_quota_limit: z.number().nullish(),
+  quota_reset_timezone: z.string().nullish(),
+  quota_reset_time: z.string().nullish(),
   other_info: z.string().default(''),
   tag: z.string().nullish(),
   setting: z.string().nullish(),

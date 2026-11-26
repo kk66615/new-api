@@ -144,4 +144,7 @@ var channelNonSensitiveFields = map[string]struct{}{
 	"tpm_limit":           {},
 	"daily_quota_limit":   {},
 	"monthly_quota_limit": {},
+	// When the daily/monthly quota windows start; same class as the limits.
+	"quota_reset_timezone": {},
+	"quota_reset_time":     {},
 }

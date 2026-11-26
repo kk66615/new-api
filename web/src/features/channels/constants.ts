@@ -497,13 +497,15 @@ export const FIELD_DESCRIPTIONS = {
   BATCH_ADD: 'Create multiple channels from multiple keys',
   OPENAI_ORG: 'OpenAI Organization ID (optional)',
   RPM_LIMIT:
-    'Max requests per minute dispatched to this channel. Set to 0 for unlimited',
+    'Max requests sent to this channel in any 60 seconds. Set to 0 for unlimited',
   TPM_LIMIT:
-    'Max tokens per minute settled on this channel. Set to 0 for unlimited',
+    'Max tokens settled on this channel in any 60 seconds. Set to 0 for unlimited',
   DAILY_QUOTA_LIMIT:
-    'Max quota consumed per calendar day (server local time). Set to 0 for unlimited',
+    'Max usage per day at list price, before group ratios. Set to 0 for unlimited',
   MONTHLY_QUOTA_LIMIT:
-    'Max quota consumed per calendar month (server local time). Set to 0 for unlimited',
+    'Max usage per month at list price, before group ratios. Set to 0 for unlimited',
+  QUOTA_RESET:
+    'The daily and monthly limits restart at this time in this time zone, for example when the upstream resets its own quota',
 } as const
 
 // ============================================================================

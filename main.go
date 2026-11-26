@@ -398,6 +398,9 @@ func InitResources() error {
 	if err != nil {
 		return err
 	}
+	// Without Redis the channel budget windows live in memory; load the
+	// saved ones so a restart does not reset them.
+	model.RestoreChannelQuotaWindows()
 
 	perfmetrics.Init()
 

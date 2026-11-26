@@ -3,7 +3,10 @@ package model
 import (
 	"errors"
 	"fmt"
-	"net/http"
+	"math"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -15,16 +18,18 @@ import (
 // limit take a pure in-memory fast path and never touch the counter store.
 //
 //   - RPM counts every upstream dispatch (one per retry attempt, mirroring the
-//     pressure actually put on the upstream) inside a fixed one-minute window.
-//   - TPM accumulates the settled prompt+completion tokens of consume-log
-//     records inside the same one-minute window; it is checked at channel
-//     selection because the request's token count is unknown up front.
-//   - Daily/monthly quota limits mirror the signed used_quota deltas recorded
-//     by UpdateChannelUsedQuota onto calendar windows (server local time), so
-//     refunds roll the window back within the same window; a refund landing
-//     after the day or month rolled over clamps at zero instead of loosening
-//     the new window, while the durable channels.used_quota column keeps the
-//     exact net total.
+//     pressure actually put on the upstream) over the last 60 seconds.
+//   - TPM sums the settled prompt+completion tokens of consume-log records
+//     over the last 60 seconds; it is checked at channel selection because
+//     the request's token count is unknown up front.
+//   - Daily/monthly quota limits are budgets at list price: every used_quota
+//     delta is divided by the group ratio it was charged at, so a group's
+//     markup or discount does not move how much of the upstream a channel
+//     may use. The windows start at the channel's reset time in its reset
+//     timezone (default midnight, server local time). Refunds and later
+//     settlements go back to the window of the original charge; a window
+//     never drops below zero, while the durable channels.used_quota column
+//     keeps the exact net total.
 
 // ErrChannelsOverLimit reports that a group/model had enabled candidate
 // channels but every one of them is currently over its RPM, TPM, or calendar
@@ -44,27 +49,124 @@ const (
 	channelTpmCounterPrefix = "chanTPM"
 	channelDayQuotaPrefix   = "chanQD"
 	channelMonthQuotaPrefix = "chanQM"
-	rpmTpmWindowTTL         = 2 * time.Minute
 	dailyQuotaWindowTTL     = 48 * time.Hour
 	monthlyQuotaWindowTTL   = 45 * 24 * time.Hour
 	dayWindowBucketLayout   = "20060102"
 	monthWindowBucketLayout = "200601"
 )
 
+// ChannelSpend describes how a used_quota delta was charged. GroupRatio is the
+// ratio applied to the request; the budget windows count quota / GroupRatio.
+// A ratio <= 0 (a free group, or a refund whose charge ratio was not kept)
+// leaves the budget unchanged: nothing can be derived from a zero charge, and
+// skipping an unknown refund only keeps the budget tighter. ChargedAt places
+// the delta in the window of the original charge; zero means now.
+type ChannelSpend struct {
+	GroupRatio float64
+	ChargedAt  time.Time
+}
+
+// ChannelSpendNow is the spend of a charge made right now at groupRatio.
+func ChannelSpendNow(groupRatio float64) ChannelSpend {
+	return ChannelSpend{GroupRatio: groupRatio, ChargedAt: time.Now()}
+}
+
 func channelRpmKey(channelId int) string {
-	return common.CounterKey(channelRpmCounterPrefix, channelId, common.CounterMinuteBucket())
+	return common.RollingCounterKey(channelRpmCounterPrefix, channelId)
 }
 
 func channelTpmKey(channelId int) string {
-	return common.CounterKey(channelTpmCounterPrefix, channelId, common.CounterMinuteBucket())
+	return common.RollingCounterKey(channelTpmCounterPrefix, channelId)
 }
 
-func channelDayQuotaKey(channelId int) string {
-	return common.CounterKey(channelDayQuotaPrefix, channelId, time.Now().Format(dayWindowBucketLayout))
+var quotaResetLocations sync.Map // IANA name -> *time.Location
+
+// ParseQuotaResetTimezone resolves a reset timezone; empty means server local
+// time. The value is used exactly as stored, so surrounding spaces are an
+// error rather than silently trimmed.
+func ParseQuotaResetTimezone(name string) (*time.Location, error) {
+	if name == "" {
+		return time.Local, nil
+	}
+	if cached, ok := quotaResetLocations.Load(name); ok {
+		return cached.(*time.Location), nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	quotaResetLocations.Store(name, loc)
+	return loc, nil
 }
 
-func channelMonthQuotaKey(channelId int) string {
-	return common.CounterKey(channelMonthQuotaPrefix, channelId, time.Now().Format(monthWindowBucketLayout))
+// ParseQuotaResetTime parses an "HH:MM" reset time into the offset from
+// midnight; empty means midnight.
+func ParseQuotaResetTime(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	hours, minutes, ok := strings.Cut(value, ":")
+	if !ok || len(hours) != 2 || len(minutes) != 2 || !allDigits(hours) || !allDigits(minutes) {
+		return 0, fmt.Errorf("reset time %q must look like HH:MM", value)
+	}
+	h, hErr := strconv.Atoi(hours)
+	m, mErr := strconv.Atoi(minutes)
+	if hErr != nil || mErr != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, fmt.Errorf("reset time %q must look like HH:MM", value)
+	}
+	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute, nil
+}
+
+func allDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateQuotaReset rejects a reset timezone or time the windows cannot use.
+func (channel *Channel) ValidateQuotaReset() error {
+	if _, err := ParseQuotaResetTimezone(channel.GetQuotaResetTimezone()); err != nil {
+		return fmt.Errorf("unknown quota reset timezone %q", channel.GetQuotaResetTimezone())
+	}
+	if _, err := ParseQuotaResetTime(channel.GetQuotaResetTime()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// channelQuotaWindowLabels returns the day and month labels of the budget
+// windows containing at. A window labelled D runs from D at the reset time to
+// the next day at the reset time, in the reset timezone; months likewise
+// start on the 1st at the reset time. A setting that no longer parses falls
+// back to midnight server time rather than dropping the charge.
+func channelQuotaWindowLabels(ch *Channel, at time.Time) (string, string) {
+	loc, err := ParseQuotaResetTimezone(ch.GetQuotaResetTimezone())
+	if err != nil {
+		loc = time.Local
+	}
+	offset, err := ParseQuotaResetTime(ch.GetQuotaResetTime())
+	if err != nil {
+		offset = 0
+	}
+	// Compare wall clocks, not elapsed time, so a daylight saving change
+	// never moves the reset away from its local HH:MM.
+	local := at.In(loc)
+	windowDay := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	resetToday := time.Date(local.Year(), local.Month(), local.Day(),
+		int(offset/time.Hour), int(offset%time.Hour/time.Minute), 0, 0, loc)
+	if local.Before(resetToday) {
+		windowDay = windowDay.AddDate(0, 0, -1)
+	}
+	return windowDay.Format(dayWindowBucketLayout), windowDay.Format(monthWindowBucketLayout)
+}
+
+func channelQuotaKeys(ch *Channel, at time.Time) (string, string) {
+	day, month := channelQuotaWindowLabels(ch, at)
+	return common.CounterKey(channelDayQuotaPrefix, ch.Id, day),
+		common.CounterKey(channelMonthQuotaPrefix, ch.Id, month)
 }
 
 // channelHasAnyLimit reports whether the channel has at least one limit
@@ -76,8 +178,7 @@ func channelHasAnyLimit(ch *Channel) bool {
 
 // channelWithinLimitValues reports whether the channel stays within every
 // configured limit given the current window counters. The comparison is
-// "counter >= limit": a window at or past its budget no longer admits, and
-// negative (refund-heavy) windows read as available headroom.
+// "counter >= limit": a window at or past its budget no longer admits.
 func channelWithinLimitValues(ch *Channel, rpm int64, tpm int64, dayQuota int64, monthQuota int64) bool {
 	if ch.GetRpmLimit() > 0 && rpm >= ch.GetRpmLimit() {
 		return false
@@ -100,27 +201,16 @@ func channelWithinLimitValues(ch *Channel, rpm int64, tpm int64, dayQuota int64,
 // ChannelRpmTryConsume, and a broken counter store must not silently shrink
 // the channel pool.
 func ChannelWithinLimits(ch *Channel) bool {
-	if ch == nil || !channelHasAnyLimit(ch) {
+	if ch == nil {
 		return true
 	}
-	values := common.CounterMGet([]string{
-		channelRpmKey(ch.Id),
-		channelTpmKey(ch.Id),
-		channelDayQuotaKey(ch.Id),
-		channelMonthQuotaKey(ch.Id),
-	})
-	return channelWithinLimitValues(ch,
-		values[channelRpmKey(ch.Id)],
-		values[channelTpmKey(ch.Id)],
-		values[channelDayQuotaKey(ch.Id)],
-		values[channelMonthQuotaKey(ch.Id)],
-	)
+	return ChannelWithinLimitsBatch([]*Channel{ch})[ch.Id]
 }
 
 // ChannelWithinLimitsBatch reports, keyed by channel id, whether each channel
 // stays within its limits. Channels without configured limits are always
-// allowed, and all counters are fetched in one round trip so candidate
-// filtering stays cheap while the channel cache lock is held.
+// allowed, and the counters are fetched in one round trip per store so
+// candidate filtering stays cheap while the channel cache lock is held.
 func ChannelWithinLimitsBatch(channels []*Channel) map[int]bool {
 	allowed := make(map[int]bool, len(channels))
 	limited := make([]*Channel, 0, len(channels))
@@ -136,72 +226,45 @@ func ChannelWithinLimitsBatch(channels []*Channel) map[int]bool {
 	if len(limited) == 0 {
 		return allowed
 	}
-	keys := make([]string, 0, len(limited)*4)
+	now := time.Now()
+	rollingKeys := make([]string, 0, len(limited)*2)
+	quotaKeys := make([]string, 0, len(limited)*2)
+	dayKeys := make(map[int]string, len(limited))
+	monthKeys := make(map[int]string, len(limited))
 	for _, ch := range limited {
-		keys = append(keys,
-			channelRpmKey(ch.Id),
-			channelTpmKey(ch.Id),
-			channelDayQuotaKey(ch.Id),
-			channelMonthQuotaKey(ch.Id),
-		)
+		rollingKeys = append(rollingKeys, channelRpmKey(ch.Id), channelTpmKey(ch.Id))
+		dayKey, monthKey := channelQuotaKeys(ch, now)
+		dayKeys[ch.Id], monthKeys[ch.Id] = dayKey, monthKey
+		quotaKeys = append(quotaKeys, dayKey, monthKey)
 	}
-	values := common.CounterMGet(keys)
+	rates := common.RollingCounterSums(rollingKeys)
+	quotas := common.CounterMGet(quotaKeys)
 	for _, ch := range limited {
 		allowed[ch.Id] = channelWithinLimitValues(ch,
-			values[channelRpmKey(ch.Id)],
-			values[channelTpmKey(ch.Id)],
-			values[channelDayQuotaKey(ch.Id)],
-			values[channelMonthQuotaKey(ch.Id)],
+			rates[channelRpmKey(ch.Id)],
+			rates[channelTpmKey(ch.Id)],
+			quotas[dayKeys[ch.Id]],
+			quotas[monthKeys[ch.Id]],
 		)
 	}
 	return allowed
 }
 
 // ChannelRpmTryConsume atomically admits one upstream dispatch against the
-// channel's RPM limit. It increments the current minute counter first and
-// rolls back when the increment pushed the window past its budget, so
-// concurrent attempts can never overshoot. Channels without an RPM limit and
-// counter store failures both pass: limiting degrades to the selection-side
-// filter instead of blocking relaying.
+// channel's RPM limit: it counts the dispatch only when the last 60 seconds
+// stay within the limit, so concurrent attempts can never overshoot.
+// Channels without an RPM limit and counter store failures both pass:
+// limiting degrades to the selection-side filter instead of blocking relaying.
 func ChannelRpmTryConsume(ch *Channel) bool {
 	if ch == nil || ch.GetRpmLimit() <= 0 {
 		return true
 	}
-	key := channelRpmKey(ch.Id)
-	value, err := common.CounterIncrBy(key, 1, rpmTpmWindowTTL)
+	admitted, err := common.RollingCounterTryAdd(channelRpmKey(ch.Id), 1, ch.GetRpmLimit())
 	if err != nil {
 		common.SysError(fmt.Sprintf("failed to consume channel rpm counter: channel_id=%d, error=%v", ch.Id, err))
 		return true
 	}
-	if value > ch.GetRpmLimit() {
-		if _, rollbackErr := common.CounterIncrBy(key, -1, rpmTpmWindowTTL); rollbackErr != nil {
-			common.SysError(fmt.Sprintf("failed to roll back channel rpm counter: channel_id=%d, error=%v", ch.Id, rollbackErr))
-		}
-		return false
-	}
-	return true
-}
-
-// ChannelRpmOverLimitError is the per-attempt error for a dispatch rejected by
-// the strict RPM admission check. It maps to HTTP 429 and is retryable on the
-// next channel.
-func ChannelRpmOverLimitError(ch *Channel) *types.NewAPIError {
-	return types.NewErrorWithStatusCode(
-		fmt.Errorf("channel #%d is over its rpm limit (%d requests per minute)", ch.Id, ch.GetRpmLimit()),
-		ChannelLimitExceededCode,
-		http.StatusTooManyRequests,
-	)
-}
-
-// ChannelLimitsExceededError is the eligibility error for a channel whose TPM
-// or calendar quota windows are exhausted. It shares the HTTP 429 status and
-// channel_limit_exceeded code with ChannelRpmOverLimitError.
-func ChannelLimitsExceededError(ch *Channel) *types.NewAPIError {
-	return types.NewErrorWithStatusCode(
-		fmt.Errorf("channel #%d is over its configured rate or quota limits", ch.Id),
-		ChannelLimitExceededCode,
-		http.StatusTooManyRequests,
-	)
+	return admitted
 }
 
 // RecordChannelTokenUsage adds settled token usage to the channel's TPM
@@ -212,24 +275,57 @@ func RecordChannelTokenUsage(channelId int, tokens int64) {
 	if channelId <= 0 || tokens <= 0 {
 		return
 	}
-	if _, err := common.CounterIncrBy(channelTpmKey(channelId), tokens, rpmTpmWindowTTL); err != nil {
+	if err := common.RollingCounterAdd(channelTpmKey(channelId), tokens); err != nil {
 		common.SysError(fmt.Sprintf("failed to record channel tpm counter: channel_id=%d, tokens=%d, error=%v", channelId, tokens, err))
 	}
 }
 
-// RecordChannelQuotaUsage mirrors a signed used_quota delta onto the channel's
-// calendar day and month windows in one atomic step, so a partial write
-// failure cannot leave the day and month windows inconsistent. Negative
-// deltas (refunds and task rollbacks) clamp at zero: a refund whose charge
-// window already rolled over must not loosen the new window's budget.
-func RecordChannelQuotaUsage(channelId int, quota int64) {
+// channelListPriceQuota converts a charged quota delta back to list price.
+func channelListPriceQuota(quota int64, groupRatio float64) int64 {
+	if groupRatio <= 0 || math.IsNaN(groupRatio) || math.IsInf(groupRatio, 0) {
+		return 0
+	}
+	return int64(math.Round(float64(quota) / groupRatio))
+}
+
+// RecordChannelSpend mirrors a signed used_quota delta, at list price, onto
+// the day and month budget windows that contain spend.ChargedAt, in one atomic
+// step so the two windows cannot drift apart after a partial write failure.
+// Negative deltas clamp at zero inside each window. Only channels with a daily
+// or monthly limit keep windows, so a budget counts usage from the moment it
+// is set; without Redis the windows are also saved to the database so a
+// restart does not reset them (see ChannelQuotaWindow).
+func RecordChannelSpend(channelId int, quota int64, spend ChannelSpend) {
 	if channelId <= 0 || quota == 0 {
 		return
 	}
-	if err := common.CounterQuotaMIncrBy([]common.CounterDelta{
-		{Key: channelDayQuotaKey(channelId), Delta: quota, TTL: dailyQuotaWindowTTL},
-		{Key: channelMonthQuotaKey(channelId), Delta: quota, TTL: monthlyQuotaWindowTTL},
-	}); err != nil {
-		common.SysError(fmt.Sprintf("failed to record channel quota counters: channel_id=%d, quota=%d, error=%v", channelId, quota, err))
+	listQuota := channelListPriceQuota(quota, spend.GroupRatio)
+	if listQuota == 0 {
+		return
+	}
+	ch, err := CacheGetChannel(channelId)
+	if err != nil || ch == nil {
+		// The channel is gone, so no budget can be enforced for it any more.
+		return
+	}
+	if ch.GetDailyQuotaLimit() <= 0 && ch.GetMonthlyQuotaLimit() <= 0 {
+		return
+	}
+	chargedAt := spend.ChargedAt
+	if chargedAt.IsZero() {
+		chargedAt = time.Now()
+	}
+	dayKey, monthKey := channelQuotaKeys(ch, chargedAt)
+	deltas := []common.CounterDelta{
+		{Key: dayKey, Delta: listQuota, TTL: dailyQuotaWindowTTL},
+		{Key: monthKey, Delta: listQuota, TTL: monthlyQuotaWindowTTL},
+	}
+	if err := common.CounterQuotaMIncrBy(deltas); err != nil {
+		common.SysError(fmt.Sprintf("failed to record channel quota counters: channel_id=%d, quota=%d, error=%v", channelId, listQuota, err))
+	}
+	if !common.RedisEnabled {
+		if err := persistChannelQuotaDeltas(deltas); err != nil {
+			common.SysError(fmt.Sprintf("failed to save channel quota windows: channel_id=%d, quota=%d, error=%v", channelId, listQuota, err))
+		}
 	}
 }

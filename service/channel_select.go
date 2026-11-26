@@ -333,6 +333,9 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
 		if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+			if kind == dto.FilterChannelLimits {
+				return nil, "", channelOverLimitRejection(c, modelName, channel)
+			}
 			return nil, "", &ChannelSelectError{
 				StatusCode: http.StatusBadRequest, Code: types.ErrorCode(kind), MessageID: i18n.MsgDistributorNoAvailableChannel,
 				Params:     map[string]any{"Group": common.GetContextKeyString(c, constant.ContextKeyUsingGroup), "Model": modelName},
@@ -391,11 +394,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 				if usingGroup == "auto" {
 					showGroup = fmt.Sprintf("auto(%s)", selectGroup)
 				}
-				return nil, selectGroup, &ChannelSelectError{
-					StatusCode: http.StatusTooManyRequests, Code: model.ChannelLimitExceededCode,
-					MessageID: i18n.MsgDistributorChannelsOverLimit,
-					Params:    map[string]any{"Group": showGroup, "Model": modelName},
-				}
+				return nil, selectGroup, ChannelsOverLimitSelectError(showGroup, modelName)
 			}
 			showGroup := usingGroup
 			if usingGroup == "auto" {
@@ -414,6 +413,9 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		}
 	}
 	if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+		if kind == dto.FilterChannelLimits {
+			return nil, selectGroup, channelOverLimitRejection(c, modelName, channel)
+		}
 		return nil, selectGroup, &ChannelSelectError{
 			StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound, MessageID: i18n.MsgDistributorNoAvailableChannel,
 			Params:     map[string]any{"Group": common.GetContextKeyString(c, constant.ContextKeyUsingGroup), "Model": modelName},
@@ -430,6 +432,17 @@ func pinnedChannelUnavailable(pin dto.ChannelPin, statusCode int, messageID stri
 		return &ChannelSelectError{StatusCode: http.StatusBadRequest, Code: "origin_task_channel_disabled", Message: "origin_task_channel_disabled"}
 	}
 	return &ChannelSelectError{StatusCode: statusCode, MessageID: messageID}
+}
+
+// channelOverLimitRejection is the selection error for a pinned or freshly
+// selected channel that its own limits now rule out: 429
+// channel_limit_exceeded like every other over-limit answer, not "no
+// available channel".
+func channelOverLimitRejection(c *gin.Context, modelName string, channel *model.Channel) *ChannelSelectError {
+	rejection := ChannelsOverLimitSelectError(common.GetContextKeyString(c, constant.ContextKeyUsingGroup), modelName)
+	rejection.FilterKind = dto.FilterChannelLimits
+	rejection.Channel = channel
+	return rejection
 }
 
 // AppendUsedChannel records an attempted channel in the request's channel

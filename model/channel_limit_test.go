@@ -37,15 +37,26 @@ func channelLimitTestId(base int64) int {
 func seedChannelLimitCounters(t *testing.T, channelId int, rpm int64, tpm int64, dayQuota int64, monthQuota int64) {
 	t.Helper()
 	require.False(t, common.RedisEnabled, "channel limit tests must run against the in-memory counter store")
-	for key, value := range map[string]int64{
-		channelRpmKey(channelId):        rpm,
-		channelTpmKey(channelId):        tpm,
-		channelDayQuotaKey(channelId):   dayQuota,
-		channelMonthQuotaKey(channelId): monthQuota,
-	} {
-		_, err := common.CounterIncrBy(key, value, time.Hour)
-		require.NoError(t, err)
-	}
+	require.NoError(t, common.RollingCounterAdd(channelRpmKey(channelId), rpm))
+	require.NoError(t, common.RollingCounterAdd(channelTpmKey(channelId), tpm))
+	dayKey, monthKey := channelQuotaKeys(&Channel{Id: channelId}, time.Now())
+	require.NoError(t, common.CounterQuotaMIncrBy([]common.CounterDelta{
+		{Key: dayKey, Delta: dayQuota, TTL: time.Hour},
+		{Key: monthKey, Delta: monthQuota, TTL: time.Hour},
+	}))
+}
+
+// rollingSum reads one rolling counter through the production read path.
+func rollingSum(key string) int64 {
+	return common.RollingCounterSums([]string{key})[key]
+}
+
+// channelQuotaWindowValues reads the channel's current day and month budget
+// windows through the production read path.
+func channelQuotaWindowValues(ch *Channel, at time.Time) (int64, int64) {
+	dayKey, monthKey := channelQuotaKeys(ch, at)
+	values := common.CounterMGet([]string{dayKey, monthKey})
+	return values[dayKey], values[monthKey]
 }
 
 func TestChannelWithinLimitValues(t *testing.T) {
@@ -146,12 +157,12 @@ func TestChannelRpmTryConsumeStrictAdmissionAndRollback(t *testing.T) {
 	assert.True(t, ChannelRpmTryConsume(ch))
 	assert.True(t, ChannelRpmTryConsume(ch))
 	assert.False(t, ChannelRpmTryConsume(ch), "the third dispatch within one minute must be rejected")
-	assert.Equal(t, int64(2), common.CounterGet(channelRpmKey(ch.Id)),
-		"the rejected attempt must roll its increment back so the window is not self-saturating")
+	assert.Equal(t, int64(2), rollingSum(channelRpmKey(ch.Id)),
+		"the rejected attempt must not be counted, so the window is not self-saturating")
 
 	unlimited := &Channel{Id: channelLimitTestId(950100)}
 	assert.True(t, ChannelRpmTryConsume(unlimited))
-	assert.Equal(t, int64(0), common.CounterGet(channelRpmKey(unlimited.Id)),
+	assert.Equal(t, int64(0), rollingSum(channelRpmKey(unlimited.Id)),
 		"channels without a limit must not consume the counter")
 }
 
@@ -171,12 +182,12 @@ func TestRecordChannelTokenUsageAccumulatesTpmWindow(t *testing.T) {
 	channelId := channelLimitTestId(950300)
 	RecordChannelTokenUsage(channelId, 120)
 	RecordChannelTokenUsage(channelId, 80)
-	assert.Equal(t, int64(200), common.CounterGet(channelTpmKey(channelId)))
+	assert.Equal(t, int64(200), rollingSum(channelTpmKey(channelId)))
 
 	RecordChannelTokenUsage(channelId, 0)
 	RecordChannelTokenUsage(channelId, -5)
 	RecordChannelTokenUsage(0, 10)
-	assert.Equal(t, int64(200), common.CounterGet(channelTpmKey(channelId)),
+	assert.Equal(t, int64(200), rollingSum(channelTpmKey(channelId)),
 		"non-positive token counts and missing channels must not change the window")
 }
 
@@ -184,37 +195,199 @@ func TestUpdateChannelUsedQuotaMirrorsQuotaWindows(t *testing.T) {
 	truncateTables(t)
 	channel := Channel{
 		Id: channelLimitTestId(950400), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
-		Name: "quota-mirror", Models: "mirror-model", Group: "default", Key: "test-key",
+		DailyQuotaLimit: int64PtrForLimitTest(1 << 40),
+		Name:            "quota-mirror", Models: "mirror-model", Group: "default", Key: "test-key",
 	}
 	require.NoError(t, channel.Insert())
 
-	UpdateChannelUsedQuota(channel.Id, 500)
-	UpdateChannelUsedQuota(channel.Id, -200)
+	UpdateChannelUsedQuota(channel.Id, 500, ChannelSpendNow(1))
+	UpdateChannelUsedQuota(channel.Id, -200, ChannelSpendNow(1))
 
-	assert.Equal(t, int64(300), common.CounterGet(channelDayQuotaKey(channel.Id)))
-	assert.Equal(t, int64(300), common.CounterGet(channelMonthQuotaKey(channel.Id)))
+	day, month := channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(300), day)
+	assert.Equal(t, int64(300), month)
 
 	updated, err := GetChannelById(channel.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, int64(300), updated.UsedQuota, "the lifetime column keeps its own net total")
 
-	// A refund larger than the current window (for example a task charged on a
-	// previous day and refunded after the day rolled over) clamps the windows
-	// at zero instead of loosening the new window's budget; the durable column
-	// keeps the exact net total.
-	UpdateChannelUsedQuota(channel.Id, -400)
-	assert.Equal(t, int64(0), common.CounterGet(channelDayQuotaKey(channel.Id)),
-		"an over-refund clamps the day window at zero")
-	assert.Equal(t, int64(0), common.CounterGet(channelMonthQuotaKey(channel.Id)),
-		"an over-refund clamps the month window at zero")
+	// A refund larger than what the window holds clamps the windows at zero
+	// instead of loosening the budget; the durable column keeps the exact net.
+	UpdateChannelUsedQuota(channel.Id, -400, ChannelSpendNow(1))
+	day, month = channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(0), day, "an over-refund clamps the day window at zero")
+	assert.Equal(t, int64(0), month, "an over-refund clamps the month window at zero")
 
 	updated, err = GetChannelById(channel.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, int64(-100), updated.UsedQuota, "the lifetime column keeps its own net total")
 
-	UpdateChannelUsedQuota(channel.Id, 0)
-	assert.Equal(t, int64(0), common.CounterGet(channelDayQuotaKey(channel.Id)),
-		"zero deltas record nothing")
+	UpdateChannelUsedQuota(channel.Id, 0, ChannelSpendNow(1))
+	day, _ = channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(0), day, "zero deltas record nothing")
+}
+
+func TestChannelBudgetCountsListPriceNotGroupPrice(t *testing.T) {
+	truncateTables(t)
+	channel := Channel{
+		Id: channelLimitTestId(950700), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
+		DailyQuotaLimit: int64PtrForLimitTest(1 << 40),
+		Name:            "list-price", Models: "list-model", Group: "default", Key: "test-key",
+	}
+	require.NoError(t, channel.Insert())
+
+	// A group charged at 3.5x pays 3500 quota for 1000 quota of list price;
+	// a group discounted to 0.5x pays 500 for the same 1000.
+	UpdateChannelUsedQuota(channel.Id, 3500, ChannelSpendNow(3.5))
+	UpdateChannelUsedQuota(channel.Id, 500, ChannelSpendNow(0.5))
+	day, month := channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(2000), day, "the budget counts list price, whatever the group paid")
+	assert.Equal(t, int64(2000), month)
+
+	// A free group (ratio 0) and a refund whose charge ratio is unknown leave
+	// the budget as it is.
+	UpdateChannelUsedQuota(channel.Id, 700, ChannelSpendNow(0))
+	UpdateChannelUsedQuota(channel.Id, -700, ChannelSpend{})
+	day, _ = channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(2000), day)
+
+	updated, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4000), updated.UsedQuota, "used_quota still records what customers were charged")
+}
+
+func TestChannelBudgetRefundReturnsToTheChargeWindow(t *testing.T) {
+	truncateTables(t)
+	channel := Channel{
+		Id: channelLimitTestId(950800), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
+		DailyQuotaLimit: int64PtrForLimitTest(1 << 40),
+		Name:            "charge-window", Models: "window-model", Group: "default", Key: "test-key",
+	}
+	require.NoError(t, channel.Insert())
+
+	yesterday := time.Now().Add(-24 * time.Hour)
+	UpdateChannelUsedQuota(channel.Id, 600, ChannelSpend{GroupRatio: 2, ChargedAt: yesterday})
+	UpdateChannelUsedQuota(channel.Id, 400, ChannelSpendNow(2))
+
+	// The task charged yesterday is refunded today: yesterday's window gives
+	// the quota back, today's budget is untouched.
+	UpdateChannelUsedQuota(channel.Id, -600, ChannelSpend{GroupRatio: 2, ChargedAt: yesterday})
+	yesterdayDay, _ := channelQuotaWindowValues(&channel, yesterday)
+	today, _ := channelQuotaWindowValues(&channel, time.Now())
+	assert.Equal(t, int64(0), yesterdayDay)
+	assert.Equal(t, int64(200), today, "a late refund must not reopen today's budget")
+}
+
+func TestChannelBudgetWindowsSurviveARestart(t *testing.T) {
+	truncateTables(t)
+	limited := Channel{
+		Id: channelLimitTestId(951000), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
+		MonthlyQuotaLimit: int64PtrForLimitTest(1 << 40),
+		Name:              "durable", Models: "durable-model", Group: "default", Key: "test-key",
+	}
+	unlimited := Channel{
+		Id: channelLimitTestId(951000), Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
+		Name: "no-budget", Models: "durable-model", Group: "default", Key: "test-key",
+	}
+	require.NoError(t, limited.Insert())
+	require.NoError(t, unlimited.Insert())
+
+	UpdateChannelUsedQuota(limited.Id, 900, ChannelSpendNow(3))
+	UpdateChannelUsedQuota(limited.Id, -1200, ChannelSpendNow(3)) // clamps at zero
+	UpdateChannelUsedQuota(limited.Id, 600, ChannelSpendNow(3))
+	UpdateChannelUsedQuota(unlimited.Id, 900, ChannelSpendNow(1))
+
+	dayKey, monthKey := channelQuotaKeys(&limited, time.Now())
+	var saved []ChannelQuotaWindow
+	require.NoError(t, DB.Order("counter_key").Find(&saved).Error)
+	require.Len(t, saved, 2, "only the channel with a budget keeps windows: %+v", saved)
+	for _, row := range saved {
+		assert.Contains(t, []string{dayKey, monthKey}, row.CounterKey)
+		assert.Equal(t, int64(200), row.Quota, "the saved window clamps at zero like the live one")
+		assert.Greater(t, row.ExpiresAt, time.Now().Unix())
+	}
+	_, unlimitedMonth := channelQuotaWindowValues(&unlimited, time.Now())
+	assert.Zero(t, unlimitedMonth, "a channel without a budget keeps no window")
+
+	// A restart starts with an empty memory store: simulate it by loading
+	// stale values, then restore the saved windows over them.
+	common.RestoreMemoryCounters([]common.CounterRestore{
+		{Key: dayKey, Value: 0, ExpiresAt: time.Now().Add(time.Hour)},
+		{Key: monthKey, Value: 0, ExpiresAt: time.Now().Add(time.Hour)},
+	})
+	expired := ChannelQuotaWindow{CounterKey: "chanQD:1:19990101", Quota: 5, ExpiresAt: time.Now().Add(-time.Hour).Unix()}
+	require.NoError(t, DB.Create(&expired).Error)
+
+	RestoreChannelQuotaWindows()
+	day, month := channelQuotaWindowValues(&limited, time.Now())
+	assert.Equal(t, int64(200), day, "the day window comes back after a restart")
+	assert.Equal(t, int64(200), month, "the month window comes back after a restart")
+	var left int64
+	require.NoError(t, DB.Model(&ChannelQuotaWindow{}).Where("counter_key = ?", expired.CounterKey).Count(&left).Error)
+	assert.Zero(t, left, "expired windows are deleted at startup")
+}
+
+func TestChannelQuotaWindowsFollowResetTimeAndTimezone(t *testing.T) {
+	losAngeles, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	ch := &Channel{
+		Id:             950900,
+		QuotaResetZone: common.GetPointer("America/Los_Angeles"),
+		QuotaResetTime: common.GetPointer("09:30"),
+	}
+	cases := []struct {
+		at    time.Time
+		day   string
+		month string
+	}{
+		{time.Date(2026, 3, 1, 9, 29, 0, 0, losAngeles), "20260228", "202602"},
+		{time.Date(2026, 3, 1, 9, 30, 0, 0, losAngeles), "20260301", "202603"},
+		// Daylight saving starts on 2026-03-08 in Los Angeles; the reset
+		// stays at 09:30 local time.
+		{time.Date(2026, 3, 8, 10, 0, 0, 0, losAngeles), "20260308", "202603"},
+		{time.Date(2026, 3, 9, 9, 29, 0, 0, losAngeles), "20260308", "202603"},
+		{time.Date(2026, 3, 9, 9, 30, 0, 0, losAngeles), "20260309", "202603"},
+		// The same instant seen from another zone falls in the same window.
+		{time.Date(2026, 3, 2, 1, 0, 0, 0, time.UTC), "20260301", "202603"},
+	}
+	for _, c := range cases {
+		day, month := channelQuotaWindowLabels(ch, c.at)
+		assert.Equal(t, c.day, day, c.at.String())
+		assert.Equal(t, c.month, month, c.at.String())
+	}
+
+	defaults := &Channel{Id: 950901}
+	localNoon := time.Date(2026, 5, 31, 12, 0, 0, 0, time.Local)
+	day, month := channelQuotaWindowLabels(defaults, localNoon)
+	assert.Equal(t, "20260531", day, "without settings the windows are server-local calendar days")
+	assert.Equal(t, "202605", month)
+}
+
+func TestValidateQuotaReset(t *testing.T) {
+	valid := []*Channel{
+		{},
+		{QuotaResetZone: common.GetPointer("UTC"), QuotaResetTime: common.GetPointer("00:00")},
+		{QuotaResetZone: common.GetPointer("Asia/Shanghai"), QuotaResetTime: common.GetPointer("23:59")},
+	}
+	for _, ch := range valid {
+		assert.NoError(t, ch.ValidateQuotaReset())
+	}
+	invalid := []*Channel{
+		{QuotaResetZone: common.GetPointer("Mars/Olympus")},
+		{QuotaResetTime: common.GetPointer("24:00")},
+		{QuotaResetTime: common.GetPointer("9:30")},
+		{QuotaResetTime: common.GetPointer("09:60")},
+		{QuotaResetTime: common.GetPointer("0930")},
+		// Stored values are used as is, so padding is refused rather than
+		// trimmed (a padded time would not even fit the varchar(5) column).
+		{QuotaResetTime: common.GetPointer(" 09:00")},
+		{QuotaResetTime: common.GetPointer("+1:00")},
+		{QuotaResetTime: common.GetPointer("-0:30")},
+		{QuotaResetZone: common.GetPointer(" UTC")},
+	}
+	for _, ch := range invalid {
+		assert.Error(t, ch.ValidateQuotaReset())
+	}
 }
 
 func TestFilterCandidateIDsDropsOverLimitChannels(t *testing.T) {
@@ -361,7 +534,7 @@ func testChannelLimitColumnsMigration(t *testing.T, db *gorm.DB, recorder *migra
 	for _, columnType := range columnTypes {
 		channelColumns[strings.ToLower(columnType.Name())] = true
 	}
-	for _, column := range []string{"rpm_limit", "tpm_limit", "daily_quota_limit", "monthly_quota_limit"} {
+	for _, column := range []string{"rpm_limit", "tpm_limit", "daily_quota_limit", "monthly_quota_limit", "quota_reset_timezone", "quota_reset_time"} {
 		assert.True(t, channelColumns[column], "the upgraded channels table must gain %s", column)
 	}
 
@@ -419,6 +592,59 @@ func TestChannelAndTokenLimitColumnsMigrationConfiguredDatabases(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = sqlDB.Close() })
 			testChannelLimitColumnsMigration(t, db, recorder)
+		})
+	}
+}
+
+// The budget window upsert uses dialect-sensitive SQL (ON CONFLICT / ON
+// DUPLICATE KEY with a table-qualified CASE), so it is checked on every
+// configured database, not only on SQLite.
+func TestChannelQuotaWindowUpsertConfiguredDatabases(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       string
+		dialector func(string) gorm.Dialector
+	}{
+		{name: "mysql", env: "TEST_MYSQL_DSN", dialector: func(dsn string) gorm.Dialector { return mysql.Open(dsn) }},
+		{name: "postgres", env: "TEST_POSTGRES_DSN", dialector: func(dsn string) gorm.Dialector {
+			return postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dsn := strings.TrimSpace(os.Getenv(test.env))
+			if dsn == "" {
+				t.Skip(test.env + " is not configured")
+			}
+			db, err := gorm.Open(test.dialector(dsn), &gorm.Config{})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			require.NoError(t, db.Migrator().DropTable(&ChannelQuotaWindow{}))
+			require.NoError(t, db.AutoMigrate(&ChannelQuotaWindow{}))
+			previous := DB
+			DB = db
+			t.Cleanup(func() {
+				DB = previous
+				_ = db.Migrator().DropTable(&ChannelQuotaWindow{})
+				_ = sqlDB.Close()
+			})
+
+			key := "chanQM:1:202611"
+			require.NoError(t, persistChannelQuotaDeltas([]common.CounterDelta{{Key: key, Delta: 300, TTL: time.Hour}}))
+			require.NoError(t, persistChannelQuotaDeltas([]common.CounterDelta{{Key: key, Delta: 200, TTL: time.Hour}}))
+			require.NoError(t, persistChannelQuotaDeltas([]common.CounterDelta{{Key: key, Delta: -800, TTL: time.Hour}}))
+			require.NoError(t, persistChannelQuotaDeltas([]common.CounterDelta{{Key: key, Delta: 50, TTL: time.Hour}}))
+			fresh := "chanQD:1:20261126"
+			require.NoError(t, persistChannelQuotaDeltas([]common.CounterDelta{{Key: fresh, Delta: -40, TTL: time.Hour}}))
+
+			var rows []ChannelQuotaWindow
+			require.NoError(t, db.Order("counter_key").Find(&rows).Error)
+			require.Len(t, rows, 2)
+			assert.Equal(t, fresh, rows[0].CounterKey)
+			assert.Equal(t, int64(0), rows[0].Quota, "a refund on an empty window saves zero")
+			assert.Equal(t, key, rows[1].CounterKey)
+			assert.Equal(t, int64(50), rows[1].Quota, "500 - 800 clamps at zero, then + 50")
 		})
 	}
 }

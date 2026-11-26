@@ -591,6 +591,9 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		channel.GetDailyQuotaLimit() < 0 || channel.GetMonthlyQuotaLimit() < 0 {
 		return fmt.Errorf("channel rate and quota limits must not be negative")
 	}
+	if err := channel.ValidateQuotaReset(); err != nil {
+		return err
+	}
 	if channel.Type == constant.ChannelTypeTaskPlugin {
 		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
 		if pluginKey == "" {

@@ -10,14 +10,14 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-// Fixed-window counters shared by token RPM limits and channel rate/quota
-// limits. Every counter key embeds its own window bucket (epoch minute,
-// calendar day, or calendar month), so a window resets by rolling to the next
-// bucket and stale keys expire on their own. Redis is the authoritative store
-// for multi-node deployments; the in-memory fallback keeps single-node
-// deployments working. Single-key increments may go negative (rollback
-// deltas); quota-window batches clamp refunds at zero so a window never reads
-// below its real usage, while callers compare with >= limit.
+// Calendar-window counters for the channel daily/monthly quota limits. Every
+// key embeds its window label (for example the day or month it covers), so a
+// window resets by rolling to the next label and stale keys expire on their
+// own. Redis is the authoritative store for multi-node deployments; the
+// in-memory fallback keeps single-node deployments working. Quota batches
+// clamp refunds at zero so a window never reads below its real usage, while
+// callers compare with >= limit. Per-minute limits use the rolling counters
+// in rolling_counter.go instead.
 
 const windowCounterJanitorInterval = 10 * time.Minute
 
@@ -34,28 +34,10 @@ type windowCounterStore struct {
 var windowCounters = &windowCounterStore{entries: map[string]windowCounterEntry{}}
 var windowCounterJanitorOnce sync.Once
 
-// CounterKey builds a fixed-window counter key from a prefix, an entity id,
-// and the current window bucket label (for example the epoch minute).
+// CounterKey builds a calendar-window counter key from a prefix, an entity id,
+// and the window label.
 func CounterKey(prefix string, id int, bucket string) string {
 	return fmt.Sprintf("%s:%d:%s", prefix, id, bucket)
-}
-
-// CounterMinuteBucket returns the current epoch-minute bucket label. All
-// timezones share the same minute boundary, so RPM/TPM windows roll over
-// simultaneously on every node.
-func CounterMinuteBucket() string {
-	return strconv.FormatInt(time.Now().Unix()/60, 10)
-}
-
-// CounterIncrBy adds delta to the fixed-window counter named key and returns
-// the new value. ttl must cover at least the window length so the bucket stays
-// readable while it is current. When Redis is unavailable the in-memory store
-// takes over so a counter outage never blocks billing or selection paths.
-func CounterIncrBy(key string, delta int64, ttl time.Duration) (int64, error) {
-	if RedisEnabled && RDB != nil {
-		return redisCounterIncrBy(key, delta, ttl)
-	}
-	return memoryCounterIncrBy(key, delta, ttl), nil
 }
 
 // CounterDelta pairs a counter key with the signed delta to apply and the
@@ -140,6 +122,30 @@ func memoryCounterQuotaMIncrBy(deltas []CounterDelta) {
 	}
 }
 
+// CounterRestore is one saved calendar-window value to load back into the
+// in-memory store.
+type CounterRestore struct {
+	Key       string
+	Value     int64
+	ExpiresAt time.Time
+}
+
+// RestoreMemoryCounters loads saved window values into the in-memory store,
+// replacing what it holds for those keys. Expired values are skipped. It is
+// only meaningful without Redis, which keeps the windows itself.
+func RestoreMemoryCounters(values []CounterRestore) {
+	startWindowCounterJanitor()
+	now := time.Now()
+	windowCounters.mutex.Lock()
+	defer windowCounters.mutex.Unlock()
+	for _, value := range values {
+		if !value.ExpiresAt.After(now) {
+			continue
+		}
+		windowCounters.entries[value.Key] = windowCounterEntry{value: value.Value, expiresAt: value.ExpiresAt}
+	}
+}
+
 // CounterGet returns the current value of one counter, or 0 when unset or
 // expired. Read failures fail open (value 0) after logging.
 func CounterGet(key string) int64 {
@@ -164,19 +170,6 @@ func CounterMGet(keys []string) map[string]int64 {
 	return memoryCounterMGet(keys)
 }
 
-func redisCounterIncrBy(key string, delta int64, ttl time.Duration) (int64, error) {
-	ctx := context.Background()
-	txn := RDB.TxPipeline()
-	incrCmd := txn.IncrBy(ctx, key, delta)
-	if ttl > 0 {
-		txn.Expire(ctx, key, ttl)
-	}
-	if _, err := txn.Exec(ctx); err != nil {
-		return 0, err
-	}
-	return incrCmd.Val(), nil
-}
-
 func redisCounterMGet(keys []string) (map[string]int64, error) {
 	ctx := context.Background()
 	raw, err := RDB.MGet(ctx, keys...).Result()
@@ -195,20 +188,6 @@ func redisCounterMGet(keys []string) (map[string]int64, error) {
 		}
 	}
 	return values, nil
-}
-
-func memoryCounterIncrBy(key string, delta int64, ttl time.Duration) int64 {
-	startWindowCounterJanitor()
-	now := time.Now()
-	windowCounters.mutex.Lock()
-	defer windowCounters.mutex.Unlock()
-	entry, ok := windowCounters.entries[key]
-	if !ok || now.After(entry.expiresAt) {
-		entry = windowCounterEntry{expiresAt: now.Add(ttl)}
-	}
-	entry.value += delta
-	windowCounters.entries[key] = entry
-	return entry.value
 }
 
 func memoryCounterMGet(keys []string) map[string]int64 {

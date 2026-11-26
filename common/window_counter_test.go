@@ -40,6 +40,12 @@ func useWindowCounterMiniRedis(t *testing.T) *miniredis.Miniredis {
 	return redisServer
 }
 
+// addWindowCounter applies one signed delta through the production batch path.
+func addWindowCounter(t *testing.T, key string, delta int64, ttl time.Duration) {
+	t.Helper()
+	require.NoError(t, CounterQuotaMIncrBy([]CounterDelta{{Key: key, Delta: delta, TTL: ttl}}))
+}
+
 func useWindowCounterMemoryStore(t *testing.T) {
 	t.Helper()
 	previousRedisEnabled := RedisEnabled
@@ -52,16 +58,12 @@ func useWindowCounterMemoryStore(t *testing.T) {
 	})
 }
 
-func TestWindowCounterIncrByAndGetMemoryStore(t *testing.T) {
+func TestWindowCounterGetMemoryStore(t *testing.T) {
 	useWindowCounterMemoryStore(t)
 
 	key := CounterKey("testWindowCounter", 1, windowCounterTestBucket("run"))
-	value, err := CounterIncrBy(key, 3, time.Hour)
-	require.NoError(t, err)
-	assert.Equal(t, int64(3), value)
-	value, err = CounterIncrBy(key, -1, time.Hour)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), value)
+	addWindowCounter(t, key, 3, time.Hour)
+	addWindowCounter(t, key, -1, time.Hour)
 	assert.Equal(t, int64(2), CounterGet(key))
 	assert.Equal(t, int64(0), CounterGet(CounterKey("testWindowCounter", 2, windowCounterTestBucket("unset"))), "unset counters read as zero")
 	assert.Equal(t, int64(0), CounterGet(CounterKey("testWindowCounter", 1, windowCounterTestBucket("other"))), "window buckets are independent counters")
@@ -105,8 +107,7 @@ func TestWindowCounterMemoryStoreExpiresEntries(t *testing.T) {
 	useWindowCounterMemoryStore(t)
 
 	key := CounterKey("testWindowCounterExpiry", 3, windowCounterTestBucket("run"))
-	_, err := CounterIncrBy(key, 5, time.Hour)
-	require.NoError(t, err)
+	addWindowCounter(t, key, 5, time.Hour)
 
 	windowCounters.mutex.Lock()
 	entry := windowCounters.entries[key]
@@ -115,9 +116,8 @@ func TestWindowCounterMemoryStoreExpiresEntries(t *testing.T) {
 	windowCounters.mutex.Unlock()
 
 	assert.Equal(t, int64(0), CounterGet(key), "expired buckets must read as zero")
-	value, err := CounterIncrBy(key, 2, time.Hour)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), value, "an increment after expiry restarts the bucket")
+	addWindowCounter(t, key, 2, time.Hour)
+	assert.Equal(t, int64(2), CounterGet(key), "an increment after expiry restarts the bucket")
 }
 
 func TestWindowCounterMGetBatchesKeys(t *testing.T) {
@@ -126,10 +126,8 @@ func TestWindowCounterMGetBatchesKeys(t *testing.T) {
 	first := CounterKey("testWindowCounterBatch", 1, windowCounterTestBucket("first"))
 	second := CounterKey("testWindowCounterBatch", 2, windowCounterTestBucket("second"))
 	missing := CounterKey("testWindowCounterBatch", 3, windowCounterTestBucket("missing"))
-	_, err := CounterIncrBy(first, 1, time.Hour)
-	require.NoError(t, err)
-	_, err = CounterIncrBy(second, 7, time.Hour)
-	require.NoError(t, err)
+	addWindowCounter(t, first, 1, time.Hour)
+	addWindowCounter(t, second, 7, time.Hour)
 
 	values := CounterMGet([]string{first, second, missing})
 	assert.Equal(t, int64(1), values[first])
@@ -142,9 +140,8 @@ func TestWindowCounterRedisBackendSetsTTLAndReadsBack(t *testing.T) {
 	redisServer := useWindowCounterMiniRedis(t)
 
 	key := CounterKey("testWindowCounterRedis", 7, "bucket-1")
-	value, err := CounterIncrBy(key, 4, 2*time.Minute)
-	require.NoError(t, err)
-	assert.Equal(t, int64(4), value)
+	addWindowCounter(t, key, 4, 2*time.Minute)
+	assert.Equal(t, int64(4), CounterGet(key))
 	assert.True(t, redisServer.TTL(key) > 0, "the first increment must arm the bucket TTL")
 
 	values := CounterMGet([]string{key, CounterKey("testWindowCounterRedis", 8, "bucket-1")})
@@ -152,10 +149,8 @@ func TestWindowCounterRedisBackendSetsTTLAndReadsBack(t *testing.T) {
 	_, ok := values[CounterKey("testWindowCounterRedis", 8, "bucket-1")]
 	assert.False(t, ok, "unset keys are absent and callers read them as zero")
 
-	value, err = CounterIncrBy(key, -2, 2*time.Minute)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), value, "refund deltas flow through the Redis counter unchanged")
-	assert.Equal(t, int64(2), CounterGet(key))
+	addWindowCounter(t, key, -2, 2*time.Minute)
+	assert.Equal(t, int64(2), CounterGet(key), "refund deltas flow through the Redis counter")
 }
 
 func TestWindowCounterQuotaMIncrByRedisClampsRefundsAtZero(t *testing.T) {

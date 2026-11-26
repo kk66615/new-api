@@ -92,6 +92,8 @@ const CONFIGURATION_BLOCKS = {
       'tpm_limit',
       'daily_quota_dollars',
       'monthly_quota_dollars',
+      'quota_reset_timezone',
+      'quota_reset_time',
     ],
   },
   extraSettings: {
@@ -205,7 +207,9 @@ export function getChannelConfigurationState(
       values.rpm_limit ||
       values.tpm_limit ||
       values.daily_quota_dollars ||
-      values.monthly_quota_dollars
+      values.monthly_quota_dollars ||
+      values.quota_reset_timezone ||
+      values.quota_reset_time
     ),
     extraSettings: Boolean(
       values.proxy?.trim() ||

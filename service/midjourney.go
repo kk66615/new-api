@@ -115,7 +115,9 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 
 	billingChannelId := task.GetBillingChannelId()
 	model.UpdateUserUsedQuota(task.UserId, -quota)
-	model.UpdateChannelUsedQuota(billingChannelId, -quota)
+	// Legacy Midjourney tasks keep no group ratio, so the channel budget is
+	// left as charged (see model.ChannelSpend).
+	model.UpdateChannelUsedQuota(billingChannelId, -quota, model.ChannelSpend{})
 	other := model.NewLogOther()
 	other.SetPublic("task_id", task.MjId)
 	other.SetPublic("reason", reason)

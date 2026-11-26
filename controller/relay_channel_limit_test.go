@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	relay "github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -31,12 +33,18 @@ func relayRpmTestId() int {
 	return int(960700 + relayRpmTestIdSeq.Add(1))
 }
 
-// TestGetChannelMovesToNextCandidateAfterRpmRejection covers the retry
-// behavior after the strict RPM admission rejects the distributor-selected
-// channel: the rejected channel lands in the use_channel trail, so the next
-// getChannel iteration must enter candidate selection and return another
-// channel instead of rebuilding the same over-limit distributor channel.
-func TestGetChannelMovesToNextCandidateAfterRpmRejection(t *testing.T) {
+// channelLimitTestChannel describes one channel of a limit test fixture.
+type channelLimitTestChannel struct {
+	id       int
+	priority int64
+	rpm      int64
+}
+
+// useChannelLimitTestDB swaps in an in-memory database and memory channel
+// cache holding the given channels for modelName in group "default".
+func useChannelLimitTestDB(t *testing.T, modelName string, channels []channelLimitTestChannel) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
 	originalDB := model.DB
 	originalMemoryCacheEnabled := common.MemoryCacheEnabled
 	originalGroupRatios := ratio_setting.GroupRatio2JSONString()
@@ -62,47 +70,35 @@ func TestGetChannelMovesToNextCandidateAfterRpmRejection(t *testing.T) {
 		}
 	})
 
-	const modelName = "rpm-rejection-model"
-	distributorId := relayRpmTestId()
-	fallbackId := relayRpmTestId()
-	rpm := int64(1)
-	highPriority := int64(0)
-	lowPriority := int64(-1)
 	weight := uint(100)
-	require.NoError(t, db.Create(&model.Channel{
-		Id: distributorId, Type: constant.ChannelTypeOpenAI, Key: "sk-a",
-		Status: common.ChannelStatusEnabled, Name: "rpm-limited",
-		Weight: &weight, Models: modelName, Group: "default",
-		Priority: &highPriority, RpmLimit: &rpm,
-	}).Error)
-	require.NoError(t, db.Create(&model.Channel{
-		Id: fallbackId, Type: constant.ChannelTypeOpenAI, Key: "sk-b",
-		Status: common.ChannelStatusEnabled, Name: "fallback",
-		Weight: &weight, Models: modelName, Group: "default",
-		Priority: &lowPriority,
-	}).Error)
-	for _, id := range []int{distributorId, fallbackId} {
-		priority := highPriority
-		if id == fallbackId {
-			priority = lowPriority
+	for _, ch := range channels {
+		priority, rpm := ch.priority, ch.rpm
+		row := &model.Channel{
+			Id: ch.id, Type: constant.ChannelTypeOpenAI, Key: fmt.Sprintf("sk-%d", ch.id),
+			Status: common.ChannelStatusEnabled, Name: fmt.Sprintf("limit-test-%d", ch.id),
+			Weight: &weight, Models: modelName, Group: "default", Priority: &priority,
 		}
+		if rpm > 0 {
+			row.RpmLimit = &rpm
+		}
+		require.NoError(t, db.Create(row).Error)
 		require.NoError(t, db.Create(&model.Ability{
-			Group: "default", Model: modelName, ChannelId: id,
+			Group: "default", Model: modelName, ChannelId: ch.id,
 			Enabled: true, Priority: &priority, Weight: weight,
 		}).Error)
 	}
 	model.InitChannelCache()
+}
 
-	// Saturate the distributor channel's RPM window through the exported
-	// dispatch admission so the first attempt is rejected (limit 1).
-	require.True(t, model.ChannelRpmTryConsume(&model.Channel{Id: distributorId, RpmLimit: &rpm}))
-
+// channelLimitTestRequest builds a relay request context as the distributor
+// leaves it after choosing distributorId.
+func channelLimitTestRequest(modelName string, distributorId int) (*gin.Context, *relaycommon.RelayInfo, *service.RetryParam) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	common.SetContextKey(c, constant.ContextKeyChannelId, distributorId)
 	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
-	common.SetContextKey(c, constant.ContextKeyChannelName, "rpm-limited")
+	common.SetContextKey(c, constant.ContextKeyChannelName, fmt.Sprintf("limit-test-%d", distributorId))
 	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
 	c.Set("auto_ban", false)
@@ -120,23 +116,109 @@ func TestGetChannelMovesToNextCandidateAfterRpmRejection(t *testing.T) {
 		RequestPath: "/v1/chat/completions",
 		Retry:       common.GetPointer(0),
 	}
+	return c, info, retryParam
+}
 
+// TestRpmRejectionMovesToTheSameTierWithoutUsingARetry covers the relay loop
+// after the strict RPM admission refuses the distributor-selected channel:
+// the request moves on to the other channel of the same priority tier (not
+// the lower tier), and the retry counter is not advanced.
+func TestRpmRejectionMovesToTheSameTierWithoutUsingARetry(t *testing.T) {
+	const modelName = "rpm-rejection-model"
+	distributorId, sameTierId, lowerTierId := relayRpmTestId(), relayRpmTestId(), relayRpmTestId()
+	useChannelLimitTestDB(t, modelName, []channelLimitTestChannel{
+		{id: distributorId, priority: 0, rpm: 1},
+		{id: sameTierId, priority: 0},
+		{id: lowerTierId, priority: -1},
+	})
+	rpm := int64(1)
+	// Saturate the distributor channel's window (limit 1).
+	require.True(t, model.ChannelRpmTryConsume(&model.Channel{Id: distributorId, RpmLimit: &rpm}))
+
+	c, info, retryParam := channelLimitTestRequest(modelName, distributorId)
 	first, firstErr := getChannel(c, info, retryParam)
 	require.Nil(t, firstErr)
-	require.NotNil(t, first)
-	assert.Equal(t, distributorId, first.Id, "the first attempt reuses the distributor-selected channel")
+	require.Equal(t, distributorId, first.Id, "the first attempt reuses the distributor-selected channel")
+	require.False(t, model.ChannelRpmTryConsume(first), "the saturated channel must refuse the dispatch")
 
-	assert.False(t, model.ChannelRpmTryConsume(first), "the saturated channel must reject the dispatch")
-	// What the fixed relay loop does on an RPM-rejected attempt.
-	service.AppendUsedChannel(c, first.Id)
+	// What the relay loop does with the refusal, then its post statement.
+	rejection := service.ChannelAtCapacityError(c)
+	require.True(t, service.SkipChannelAtCapacity(c, first.Id, rejection, retryParam))
 	retryParam.IncreaseRetry()
+	assert.Equal(t, 0, retryParam.GetRetry(), "a capacity refusal must not use up a retry")
 
 	second, secondErr := getChannel(c, info, retryParam)
 	require.Nil(t, secondErr)
-	require.NotNil(t, second)
-	assert.Equal(t, fallbackId, second.Id,
-		"after an RPM rejection the next iteration must select another candidate channel")
+	assert.Equal(t, sameTierId, second.Id, "the next candidate comes from the same priority tier")
 	assert.Equal(t, []string{fmt.Sprintf("%d", distributorId)}, c.GetStringSlice("use_channel"))
+
+	assert.Equal(t, http.StatusTooManyRequests, rejection.StatusCode)
+	assert.Equal(t, model.ChannelLimitExceededCode, rejection.GetErrorCode())
+	assert.NotContains(t, rejection.Error(), fmt.Sprintf("%d", distributorId), "the client-facing message must not name the channel")
+}
+
+// TestRpmRejectionIgnoresTheRetryBudget: with retries disabled a channel at
+// its limit still hands the request on, because the refusal never reached an
+// upstream.
+func TestRpmRejectionIgnoresTheRetryBudget(t *testing.T) {
+	originalRetryTimes := common.RetryTimes
+	common.RetryTimes = 0
+	t.Cleanup(func() { common.RetryTimes = originalRetryTimes })
+
+	c, _, retryParam := channelLimitTestRequest("budget-model", relayRpmTestId())
+	assert.True(t, service.SkipChannelAtCapacity(c, 1, service.ChannelAtCapacityError(c), retryParam))
+}
+
+// TestRpmRejectionStaysOnAPinnedChannel: a pinned request stops with the
+// refusal instead of leaking to another channel.
+func TestRpmRejectionStaysOnAPinnedChannel(t *testing.T) {
+	c, _, retryParam := channelLimitTestRequest("pinned-model", relayRpmTestId())
+	service.GetChannelConstraints(c).AddPin(taskdto.ChannelPin{ChannelId: 7, Source: taskdto.PinSourceToken, RetryMode: taskdto.PinRetrySingleAttempt})
+	assert.False(t, service.SkipChannelAtCapacity(c, 7, service.ChannelAtCapacityError(c), retryParam))
+	assert.Empty(t, c.GetStringSlice("use_channel"))
+}
+
+// TestGetChannelAnswers429WhenEveryCandidateIsAtItsLimit: when the retry
+// selection finds only channels at their limits, the request ends with 429
+// channel_limit_exceeded like the distributor's answer, not 500.
+func TestGetChannelAnswers429WhenEveryCandidateIsAtItsLimit(t *testing.T) {
+	const modelName = "all-full-model"
+	firstId, secondId := relayRpmTestId(), relayRpmTestId()
+	useChannelLimitTestDB(t, modelName, []channelLimitTestChannel{
+		{id: firstId, priority: 0, rpm: 1},
+		{id: secondId, priority: 0, rpm: 1},
+	})
+	rpm := int64(1)
+	for _, id := range []int{firstId, secondId} {
+		require.True(t, model.ChannelRpmTryConsume(&model.Channel{Id: id, RpmLimit: &rpm}))
+	}
+
+	c, info, retryParam := channelLimitTestRequest(modelName, firstId)
+	service.AppendUsedChannel(c, firstId)
+	channel, channelErr := getChannel(c, info, retryParam)
+	assert.Nil(t, channel)
+	require.NotNil(t, channelErr)
+	assert.Equal(t, http.StatusTooManyRequests, channelErr.StatusCode)
+	assert.Equal(t, model.ChannelLimitExceededCode, channelErr.GetErrorCode())
+}
+
+// TestPinnedChannelOverItsLimitAnswers429: a request pinned to a channel that
+// its own limits rule out gets 429 channel_limit_exceeded, not 400 "no
+// available channel".
+func TestPinnedChannelOverItsLimitAnswers429(t *testing.T) {
+	const modelName = "pinned-full-model"
+	pinnedId := relayRpmTestId()
+	useChannelLimitTestDB(t, modelName, []channelLimitTestChannel{{id: pinnedId, priority: 0, rpm: 1}})
+	rpm := int64(1)
+	require.True(t, model.ChannelRpmTryConsume(&model.Channel{Id: pinnedId, RpmLimit: &rpm}))
+
+	c, _, retryParam := channelLimitTestRequest(modelName, pinnedId)
+	service.GetChannelConstraints(c).AddPin(taskdto.ChannelPin{ChannelId: pinnedId, Source: taskdto.PinSourceToken})
+	channel, _, selectErr := service.SelectChannelForRequest(c, modelName, retryParam)
+	assert.Nil(t, channel)
+	require.NotNil(t, selectErr)
+	assert.Equal(t, http.StatusTooManyRequests, selectErr.StatusCode)
+	assert.Equal(t, model.ChannelLimitExceededCode, selectErr.Code)
 }
 
 // TestExecuteTaskSubmissionStopsOnLockedChannelRpmRejection pins the

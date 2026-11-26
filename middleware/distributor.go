@@ -39,6 +39,9 @@ func Distribute() func(c *gin.Context) {
 				service.RecordRequestPolicyTermination(c, types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, c.Writer.Status(), types.ErrOptionWithSkipRetry()))
 			}
 		}()
+		// Token RPM counts every request routed here, task status queries
+		// included: some of them (Midjourney image-seed, Gemini/Vertex video
+		// fetch) call the task's channel upstream.
 		enforceTokenRateLimit(c)
 		if c.IsAborted() {
 			return

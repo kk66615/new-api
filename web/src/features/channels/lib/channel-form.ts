@@ -205,6 +205,9 @@ function addRequiredIssue(
   })
 }
 
+// An empty reset time means midnight.
+const QUOTA_RESET_TIME_PATTERN = /^$|^([01]\d|2[0-3]):[0-5]\d$/
+
 // A positive quota that converts to zero quota units (for example a
 // fractional dollar value under the tokens display mode) would be saved as
 // unlimited; reject it so the entered limit always reaches the backend.
@@ -252,6 +255,15 @@ export const channelFormSchema = z
       .number()
       .min(0)
       .superRefine(rejectQuotaBelowOneUnit)
+      .optional(),
+    // Where the daily/monthly quota windows start; empty means server local
+    // time and midnight.
+    quota_reset_timezone: z.string().optional(),
+    quota_reset_time: z
+      .string()
+      .regex(QUOTA_RESET_TIME_PATTERN, {
+        message: 'Use HH:MM, for example 09:00',
+      })
       .optional(),
     status: z.number(),
     status_code_mapping: z
@@ -486,6 +498,8 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   tpm_limit: 0,
   daily_quota_dollars: 0,
   monthly_quota_dollars: 0,
+  quota_reset_timezone: '',
+  quota_reset_time: '',
   status: CHANNEL_STATUS.ENABLED,
   status_code_mapping: '',
   tag: '',
@@ -679,6 +693,8 @@ export function transformChannelToFormDefaults(
     monthly_quota_dollars: channel.monthly_quota_limit
       ? quotaUnitsToDollars(channel.monthly_quota_limit)
       : 0,
+    quota_reset_timezone: channel.quota_reset_timezone ?? '',
+    quota_reset_time: channel.quota_reset_time ?? '',
     test_model: channel.test_model || '',
     auto_ban: channel.auto_ban ?? 1,
     status: channel.status,
@@ -972,12 +988,12 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     auto_ban: formData.auto_ban ?? 1,
     rpm_limit: formData.rpm_limit ?? 0,
     tpm_limit: formData.tpm_limit ?? 0,
-    daily_quota_limit: parseQuotaFromDollars(
-      formData.daily_quota_dollars || 0
-    ),
+    daily_quota_limit: parseQuotaFromDollars(formData.daily_quota_dollars || 0),
     monthly_quota_limit: parseQuotaFromDollars(
       formData.monthly_quota_dollars || 0
     ),
+    quota_reset_timezone: formData.quota_reset_timezone ?? '',
+    quota_reset_time: formData.quota_reset_time ?? '',
     status: formData.status,
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
@@ -1028,12 +1044,12 @@ export function transformFormDataToUpdatePayload(
     auto_ban: formData.auto_ban ?? 1,
     rpm_limit: formData.rpm_limit ?? 0,
     tpm_limit: formData.tpm_limit ?? 0,
-    daily_quota_limit: parseQuotaFromDollars(
-      formData.daily_quota_dollars || 0
-    ),
+    daily_quota_limit: parseQuotaFromDollars(formData.daily_quota_dollars || 0),
     monthly_quota_limit: parseQuotaFromDollars(
       formData.monthly_quota_dollars || 0
     ),
+    quota_reset_timezone: formData.quota_reset_timezone ?? '',
+    quota_reset_time: formData.quota_reset_time ?? '',
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
     remark: formData.remark || '',
@@ -1066,6 +1082,8 @@ export function transformFormDataToUpdatePayload(
   payload.status_code_mapping = formData.status_code_mapping || ''
   payload.param_override = formData.param_override || ''
   payload.header_override = formData.header_override || ''
+  payload.quota_reset_timezone = formData.quota_reset_timezone || ''
+  payload.quota_reset_time = formData.quota_reset_time || ''
 
   return payload
 }

@@ -96,8 +96,7 @@ describe('channel rate and quota limit form mapping', () => {
       monthly_quota_dollars: quotaUnitsToDollars(7500000),
     }
 
-    const createChannel = transformFormDataToCreatePayload(defaults)
-      .channel
+    const createChannel = transformFormDataToCreatePayload(defaults).channel
     expect(createChannel.rpm_limit).toBe(12)
     expect(createChannel.tpm_limit).toBe(3400)
     expect(createChannel.daily_quota_limit).toBe(
@@ -181,5 +180,61 @@ describe('channel rate and quota limit form mapping', () => {
       false
     )
     expect(quotaOnly.blocks.rateAndQuotaLimits).toBe('configured')
+  })
+
+  test('round-trips the quota reset time zone and time', () => {
+    const stored = channelSchema.parse({
+      ...limitedChannel,
+      quota_reset_timezone: 'America/Los_Angeles',
+      quota_reset_time: '09:30',
+    })
+    const defaults = transformChannelToFormDefaults(stored)
+    expect(defaults.quota_reset_timezone).toBe('America/Los_Angeles')
+    expect(defaults.quota_reset_time).toBe('09:30')
+
+    const create = transformFormDataToCreatePayload(defaults).channel
+    expect(create.quota_reset_timezone).toBe('America/Los_Angeles')
+    expect(create.quota_reset_time).toBe('09:30')
+
+    // Clearing both sends explicit empty strings so the stored values are
+    // lifted back to server time and midnight.
+    const update = transformFormDataToUpdatePayload(
+      { ...defaults, quota_reset_timezone: '', quota_reset_time: '' },
+      42
+    )
+    expect(update.quota_reset_timezone).toBe('')
+    expect(update.quota_reset_time).toBe('')
+
+    const legacy = transformChannelToFormDefaults(limitedChannel)
+    expect(legacy.quota_reset_timezone).toBe('')
+    expect(legacy.quota_reset_time).toBe('')
+  })
+
+  test('accepts HH:MM reset times only', () => {
+    for (const value of ['', '00:00', '09:30', '23:59']) {
+      const result = channelFormSchema.safeParse({
+        ...baseValues,
+        models: 'custom-model',
+        quota_reset_time: value,
+      })
+      expect(result.success, value).toBe(true)
+    }
+    for (const value of ['24:00', '9:30', '09:60', '0930']) {
+      const result = channelFormSchema.safeParse({
+        ...baseValues,
+        models: 'custom-model',
+        quota_reset_time: value,
+      })
+      expect(result.success, value).toBe(false)
+    }
+  })
+
+  test('a reset setting alone marks the limits block configured', () => {
+    const configured = getChannelConfigurationState(
+      { ...baseValues, quota_reset_timezone: 'UTC' },
+      {},
+      false
+    )
+    expect(configured.blocks.rateAndQuotaLimits).toBe('configured')
   })
 })

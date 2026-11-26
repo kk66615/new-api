@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -331,13 +332,45 @@ func TestTokenRateLimitEnforcesPerKeyRpmWindow(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, limited.Code)
 	assert.Contains(t, limited.Body.String(), "2", "the 429 body names the configured limit")
 
-	key := common.CounterKey(tokenRpmCounterPrefix, 77, common.CounterMinuteBucket())
-	count, err := redisServer.Get(key)
-	require.NoError(t, err)
-	assert.Equal(t, "2", count, "the rejected attempt must roll its increment back so the window is not self-saturating")
+	key := common.RollingCounterKey(tokenRpmCounterPrefix, 77)
+	assert.True(t, redisServer.Exists(key), "the token window lives in the shared Redis store")
+	assert.Equal(t, int64(2), common.RollingCounterSums([]string{key})[key],
+		"the rejected attempt must not be counted, so the window is not self-saturating")
 
 	// Requests without a token (session-authenticated playground) or without
 	// a configured limit pass untouched.
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/unlimited", "192.0.2.72:12345").Code)
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/session", "192.0.2.73:12345").Code)
+}
+
+// Token RPM counts every request routed through the distributor: remix
+// submissions, which reach their channel later through the origin task, and
+// task queries, some of which call the task's channel (Midjourney image-seed,
+// Gemini/Vertex video fetch).
+func TestDistributeCountsRemixAndTaskQueriesAgainstTokenRpm(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	useRateLimitMiniRedis(t)
+	require.NoError(t, i18n.Init())
+
+	for i, path := range []string{"/v1/videos/video-1/remix", "/mj/task/task-1/image-seed", "/v1/videos/video-1", "/mj/task/task-1/fetch"} {
+		method := http.MethodGet
+		if strings.HasSuffix(path, "/remix") {
+			method = http.MethodPost
+		}
+		router := gin.New()
+		tokenID := 80 + i
+		router.Use(func(c *gin.Context) {
+			c.Set("token_id", tokenID)
+			common.SetContextKey(c, constant.ContextKeyTokenRpmLimit, 2)
+		}, Distribute())
+		router.Any("/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+		codes := make([]int, 0, 3)
+		for range 3 {
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(method, path, nil))
+			codes = append(codes, recorder.Code)
+		}
+		assert.Equal(t, []int{http.StatusNoContent, http.StatusNoContent, http.StatusTooManyRequests}, codes, path)
+	}
 }

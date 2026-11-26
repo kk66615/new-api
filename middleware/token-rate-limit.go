@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -12,18 +11,16 @@ import (
 )
 
 // Token RPM limiting (issue #7070): tokens.rpm_limit caps how many relay
-// requests one API key may send per minute. The counter lives in a fixed
-// one-minute window shared by all nodes when Redis is enabled. It is consumed
-// at admission — like the user-level ModelRequestRateLimit "total" counter,
-// failed requests count too — while read-only endpoints that never route
-// through this middleware (model listing, dashboard, token usage queries) stay
-// uncounted. Rejected requests roll their increment back so a client hammering
-// the limit does not keep the window saturated.
+// requests one API key may send in any 60 seconds. The rolling counter is
+// shared by all nodes when Redis is enabled. It is consumed at admission —
+// like the user-level ModelRequestRateLimit "total" counter, failed requests
+// count too — while read-only endpoints that never route through this
+// middleware (model listing, dashboard, token usage queries) stay uncounted.
+// Task status queries are counted: some of them call the task's channel.
+// A rejected request is not counted, so a client hammering the limit does not
+// keep the window saturated.
 
-const (
-	tokenRpmCounterPrefix = "tokenRPM"
-	tokenRpmWindowTTL     = 2 * time.Minute
-)
+const tokenRpmCounterPrefix = "tokenRPM"
 
 // TokenRateLimit enforces the per-token RPM limit. Requests without a token
 // (session-authenticated playground) or with limit 0 pass through untouched.
@@ -33,8 +30,8 @@ func TokenRateLimit() gin.HandlerFunc {
 	}
 }
 
-// enforceTokenRateLimit consumes one request from the token's current minute
-// bucket and aborts with 429 when the limit is exceeded.
+// enforceTokenRateLimit counts one request against the token's rolling
+// minute and aborts with 429 when the limit is exceeded.
 func enforceTokenRateLimit(c *gin.Context) {
 	tokenId := c.GetInt("token_id")
 	if tokenId <= 0 {
@@ -44,16 +41,13 @@ func enforceTokenRateLimit(c *gin.Context) {
 	if limit <= 0 {
 		return
 	}
-	key := common.CounterKey(tokenRpmCounterPrefix, tokenId, common.CounterMinuteBucket())
-	value, err := common.CounterIncrBy(key, 1, tokenRpmWindowTTL)
+	key := common.RollingCounterKey(tokenRpmCounterPrefix, tokenId)
+	admitted, err := common.RollingCounterTryAdd(key, 1, limit)
 	if err != nil {
 		common.SysError("token rate limiter counter failure: " + err.Error())
 		return
 	}
-	if value > limit {
-		if _, rollbackErr := common.CounterIncrBy(key, -1, tokenRpmWindowTTL); rollbackErr != nil {
-			common.SysError("failed to roll back token rpm counter: " + rollbackErr.Error())
-		}
+	if !admitted {
 		abortWithOpenAiMessage(c, http.StatusTooManyRequests,
 			i18n.T(c, i18n.MsgTokenRpmLimitReached, map[string]any{"Limit": limit}))
 	}

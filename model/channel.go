@@ -50,13 +50,18 @@ type Channel struct {
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
 	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
 	// Channel-level rate and quota limits. Zero or nil means unlimited.
-	// RPM counts every upstream dispatch (including retries), TPM counts
-	// settled prompt+completion tokens per minute, and the quota limits cap
-	// the channel's used-quota growth per calendar day/month (server local time).
+	// RPM counts every upstream dispatch (including retries) and TPM the
+	// settled prompt+completion tokens, both over the last 60 seconds; the
+	// quota limits cap list-price usage (before group ratios) per day/month
+	// window. The windows start at QuotaResetTime ("HH:MM", empty = 00:00)
+	// in QuotaResetZone (IANA name, empty = server local time), so a budget
+	// can follow the upstream's own reset moment. See model/channel_limit.go.
 	RpmLimit          *int64  `json:"rpm_limit" gorm:"bigint;default:0"`
 	TpmLimit          *int64  `json:"tpm_limit" gorm:"bigint;default:0"`
 	DailyQuotaLimit   *int64  `json:"daily_quota_limit" gorm:"bigint;default:0"`
 	MonthlyQuotaLimit *int64  `json:"monthly_quota_limit" gorm:"bigint;default:0"`
+	QuotaResetZone    *string `json:"quota_reset_timezone" gorm:"column:quota_reset_timezone;type:varchar(64);default:''"`
+	QuotaResetTime    *string `json:"quota_reset_time" gorm:"type:varchar(5);default:''"`
 	OtherInfo         string  `json:"other_info"`
 	Tag               *string `json:"tag" gorm:"index"`
 	Setting           *string `json:"setting" gorm:"type:text"` // 渠道额外设置
@@ -620,6 +625,24 @@ func (channel *Channel) GetMonthlyQuotaLimit() int64 {
 	return *channel.MonthlyQuotaLimit
 }
 
+// GetQuotaResetTimezone returns the IANA timezone of the quota windows; empty
+// means server local time.
+func (channel *Channel) GetQuotaResetTimezone() string {
+	if channel.QuotaResetZone == nil {
+		return ""
+	}
+	return *channel.QuotaResetZone
+}
+
+// GetQuotaResetTime returns the "HH:MM" start of the quota windows; empty
+// means midnight.
+func (channel *Channel) GetQuotaResetTime() string {
+	if channel.QuotaResetTime == nil {
+		return ""
+	}
+	return *channel.QuotaResetTime
+}
+
 func (channel *Channel) GetBaseURL() string {
 	if channel.BaseURL == nil {
 		return ""
@@ -1109,10 +1132,14 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 	return nil
 }
 
-func UpdateChannelUsedQuota(id int, quota int) {
-	// Mirror the signed used_quota delta onto the channel's calendar quota
-	// windows before the batch branch so both write paths count exactly once.
-	RecordChannelQuotaUsage(id, int64(quota))
+// UpdateChannelUsedQuota adds the signed quota delta to the channel's
+// used_quota and mirrors it onto the channel's daily/monthly budget windows.
+// spend says how the delta was charged: the budget counts it at list price
+// (without the group ratio) in the window of the original charge.
+func UpdateChannelUsedQuota(id int, quota int, spend ChannelSpend) {
+	// Mirror onto the budget windows before the batch branch so both write
+	// paths count exactly once.
+	RecordChannelSpend(id, int64(quota), spend)
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeChannelUsedQuota, id, quota)
 		return

@@ -115,8 +115,8 @@ func TestUsageAccountingSupportsSignedDirectAndBatchDeltas(t *testing.T) {
 
 	UpdateUserUsedQuota(user.Id, -200)
 	UpdateUserUsedQuota(user.Id, 50)
-	UpdateChannelUsedQuota(channel.Id, -200)
-	UpdateChannelUsedQuota(channel.Id, 50)
+	UpdateChannelUsedQuota(channel.Id, -200, ChannelSpendNow(1))
+	UpdateChannelUsedQuota(channel.Id, 50, ChannelSpendNow(1))
 
 	var got User
 	require.NoError(t, DB.Select("used_quota", "request_count").First(&got, user.Id).Error)
@@ -129,8 +129,8 @@ func TestUsageAccountingSupportsSignedDirectAndBatchDeltas(t *testing.T) {
 	common.BatchUpdateEnabled = true
 	UpdateUserUsedQuota(user.Id, 400)
 	UpdateUserUsedQuota(user.Id, -100)
-	UpdateChannelUsedQuota(channel.Id, 400)
-	UpdateChannelUsedQuota(channel.Id, -100)
+	UpdateChannelUsedQuota(channel.Id, 400, ChannelSpendNow(1))
+	UpdateChannelUsedQuota(channel.Id, -100, ChannelSpendNow(1))
 
 	require.NoError(t, DB.Select("used_quota", "request_count").First(&got, user.Id).Error)
 	assert.Equal(t, 850, got.UsedQuota, "batch deltas must remain queued until flush")

@@ -38,10 +38,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import type { RequestPluginInstance } from '@/features/task-plugins/types'
 import { api } from '@/lib/api'
-import {
-  parseQuotaFromDollars,
-  quotaUnitsToDollars,
-} from '@/lib/format'
+import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
@@ -3834,5 +3831,4 @@ test('clearing every channel limit unmarks the Request & Response tab and sends 
   expect(payload.tpm_limit).toBe(0)
   expect(payload.daily_quota_limit).toBe(0)
   expect(payload.monthly_quota_limit).toBe(0)
-
 })
