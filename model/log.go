@@ -344,6 +344,9 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	// Request plugin report hooks read what the request settled, whether or
 	// not consume logs are kept.
 	common.SetContextKey(c, constant.ContextKeyConsumeLog, &params)
+	// Channel TPM limiting counts settled token usage even when consume
+	// logging is disabled, so this runs before the LogConsumeEnabled check.
+	RecordChannelTokenUsage(params.ChannelId, int64(params.PromptTokens)+int64(params.CompletionTokens))
 	if !common.LogConsumeEnabled {
 		return
 	}
