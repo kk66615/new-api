@@ -2615,7 +2615,7 @@ export function ChannelMutateDrawer({
                   }
                 >
                   <FormControl>
-                    <SelectTrigger>
+                    <SelectTrigger className='w-full'>
                       <SelectValue />
                     </SelectTrigger>
                   </FormControl>
@@ -2641,7 +2641,9 @@ export function ChannelMutateDrawer({
             control={form.control}
             name='quota_reset_time'
             render={({ field }) => (
-              <FormItem>
+              // No description below, so keep the label and input at the
+              // top of the row instead of spreading them over its height.
+              <FormItem className='content-start'>
                 <FormLabel>{t('Quota reset time')}</FormLabel>
                 <FormControl>
                   <Input
